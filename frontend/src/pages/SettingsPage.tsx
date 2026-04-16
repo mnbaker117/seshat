@@ -208,8 +208,6 @@ export default function SettingsPage() {
   const mamCreds = creds.filter(c => ["mam_session_id", "mam_irc_password"].includes(c.key));
   const qbitCreds = creds.filter(c => c.key === "qbit_password");
   const apiCreds = creds.filter(c => c.key === "hardcover_api_key");
-  const asCreds = creds.filter(c => c.key === "athenascout_api_key");
-
   return (
     <div style={{ paddingBottom: 40 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
@@ -385,7 +383,6 @@ export default function SettingsPage() {
 
       <SSection title="API Keys & Sink" desc="External services">
         {apiCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Bearer token from hardcover.app → Account → API. Enables richer series, ratings, and tag data." />)}
-        {asCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} canGenerate desc="Shared token that authorizes AthenaScout's 'Send to Seshat' POSTs. Click Generate to create a new token, copy the visible value, then paste it into AthenaScout → Settings → Library → Seshat API Key before clicking Save here." />)}
         <SF label="Default Sink" desc="Where approved books are delivered after review.">
           <select value={(s.default_sink as string) || "cwa"} onChange={e => upd("default_sink", e.target.value)}
             style={{ ...ist, width: 260, cursor: "pointer", appearance: "auto" }}>

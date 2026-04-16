@@ -158,25 +158,64 @@ _migration_status: Dict[str, Any] = {
 }
 
 
-# ─── AthenaScout API key cache ───────────────────────────────
-# In-memory mirror of the encrypted athenascout_api_key secret.
-# Populated at startup and on every credential update so the auth
-# middleware can compare without an async DB hit per request. None
-# when the key isn't configured — middleware then rejects requests
-# that present X-API-Key.
-athenascout_api_key: Optional[str] = None
+# ─── Discovery domain state (from AthenaScout) ─────────────
 
+# Library discovery cache — populated in lifespan startup.
+_discovered_libraries: list[dict] = []
 
-async def refresh_athenascout_api_key() -> None:
-    """Reload `state.athenascout_api_key` from the encrypted store.
+# Updated after every successful library sync.
+_last_library_sync_check: Dict[str, Any] = {"at": None, "synced": False}
 
-    Called at startup and whenever the key is set/deleted through the
-    credentials router so the middleware sees the new value on the
-    next request.
-    """
-    global athenascout_api_key  # noqa: PLW0603
-    from app.secrets import get_secret
-    athenascout_api_key = await get_secret("athenascout_api_key")
+# True while any library sync is running. Pipeline tasks check this
+# flag before grabbing the DB write lock so they yield cleanly.
+_library_sync_in_progress: bool = False
+
+# Per-book progress for the active library sync.
+_library_sync_progress: Dict[str, Any] = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "current_book": "",
+    "books_new": 0,
+    "books_updated": 0,
+    "status": "idle",
+    "type": "none",
+}
+
+# Author lookup scan state.
+_lookup_task: Optional[asyncio.Task] = None
+_lookup_progress: Dict[str, Any] = {
+    "running": False,
+    "checked": 0,
+    "total": 0,
+    "current_author": "",
+    "current_book": "",
+    "new_books": 0,
+    "status": "idle",
+    "type": "none",
+}
+
+# Source-scan pressure counter — MAM yields while this is > 0.
+_source_scan_refs: int = 0
+
+# Cancel flag for scheduled MAM scans (discovery-side).
+_scheduled_mam_cancel_requested: bool = False
+
+# Discovery-side MAM scan state (searching for missing books).
+_mam_scan_task: Optional[asyncio.Task] = None
+_mam_scan_progress: Dict[str, Any] = {
+    "running": False,
+    "scanned": 0,
+    "total": 0,
+    "found": 0,
+    "possible": 0,
+    "not_found": 0,
+    "errors": 0,
+    "current_book": "",
+    "status": "idle",
+    "type": "none",
+}
+_mam_full_scan_task: Optional[asyncio.Task] = None
 
 
 # ─── Dispatcher singleton ────────────────────────────────────

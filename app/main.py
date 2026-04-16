@@ -408,10 +408,6 @@ async def lifespan(app: FastAPI):
     # Resolve secrets from the encrypted store for the dispatcher.
     resolved_secrets = await _resolve_secrets()
 
-    # Prime the AthenaScout API key cache so the middleware can match
-    # X-API-Key headers without an async DB hit per request.
-    await state.refresh_athenascout_api_key()
-
     # Seed the MAM cookie from the secret store (preferred) or settings.
     mam_cookie = resolved_secrets.get("mam_session_id") or settings.get("mam_session_id", "")
     set_current_token(mam_cookie)
@@ -722,30 +718,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in _PUBLIC_API_PATHS:
             response = await call_next(request)
         else:
-            authed = False
-            api_key = request.headers.get("x-api-key", "")
-            if api_key and state.athenascout_api_key \
-                    and _const_time_eq(api_key, state.athenascout_api_key):
-                authed = True
-            if not authed:
-                token = request.cookies.get(SESSION_COOKIE_NAME, "")
-                if verify_session_token(token) is not None:
-                    authed = True
-            if not authed:
+            token = request.cookies.get(SESSION_COOKIE_NAME, "")
+            if verify_session_token(token) is not None:
+                response = await call_next(request)
+            else:
                 response = JSONResponse(
                     status_code=401,
                     content={"detail": "Authentication required"},
                 )
-            else:
-                response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         return response
-
-
-def _const_time_eq(a: str, b: str) -> bool:
-    """Constant-time string compare to blunt timing oracles on the key."""
-    import hmac
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 app.add_middleware(AuthMiddleware)

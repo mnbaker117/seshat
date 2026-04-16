@@ -70,11 +70,6 @@ async def set_credential(key: str, body: SetCredentialRequest) -> SimpleOk:
     # Apply the new credential to the live dispatcher immediately.
     await _apply_credential(key, value)
 
-    # The AthenaScout API key lives in a middleware-readable cache
-    # rather than the dispatcher, so refresh that separately.
-    if key == "athenascout_api_key":
-        await state.refresh_athenascout_api_key()
-
     return SimpleOk(ok=True)
 
 
@@ -84,8 +79,6 @@ async def delete_credential(key: str) -> SimpleOk:
         raise HTTPException(400, f"Unknown secret key: {key}")
     await secrets.delete_secret(key)
     _log.info("credential %r deleted via UI", key)
-    if key == "athenascout_api_key":
-        await state.refresh_athenascout_api_key()
     return SimpleOk(ok=True)
 
 

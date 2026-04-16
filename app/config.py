@@ -21,6 +21,7 @@ INVARIANT for adding a new setting:
 import json
 import logging
 import os
+import re as _re
 from pathlib import Path
 
 from app.runtime import IS_DOCKER, get_data_dir
@@ -85,6 +86,32 @@ ENV_AUTH_SECRET = os.getenv("SESHAT_AUTH_SECRET", "")
 # .torrent files or talk to qBittorrent. Used for testing without burning
 # snatch budget.
 ENV_DRY_RUN = os.getenv("SESHAT_DRY_RUN", "").lower() in ("true", "1", "yes")
+
+# ── Discovery-domain env vars (from AthenaScout) ────────────
+# Calibre library discovery paths.
+CALIBRE_PATH = os.getenv("CALIBRE_PATH", "")
+CALIBRE_EXTRA_PATHS = os.getenv("CALIBRE_EXTRA_PATHS", "")
+CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db" if IS_DOCKER else "")
+SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
+LOOKUP_INTERVAL_MINUTES = int(os.getenv("LOOKUP_INTERVAL_MINUTES", "4320"))
+MAM_SCAN_INTERVAL_MINUTES = int(os.getenv("MAM_SCAN_INTERVAL_MINUTES", "360"))
+ENV_HARDCOVER_API_KEY = os.getenv("HARDCOVER_API_KEY", "")
+ENV_CALIBRE_WEB_URL = os.getenv("CALIBRE_WEB_URL", "")
+ENV_CALIBRE_URL = os.getenv("CALIBRE_URL", "")
+
+LANGUAGE_OPTIONS = [
+    "Afrikaans", "Albanian", "Arabic", "Armenian", "Basque", "Bengali",
+    "Bulgarian", "Catalan", "Chinese", "Croatian", "Czech", "Danish",
+    "Dutch", "English", "Estonian", "Filipino", "Finnish", "French",
+    "Galician", "Georgian", "German", "Greek", "Gujarati", "Hebrew",
+    "Hindi", "Hungarian", "Icelandic", "Indonesian", "Irish", "Italian",
+    "Japanese", "Kannada", "Korean", "Latin", "Latvian", "Lithuanian",
+    "Macedonian", "Malay", "Malayalam", "Maltese", "Marathi", "Mongolian",
+    "Norwegian", "Persian", "Polish", "Portuguese", "Punjabi", "Romanian",
+    "Russian", "Serbian", "Slovak", "Slovenian", "Spanish", "Swahili",
+    "Swedish", "Tamil", "Telugu", "Thai", "Turkish", "Ukrainian", "Urdu",
+    "Vietnamese", "Welsh",
+]
 
 
 # ─── Data directory ──────────────────────────────────────────
@@ -343,6 +370,51 @@ DEFAULT_SETTINGS = {
     "pipeline_auto_train_enabled": True,
     "pipeline_notifications_enabled": True,
 
+    # ── Discovery domain (library scanning & metadata lookup) ─
+    "hardcover_api_key": "",
+    "goodreads_enabled": True,
+    "hardcover_enabled": True,
+    "kobo_enabled": True,
+    "amazon_enabled": False,
+    "ibdb_enabled": False,
+    "google_books_enabled": False,
+    "google_books_auto_disabled_at": None,
+    "theme": "dark",
+    "languages": ["English"],
+    "lookup_interval_days": 3,
+    "library_sync_interval_minutes": 60,
+    "rate_goodreads": 2,
+    "rate_hardcover": 1,
+    "rate_kobo": 3,
+    "rate_amazon": 2,
+    "rate_ibdb": 1,
+    "rate_google_books": 1.5,
+    "author_scanning_enabled": True,
+    "author_scan_owned_only": False,
+    "exclude_audiobooks": True,
+    "calibre_url": "",
+    # Discovery-side MAM scanning (search for missing books on MAM).
+    "mam_enabled": False,
+    "mam_scanning_enabled": True,
+    "mam_skip_ip_update": True,
+    "mam_scan_interval_minutes": 360,
+    "mam_format_priority": ["epub", "azw", "azw3", "pdf", "djvu", "azw4"],
+    "rate_mam": 2,
+    "last_mam_validated_at": None,
+    # Per-library state.
+    "active_library": "",
+    "library_mtimes": {},
+    "library_sources": [],
+    # Discovery-side notification toggles.
+    "ntfy_on_scan_complete": True,
+    "ntfy_on_new_books": True,
+    "ntfy_on_mam_complete": True,
+    "ntfy_on_pipeline_sent": True,
+    "ntfy_on_library_sync": False,
+    "ntfy_on_mam_cookie_rotated": False,
+    "ntfy_digest_enabled": False,
+    "ntfy_digest_schedule": "daily",
+
     # ── Operational ─────────────────────────────────────────
     "verbose_logging": False,
     "dry_run": False,  # mirror of SESHAT_DRY_RUN, runtime-toggleable
@@ -357,6 +429,7 @@ def apply_logging(verbose: bool = False):
         "seshat",
         "seshat.config",
         "seshat.database",
+        # Pipeline domain
         "seshat.mam",
         "seshat.mam.irc",
         "seshat.mam.cookie",
@@ -366,6 +439,13 @@ def apply_logging(verbose: bool = False):
         "seshat.sinks",
         "seshat.metadata",
         "seshat.notify",
+        # Discovery domain
+        "seshat.discovery",
+        "seshat.goodreads",
+        "seshat.hardcover",
+        "seshat.kobo",
+        "seshat.lookup",
+        "seshat.calibre_sync",
     ]:
         logging.getLogger(name).setLevel(level)
     # httpx is too noisy at DEBUG.
@@ -458,6 +538,13 @@ def _apply_env_overrides(settings: dict):
         settings["verbose_logging"] = True
     if ENV_DRY_RUN and not settings.get("dry_run"):
         settings["dry_run"] = True
+    # Discovery-domain env var seeds.
+    if ENV_HARDCOVER_API_KEY and not settings.get("hardcover_api_key"):
+        settings["hardcover_api_key"] = ENV_HARDCOVER_API_KEY
+    if ENV_CALIBRE_WEB_URL and not settings.get("calibre_web_url"):
+        settings["calibre_web_url"] = ENV_CALIBRE_WEB_URL
+    if ENV_CALIBRE_URL and not settings.get("calibre_url"):
+        settings["calibre_url"] = ENV_CALIBRE_URL
 
 
 def save_settings(settings: dict):
@@ -469,3 +556,126 @@ def save_settings(settings: dict):
     except OSError:
         _settings_cache["mtime"] = None
     _settings_cache["data"] = dict(settings)
+
+
+# ─── Library discovery (from AthenaScout) ────────────────────
+
+def slugify(name: str) -> str:
+    """Convert a folder name to a safe slug for DB filenames."""
+    s = name.lower().strip()
+    s = _re.sub(r'[^a-z0-9]+', '-', s)
+    s = s.strip('-')
+    return s or 'default'
+
+
+def get_extra_mount_paths() -> list[str]:
+    """Collect extra mount paths from all registered library apps."""
+    from app.library_apps import get_all_apps
+    all_paths: list[str] = []
+    for _app_type, app in get_all_apps().items():
+        for p in app.get_extra_paths():
+            if p not in all_paths:
+                all_paths.append(p)
+    if CALIBRE_EXTRA_PATHS:
+        for p in [x.strip() for x in CALIBRE_EXTRA_PATHS.split(",") if x.strip()]:
+            try:
+                exists = Path(p).exists()
+            except (PermissionError, OSError):
+                exists = False
+            if exists and p not in all_paths:
+                all_paths.append(p)
+    return all_paths
+
+
+def discover_libraries(settings=None) -> list[dict]:
+    """Find all libraries from all registered source apps.
+
+    Priority:
+    1. User-configured library_sources in settings
+    2. Registered library apps (each checks its own env var)
+    3. CALIBRE_DB_PATH env var (legacy single-library fallback)
+    """
+    from app.library_apps import get_all_apps
+
+    libraries: list[dict] = []
+    seen_slugs: set[str] = set()
+
+    def _add_library(lib_dict):
+        slug = lib_dict["slug"]
+        base_slug = slug
+        counter = 2
+        while slug in seen_slugs:
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        seen_slugs.add(slug)
+        lib_dict["slug"] = slug
+        libraries.append(lib_dict)
+
+    # Priority 1: User-configured library sources (from Settings UI)
+    if settings and settings.get("library_sources"):
+        for src in settings["library_sources"]:
+            src_path = src.get("path", "")
+            src_type = src.get("type", "root")
+            src_app = src.get("app_type", "calibre")
+            if not src_path:
+                continue
+            app = get_all_apps().get(src_app)
+            if not app:
+                _log.warning(f"Unknown app type '{src_app}' in library_sources, skipping")
+                continue
+            if src_type == "root":
+                for lib in app.discover(src_path):
+                    _add_library(lib)
+            elif src_type == "direct":
+                mdb = Path(src_path)
+                try:
+                    mdb_exists = mdb.exists()
+                except (PermissionError, OSError) as e:
+                    _log.warning(f"Direct library path unreadable: {src_path} ({e})")
+                    mdb_exists = False
+                if mdb_exists and mdb.name == app.db_filename:
+                    _add_library({
+                        "name": mdb.parent.name,
+                        "slug": slugify(mdb.parent.name),
+                        "app_type": app.app_type,
+                        "content_type": app.content_type,
+                        "display_name": app.display_name,
+                        "source_db_path": str(mdb),
+                        "library_path": str(mdb.parent),
+                    })
+                else:
+                    _log.warning(f"Direct library path not found or invalid: {src_path}")
+        if libraries:
+            return libraries
+
+    # Priority 2: Registered library apps (each checks its env var)
+    for _app_type, app in get_all_apps().items():
+        root_path = app.get_root_path()
+        if root_path:
+            found = app.discover(root_path)
+            for lib in found:
+                _add_library(lib)
+
+    if libraries:
+        return libraries
+
+    # Priority 3: Legacy CALIBRE_DB_PATH (single direct path)
+    if CALIBRE_DB_PATH:
+        legacy_mdb = Path(CALIBRE_DB_PATH)
+        try:
+            legacy_exists = legacy_mdb.exists()
+        except (PermissionError, OSError) as e:
+            _log.warning(f"Legacy CALIBRE_DB_PATH unreadable: {CALIBRE_DB_PATH} ({e})")
+            legacy_exists = False
+        if legacy_exists:
+            _add_library({
+                "name": legacy_mdb.parent.name,
+                "slug": slugify(legacy_mdb.parent.name),
+                "app_type": "calibre",
+                "content_type": "ebook",
+                "display_name": "Calibre",
+                "source_db_path": str(legacy_mdb),
+                "library_path": str(legacy_mdb.parent),
+            })
+
+    return libraries
