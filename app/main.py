@@ -585,6 +585,77 @@ async def lifespan(app: FastAPI):
             "APScheduler disabled (daily_digest_enabled=false or ntfy_url empty)"
         )
 
+    # ── Discovery domain startup ─────────────────────────────
+    # Library discovery, per-library DB init, initial Calibre sync.
+    # This runs AFTER the pipeline startup so both domains are live
+    # when the app starts serving requests.
+    from app.config import discover_libraries, SYNC_INTERVAL_MINUTES
+    from app.discovery.database import (
+        init_db as init_discovery_db,
+        set_active_library,
+        get_active_library as get_active_disc_library,
+        migrate_legacy_db,
+        match_legacy_db_to_library,
+    )
+    from app.library_apps import get_app
+    from app.discovery.log_buffer import init_log_buffer
+    init_log_buffer(capacity=2000)
+
+    state._discovered_libraries = discover_libraries(settings)
+    if not state._discovered_libraries:
+        _log.info("No libraries configured — discovery features available after setup wizard")
+        await init_discovery_db()
+    else:
+        lib_names = [l["name"] for l in state._discovered_libraries]
+        _log.info(f"Discovered {len(state._discovered_libraries)} libraries: {', '.join(lib_names)}")
+
+        # Legacy migration from athenascout.db or seshat.db
+        first_slug = state._discovered_libraries[0]["slug"]
+        migration_slug = match_legacy_db_to_library(state._discovered_libraries)
+        migrated_to = migrate_legacy_db(migration_slug)
+        if migrated_to:
+            _log.info(f"Legacy database migrated to library '{migrated_to}'")
+            first_slug = migrated_to
+
+        for lib in state._discovered_libraries:
+            await init_discovery_db(lib["slug"])
+
+        active = settings.get("active_library") or first_slug
+        valid_slugs = [l["slug"] for l in state._discovered_libraries]
+        if active not in valid_slugs:
+            active = first_slug
+        set_active_library(active)
+        settings["active_library"] = active
+        save_settings(settings)
+        _log.info(f"Active library: '{active}'")
+
+        # Initial sync with mtime optimization
+        import os as _os
+        import time as _time
+        mtimes = settings.get("library_mtimes", {})
+        for lib in state._discovered_libraries:
+            set_active_library(lib["slug"])
+            try:
+                current_mtime = _os.path.getmtime(lib["source_db_path"])
+                last_mtime = mtimes.get(lib["slug"])
+                if last_mtime is not None and current_mtime == last_mtime:
+                    _log.info(f"Library '{lib['name']}': metadata.db unchanged, skipping sync")
+                else:
+                    lib_app = get_app(lib.get("app_type", "calibre"))
+                    _log.info(f"Library '{lib['name']}': syncing...")
+                    if lib_app:
+                        await lib_app.sync(lib["source_db_path"], lib["library_path"])
+                    mtimes[lib["slug"]] = current_mtime
+                    settings["library_mtimes"] = mtimes
+                    save_settings(settings)
+            except Exception as e:
+                _log.warning(f"Sync failed for library '{lib['name']}': {e}")
+        set_active_library(active)
+        state._last_library_sync_check["at"] = _time.time()
+        state._last_library_sync_check["synced"] = True
+
+    _log.info("Discovery domain initialized")
+
     try:
         yield
     finally:
