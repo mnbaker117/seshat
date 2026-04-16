@@ -62,6 +62,7 @@ const PIPELINE_NAV = [
   { id: "pipe-ignored",     label: "Weekly Ignored", icon: "📊" },
   { id: "pipe-authors",     label: "Author Lists",  icon: "👤" },
   { id: "pipe-delayed",     label: "Delayed",       icon: "⏳" },
+  { id: "filters",          label: "Filters",       icon: "🎯" },
 ];
 
 const WIDE_PAGES = new Set([

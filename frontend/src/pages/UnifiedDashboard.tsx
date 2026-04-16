@@ -49,8 +49,6 @@ export default function UnifiedDashboard({ onNav }: Props) {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
-  useVisibleInterval(refresh, POLL * 1000);
-  useVisibleInterval(() => setCd(c => Math.max(0, c - 1)), 1000);
 
   const ds = d || {};
   const b = budget || {};
@@ -78,6 +76,13 @@ export default function UnifiedDashboard({ onNav }: Props) {
   const triggerSync = async () => { setSyncing(true); try { await api.post("/discovery/sync/library"); } catch {} setSyncing(false); refresh(); };
   const triggerSources = async () => { setScanning(true); try { await api.post("/discovery/lookup"); } catch {} setScanning(false); refresh(); };
   const triggerMam = async () => { setMamScanning(true); try { await api.post("/discovery/mam/scan"); } catch {} setMamScanning(false); refresh(); };
+  const cancelSources = async () => { try { await api.post("/discovery/lookup/cancel"); } catch {} refresh(); };
+  const cancelMam = async () => { try { await api.post("/discovery/mam/scan/cancel"); } catch {} refresh(); };
+
+  const anyRunning = libScan.running || srcScan.running || mamScan.running || syncing;
+  const pollMs = anyRunning ? 3000 : POLL * 1000;
+  useVisibleInterval(refresh, pollMs);
+  useVisibleInterval(() => setCd(c => Math.max(0, c - 1)), 1000);
 
   const hdr = (color?) => ({ fontSize: 12, fontWeight: 700, color: color || t.accent, textTransform: "uppercase" as const, letterSpacing: "0.05em" });
   const vsep = { borderLeft: `1px solid ${t.border}`, paddingLeft: 20, marginLeft: 4 };
@@ -205,42 +210,42 @@ export default function UnifiedDashboard({ onNav }: Props) {
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
 
         {/* Command Center */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "10px 16px" }}>
-          <div style={{ ...hdr(), marginBottom: 8 }}><Dot color={t.accent} /> Command Center</div>
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 18px" }}>
+          <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> Command Center</div>
           <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 0, alignItems: "start" }}>
             {/* Trigger buttons */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingRight: 16 }}>
-              <CmdBtn label=<><Dot color={t.jade} /> Sync Library</> busy={syncing || libScan.running} onClick={triggerSync} />
-              <CmdBtn label=<><Dot color={t.cyan} /> Scan Sources</> busy={scanning || srcScan.running} onClick={triggerSources} />
-              <CmdBtn label=<><Dot color={t.ylw} /> MAM Scan</> busy={mamScanning || mamScan.running} onClick={triggerMam} />
-              <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 6, marginTop: 2, display: "flex", flexDirection: "column", gap: 6 }}>
+              <CmdBtn label={<><Dot color={t.jade} /> Sync Library</>} busy={syncing || libScan.running} onClick={triggerSync} />
+              <CmdBtn label={<><Dot color={t.cyan} /> Scan Sources</>} busy={scanning || srcScan.running} onClick={triggerSources} />
+              <CmdBtn label={<><Dot color={t.ylw} /> MAM Scan</>} busy={mamScanning || mamScan.running} onClick={triggerMam} />
+              <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 6, marginTop: 4, display: "flex", flexDirection: "column", gap: 6 }}>
                 <CmdBtn label={`Review ${reviewCount ? `(${reviewCount})` : ""}`} highlight onClick={() => onNav("pipe-review")} />
                 <CmdBtn label={`New Authors ${tentativeCount ? `(${tentativeCount})` : ""}`} onClick={() => onNav("pipe-tentative")} />
               </div>
             </div>
             {/* Progress display */}
             <div style={vsep}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 6 }}>Progress</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Progress</div>
               <ProgressRow label="Library Sync" scan={libScan} t={t} />
-              <ProgressRow label="Source Scan" scan={srcScan} t={t} />
-              <ProgressRow label="MAM Scan" scan={mamScan} t={t} />
+              <ProgressRow label="Source Scan" scan={srcScan} t={t} onCancel={srcScan.running ? cancelSources : undefined} />
+              <ProgressRow label="MAM Scan" scan={mamScan} t={t} onCancel={mamScan.running ? cancelMam : undefined} />
             </div>
             {/* Scan stats summary */}
-            <div style={{ ...vsep, minWidth: 130 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 6 }}>Last Scan</div>
+            <div style={{ ...vsep, minWidth: 150 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Last Scan</div>
               {srcScan.status === "complete" && srcScan.extra?.source_timeouts && Object.keys(srcScan.extra.source_timeouts).length > 0 ? (
-                <div style={{ fontSize: 11, color: t.warn }}>
+                <div style={{ fontSize: 12, color: t.warn }}>
                   {Object.entries(srcScan.extra.source_timeouts).map(([src, sec]) => (
                     <div key={src}>{src}: timed out ({sec}s)</div>
                   ))}
                 </div>
               ) : srcScan.extra?.new_books != null ? (
-                <div style={{ fontSize: 12, color: t.text2 }}>
+                <div style={{ fontSize: 14, color: t.text2 }}>
                   <div>{srcScan.current ?? 0} authors checked</div>
-                  <div style={{ color: t.jade }}>{srcScan.extra.new_books ?? 0} new books</div>
+                  <div style={{ color: t.jade, fontSize: 16, fontWeight: 600, marginTop: 4 }}>{srcScan.extra.new_books ?? 0} new books</div>
                 </div>
               ) : (
-                <div style={{ fontSize: 11, color: t.tf, fontStyle: "italic" }}>No recent scan</div>
+                <div style={{ fontSize: 12, color: t.tf, fontStyle: "italic" }}>No recent scan</div>
               )}
             </div>
           </div>
@@ -347,27 +352,43 @@ function Tile({ label, value, color, sub, onClick }) {
   );
 }
 
-function ProgressRow({ label, scan, t }) {
+function ProgressRow({ label, scan, t, onCancel }) {
   const running = scan?.running;
   const status = scan?.status || "idle";
-  const current = scan?.current_label || scan?.current_book || "";
+  const authorName = scan?.current_label || "";
+  const bookName = scan?.current_book || "";
   const checked = scan?.current ?? 0;
   const total = scan?.total ?? 0;
   const pctDone = total > 0 ? Math.floor((checked / total) * 100) : 0;
   return (
-    <div style={{ padding: "4px 0", borderBottom: `1px solid ${t.borderL}` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
-        <span style={{ fontWeight: 600, color: running ? t.accent : t.td }}>{label}</span>
-        <span style={{ fontSize: 11, color: running ? t.text2 : t.tf }}>
-          {running ? `${checked}/${total} (${pctDone}%)` : status === "complete" ? "Done" : "Idle"}
-        </span>
+    <div style={{ padding: "6px 0", borderBottom: `1px solid ${t.borderL}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: running ? t.accent : t.td }}>{label}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, color: running ? t.text2 : t.tf }}>
+            {running ? `${checked}/${total} (${pctDone}%)` : status === "complete" ? "Done" : status === "cancelled" ? "Cancelled" : "Idle"}
+          </span>
+          {running && onCancel && (
+            <button onClick={onCancel} style={{
+              padding: "2px 8px", fontSize: 10, fontWeight: 600, borderRadius: 4,
+              background: t.red + "22", color: t.red, border: `1px solid ${t.red}44`,
+              cursor: "pointer",
+            }}>Stop</button>
+          )}
+        </div>
       </div>
       {running && (
         <>
-          <div style={{ height: 3, background: t.bg4, borderRadius: 2, marginTop: 3, overflow: "hidden" }}>
+          <div style={{ height: 4, background: t.bg4, borderRadius: 2, marginTop: 4, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${pctDone}%`, background: t.accent, borderRadius: 2, transition: "width 0.3s" }} />
           </div>
-          {current && <div style={{ fontSize: 10, color: t.tf, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{current}</div>}
+          {(authorName || bookName) && (
+            <div style={{ fontSize: 12, color: t.td, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {authorName && <span style={{ fontWeight: 600 }}>{authorName}</span>}
+              {authorName && bookName && <span style={{ color: t.tf }}> — </span>}
+              {bookName && <span style={{ color: t.tf }}>{bookName}</span>}
+            </div>
+          )}
         </>
       )}
     </div>
