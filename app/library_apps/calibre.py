@@ -24,11 +24,12 @@ class CalibreApp(LibraryApp):
     env_extra_var = "CALIBRE_EXTRA_PATHS"
 
     async def sync(self, source_db_path: str, library_path: str) -> dict:
-        """Sync Calibre metadata.db into Seshat's discovery database.
-
-        TODO: Wire up once calibre_sync.py is ported in Phase 2.
-        """
-        raise NotImplementedError("calibre_sync not yet ported to Seshat")
+        """Sync Calibre metadata.db into Seshat's discovery database."""
+        from app.discovery.calibre_sync import sync_calibre
+        return await sync_calibre(
+            calibre_db_path=source_db_path,
+            calibre_library_path=library_path,
+        )
 
     def get_cover_path(self, book_path: str, library_path: str) -> Optional[str]:
         if not book_path:
