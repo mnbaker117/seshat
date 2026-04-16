@@ -1,0 +1,554 @@
+{
+  "media_types": [
+    {
+      "id": 1,
+      "name": "Audiobook"
+    },
+    {
+      "id": 2,
+      "name": "Ebook"
+    },
+    {
+      "id": 3,
+      "name": "Musicology"
+    },
+    {
+      "id": 4,
+      "name": "Radio"
+    },
+    {
+      "id": 5,
+      "name": "Manga"
+    },
+    {
+      "id": 6,
+      "name": "Comic Book / Graphic Novel"
+    },
+    {
+      "id": 7,
+      "name": "Periodical Ebook"
+    },
+    {
+      "id": 8,
+      "name": "Periodical Audiobook"
+    }
+  ],
+  "main_categories": [
+    {
+      "id": 1,
+      "name": "Fiction"
+    },
+    {
+      "id": 2,
+      "name": "Nonfiction"
+    }
+  ],
+  "content_tags": [
+    {
+      "id": 48,
+      "name": "Accompanying music"
+    },
+    {
+      "id": 1,
+      "name": "Action/Adventure"
+    },
+    {
+      "id": 2,
+      "name": "Art/Photography"
+    },
+    {
+      "id": 3,
+      "name": "Biographical"
+    },
+    {
+      "id": 4,
+      "name": "Business/Money"
+    },
+    {
+      "id": 5,
+      "name": "Comedy"
+    },
+    {
+      "id": 6,
+      "name": "Complete Editions - Music"
+    },
+    {
+      "id": 7,
+      "name": "Computer/Internet"
+    },
+    {
+      "id": 59,
+      "name": "Contemporary Fiction"
+    },
+    {
+      "id": 8,
+      "name": "Crafts"
+    },
+    {
+      "id": 9,
+      "name": "Crime"
+    },
+    {
+      "id": 10,
+      "name": "Dramatization/Full Cast"
+    },
+    {
+      "id": 11,
+      "name": "Education/Textbook"
+    },
+    {
+      "id": 12,
+      "name": "Factual News/Current Events"
+    },
+    {
+      "id": 13,
+      "name": "Fantasy"
+    },
+    {
+      "id": 14,
+      "name": "Food/Wine"
+    },
+    {
+      "id": 15,
+      "name": "Guitar/Bass Tabs"
+    },
+    {
+      "id": 16,
+      "name": "Health/Fitness/Diet"
+    },
+    {
+      "id": 17,
+      "name": "Historical"
+    },
+    {
+      "id": 18,
+      "name": "Home/Garden"
+    },
+    {
+      "id": 19,
+      "name": "Horror"
+    },
+    {
+      "id": 20,
+      "name": "Humor"
+    },
+    {
+      "id": 21,
+      "name": "Individual Sheet"
+    },
+    {
+      "id": 22,
+      "name": "Instructional"
+    },
+    {
+      "id": 23,
+      "name": "Juvenile"
+    },
+    {
+      "id": 25,
+      "name": "LGBTQIA+"
+    },
+    {
+      "id": 24,
+      "name": "Language"
+    },
+    {
+      "id": 29,
+      "name": "LitRPG"
+    },
+    {
+      "id": 28,
+      "name": "Literary Classics"
+    },
+    {
+      "id": 57,
+      "name": "Literary Fiction"
+    },
+    {
+      "id": 30,
+      "name": "Math"
+    },
+    {
+      "id": 31,
+      "name": "Medicine/Psychology"
+    },
+    {
+      "id": 63,
+      "name": "Military/War"
+    },
+    {
+      "id": 32,
+      "name": "Music"
+    },
+    {
+      "id": 33,
+      "name": "Music Book"
+    },
+    {
+      "id": 34,
+      "name": "Mystery"
+    },
+    {
+      "id": 35,
+      "name": "Nature"
+    },
+    {
+      "id": 61,
+      "name": "Occult / Metaphysical Practices"
+    },
+    {
+      "id": 36,
+      "name": "Paranormal"
+    },
+    {
+      "id": 37,
+      "name": "Philosophy"
+    },
+    {
+      "id": 60,
+      "name": "Plays/Drama"
+    },
+    {
+      "id": 38,
+      "name": "Poetry"
+    },
+    {
+      "id": 39,
+      "name": "Politics/Sociology"
+    },
+    {
+      "id": 58,
+      "name": "Progression Fantasy"
+    },
+    {
+      "id": 43,
+      "name": "RPG"
+    },
+    {
+      "id": 40,
+      "name": "Reference"
+    },
+    {
+      "id": 41,
+      "name": "Religion/Spirituality"
+    },
+    {
+      "id": 42,
+      "name": "Romance"
+    },
+    {
+      "id": 44,
+      "name": "Science"
+    },
+    {
+      "id": 45,
+      "name": "Science Fiction"
+    },
+    {
+      "id": 46,
+      "name": "Self-Help"
+    },
+    {
+      "id": 47,
+      "name": "Sheet Collection"
+    },
+    {
+      "id": 62,
+      "name": "Slice of Life"
+    },
+    {
+      "id": 49,
+      "name": "Sports/Hobbies"
+    },
+    {
+      "id": 56,
+      "name": "Superheroes"
+    },
+    {
+      "id": 50,
+      "name": "Technology"
+    },
+    {
+      "id": 51,
+      "name": "Thriller/Suspense"
+    },
+    {
+      "id": 52,
+      "name": "Travel"
+    },
+    {
+      "id": 53,
+      "name": "Urban Fantasy"
+    },
+    {
+      "id": 54,
+      "name": "Western"
+    },
+    {
+      "id": 55,
+      "name": "Young Adult"
+    }
+  ],
+  "languages": [
+    {
+      "id": 17,
+      "name": "Afrikaans"
+    },
+    {
+      "id": 64,
+      "name": "Albanian"
+    },
+    {
+      "id": 32,
+      "name": "Arabic"
+    },
+    {
+      "id": 35,
+      "name": "Bengali"
+    },
+    {
+      "id": 51,
+      "name": "Bosnian"
+    },
+    {
+      "id": 52,
+      "name": "Brazilian Portuguese"
+    },
+    {
+      "id": 18,
+      "name": "Bulgarian"
+    },
+    {
+      "id": 6,
+      "name": "Burmese"
+    },
+    {
+      "id": 44,
+      "name": "Cantonese"
+    },
+    {
+      "id": 55,
+      "name": "Castilian Spanish"
+    },
+    {
+      "id": 19,
+      "name": "Catalan"
+    },
+    {
+      "id": 2,
+      "name": "Chinese"
+    },
+    {
+      "id": 49,
+      "name": "Croatian"
+    },
+    {
+      "id": 20,
+      "name": "Czech"
+    },
+    {
+      "id": 21,
+      "name": "Danish"
+    },
+    {
+      "id": 22,
+      "name": "Dutch"
+    },
+    {
+      "id": 1,
+      "name": "English"
+    },
+    {
+      "id": 61,
+      "name": "Estonian"
+    },
+    {
+      "id": 39,
+      "name": "Farsi"
+    },
+    {
+      "id": 23,
+      "name": "Finnish"
+    },
+    {
+      "id": 36,
+      "name": "French"
+    },
+    {
+      "id": 37,
+      "name": "German"
+    },
+    {
+      "id": 26,
+      "name": "Greek"
+    },
+    {
+      "id": 59,
+      "name": "Greek, Ancient"
+    },
+    {
+      "id": 3,
+      "name": "Gujarati"
+    },
+    {
+      "id": 27,
+      "name": "Hebrew"
+    },
+    {
+      "id": 8,
+      "name": "Hindi"
+    },
+    {
+      "id": 28,
+      "name": "Hungarian"
+    },
+    {
+      "id": 63,
+      "name": "Icelandic"
+    },
+    {
+      "id": 53,
+      "name": "Indonesian"
+    },
+    {
+      "id": 56,
+      "name": "Irish"
+    },
+    {
+      "id": 43,
+      "name": "Italian"
+    },
+    {
+      "id": 38,
+      "name": "Japanese"
+    },
+    {
+      "id": 12,
+      "name": "Javanese"
+    },
+    {
+      "id": 5,
+      "name": "Kannada"
+    },
+    {
+      "id": 41,
+      "name": "Korean"
+    },
+    {
+      "id": 46,
+      "name": "Latin"
+    },
+    {
+      "id": 62,
+      "name": "Latvian"
+    },
+    {
+      "id": 50,
+      "name": "Lithuanian"
+    },
+    {
+      "id": 33,
+      "name": "Malay"
+    },
+    {
+      "id": 58,
+      "name": "Malayalam"
+    },
+    {
+      "id": 57,
+      "name": "Manx"
+    },
+    {
+      "id": 9,
+      "name": "Marathi"
+    },
+    {
+      "id": 48,
+      "name": "Norwegian"
+    },
+    {
+      "id": 47,
+      "name": "Other"
+    },
+    {
+      "id": 45,
+      "name": "Polish"
+    },
+    {
+      "id": 34,
+      "name": "Portuguese"
+    },
+    {
+      "id": 14,
+      "name": "Punjabi"
+    },
+    {
+      "id": 30,
+      "name": "Romanian"
+    },
+    {
+      "id": 16,
+      "name": "Russian"
+    },
+    {
+      "id": 60,
+      "name": "Sanskrit"
+    },
+    {
+      "id": 24,
+      "name": "Scottish Gaelic"
+    },
+    {
+      "id": 31,
+      "name": "Serbian"
+    },
+    {
+      "id": 54,
+      "name": "Slovenian"
+    },
+    {
+      "id": 4,
+      "name": "Spanish"
+    },
+    {
+      "id": 40,
+      "name": "Swedish"
+    },
+    {
+      "id": 29,
+      "name": "Tagalog"
+    },
+    {
+      "id": 11,
+      "name": "Tamil"
+    },
+    {
+      "id": 10,
+      "name": "Telugu"
+    },
+    {
+      "id": 7,
+      "name": "Thai"
+    },
+    {
+      "id": 42,
+      "name": "Turkish"
+    },
+    {
+      "id": 25,
+      "name": "Ukrainian"
+    },
+    {
+      "id": 15,
+      "name": "Urdu"
+    },
+    {
+      "id": 13,
+      "name": "Vietnamese"
+    },
+    {
+      "id": 65,
+      "name": "Welsh"
+    }
+  ]
+}

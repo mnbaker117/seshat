@@ -1,0 +1,857 @@
+"""
+Seshat FastAPI entrypoint.
+
+Phase 1 wires:
+  - The dispatcher singleton (built once at startup from settings)
+  - The manual-inject endpoint
+  - The MAM IRC listener (auto-starts on boot, supervised + restarts
+    on crash, reconnects with exponential backoff on disconnect)
+  - The snatch budget watcher loop (polls qBit, reconciles ledger,
+    drains pending_queue when budget frees)
+
+If settings change at runtime (via the eventual Settings UI in
+Phase 3), the dispatcher will need to be rebuilt — that plumbing
+lives where the Settings UI does, not here.
+
+Both background loops are wrapped in `state.supervised_task` so
+they restart automatically on unexpected crashes and a fatal
+exception in one doesn't take down the other.
+"""
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from app import state
+from app.clients.qbittorrent import QbitClient
+from app.config import (
+    ENV_VERBOSE_LOGGING,
+    apply_logging,
+    load_settings,
+    save_settings,
+)
+from app.database import get_db, init_db
+from app.storage.authors import load_normalized_sets
+from app.filter.gate import Announce, FilterConfig
+from app.filter.normalize import extract_format, normalize_category
+from app.policy.engine import PolicyConfig
+from app.mam.cookie import (
+    aclose_session,
+    set_current_token,
+    set_rotation_callback,
+)
+from app.mam.grab import fetch_torrent
+from app.mam.irc import IrcClient, IrcConfig
+from app.orchestrator.budget_watcher import run_loop as budget_watcher_loop
+from app.orchestrator.cookie_keepalive import run_loop as cookie_keepalive_loop
+from app.orchestrator.cookie_retry import run_loop as cookie_retry_loop
+from app.orchestrator.dispatch import DispatcherDeps, handle_announce
+from app.orchestrator.review_timeout import run_loop as review_timeout_loop
+from app.orchestrator.scheduler import build_scheduler
+from app.notify.digests import DigestContext
+from app.auth_db import init_auth_db
+from app.auth_sessions import SESSION_COOKIE_NAME, verify_session_token
+from app.routers.athenascout import router as athenascout_router
+from app.routers.auth import router as auth_router
+from app.routers.authors import router as authors_router
+from app.routers.covers import router as covers_router
+from app.routers.credentials import router as credentials_router
+from app.routers.data_management import router as data_mgmt_router
+from app.routers.db_editor import router as db_editor_router
+from app.routers.delayed import router as delayed_router
+from app.routers.enums import router as enums_router
+from app.routers.inject import router as inject_router
+from app.routers.logs import router as logs_router, install_log_handler
+from app.routers.mam import router as mam_router
+from app.routers.migration import router as migration_router
+from app.routers.review import router as review_router
+from app.routers.settings import router as settings_router
+from app.routers.tentative import router as tentative_router
+from app.metadata.enricher import EnrichmentConfig, MetadataEnricher
+
+# Configure logging once at import time. The verbose toggle gets re-applied
+# from settings.json after load_settings() runs in the lifespan.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+apply_logging(ENV_VERBOSE_LOGGING)
+
+
+class _QuietAccessFilter(logging.Filter):
+    """Suppress uvicorn access-log records for high-frequency polling
+    endpoints that drown out the real signal in `docker logs`.
+
+    /api/health fires every 30s from the Docker healthcheck, plus any
+    external monitors the user has pointed at it. The actual HTTP
+    status lives in `docker inspect`; the access log just repeats it.
+    """
+
+    _QUIET_PATHS = ("/api/health",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(p in msg for p in self._QUIET_PATHS)
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
+
+_log = logging.getLogger("seshat")
+
+
+async def _resolve_secrets() -> dict:
+    """Read every SECRET_KEY from the encrypted store into a plaintext dict.
+
+    Called at startup and any time the dispatcher or enricher is
+    rebuilt so downstream components see fresh credentials without
+    falling back to the Sprint-6-blanked `settings.json` values.
+    """
+    from app.secrets import get_secret, SECRET_KEYS
+    out: dict[str, str] = {}
+    for key in SECRET_KEYS:
+        val = await get_secret(key)
+        if val:
+            out[key] = val
+    return out
+
+
+async def _build_filter_config(settings: dict) -> FilterConfig:
+    """Construct a FilterConfig from settings + a fresh DB snapshot.
+
+    Allow / ignore lists are sourced from the `authors_allowed` and
+    `authors_ignored` DB tables at construction time. Mutations
+    (via the authors router, auto-train, tentative approval, weekly
+    digest promotions) call `state.refresh_filter_authors()` to
+    rebuild the filter_config's author sets without restarting the
+    process.
+
+    Prior to v1.1.0-post-release, this returned empty author sets —
+    meaning every IRC announce fell through to "author_not_allowlisted"
+    and silently piled up in tentative_torrents regardless of the
+    authors_allowed table's contents. That was a latent bug dating
+    to the v1.0 author-list UI ship; the filter build was never
+    updated to actually consult the tables the UI writes to.
+    """
+    db = await get_db()
+    try:
+        allowed_authors, ignored_authors = await load_normalized_sets(db)
+    finally:
+        await db.close()
+
+    return FilterConfig(
+        allowed_categories=frozenset(
+            normalize_category(c) for c in settings.get("allowed_categories", [])
+        ),
+        excluded_categories=frozenset(
+            normalize_category(c) for c in settings.get("excluded_categories", [])
+        ),
+        allowed_formats=frozenset(
+            extract_format(f) or normalize_category(f)
+            for f in settings.get("allowed_formats", [])
+        ),
+        excluded_formats=frozenset(
+            extract_format(f) or normalize_category(f)
+            for f in settings.get("excluded_formats", [])
+        ),
+        allowed_languages=frozenset(
+            lang.strip().lower() for lang in settings.get("allowed_languages", [])
+        ),
+        allowed_authors=allowed_authors,
+        ignored_authors=ignored_authors,
+    )
+
+
+def _build_metadata_enricher(
+    settings: dict, resolved_secrets: Optional[dict] = None
+) -> MetadataEnricher:
+    """Construct the Tier 4 metadata enricher from settings.
+
+    Always returns a live enricher — the `enabled` flag on
+    `EnrichmentConfig` gates whether it actually runs, so the
+    pipeline can pass through `deps.metadata_enricher` without a
+    None guard.
+
+    `resolved_secrets` supplies plaintext credentials from the
+    encrypted store so sources like Hardcover don't have to fall
+    back to the Sprint-6-blanked `settings.json` (the bug that left
+    Hardcover silently unauthenticated across every enrichment run
+    before v1.1.3).
+    """
+    cfg = EnrichmentConfig(
+        enabled=bool(settings.get("metadata_enrichment_enabled", False)),
+        priority=tuple(
+            settings.get("metadata_provider_priority", [])
+            or ("goodreads", "amazon", "hardcover", "kobo", "ibdb", "google_books")
+        ),
+        disabled_sources=frozenset(
+            settings.get("metadata_disabled_sources", []) or []
+        ),
+        per_source_timeout=float(
+            settings.get("metadata_per_source_timeout", 15.0)
+        ),
+        accept_confidence=float(
+            settings.get("metadata_accept_confidence", 0.8)
+        ),
+    )
+    rs = resolved_secrets or {}
+    hardcover_key = rs.get("hardcover_api_key") or ""
+    return MetadataEnricher(cfg, hardcover_api_key=hardcover_key)
+
+
+async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> DispatcherDeps:
+    """Build the dispatcher from a settings snapshot.
+
+    `resolved_secrets` is an optional dict of {key: plaintext} that
+    takes priority over settings.json for secret fields. The lifespan
+    reads from the encrypted store and passes them here; the settings
+    PATCH rebuild doesn't have secrets so it falls back to whatever
+    is in settings.json (which may be empty post-migration).
+    """
+    rs = resolved_secrets or {}
+    client_type = settings.get("download_client_type", "qbittorrent")
+    client_url = rs.get("qbit_url") or settings.get("qbit_url", "")
+    client_user = rs.get("qbit_username") or settings.get("qbit_username", "")
+    client_pass = rs.get("qbit_password") or settings.get("qbit_password", "")
+
+    if client_type == "transmission":
+        from app.clients.transmission import TransmissionClient
+        torrent_client = TransmissionClient(
+            base_url=client_url, username=client_user, password=client_pass,
+        )
+    elif client_type == "deluge":
+        from app.clients.deluge import DelugeClient
+        torrent_client = DelugeClient(
+            base_url=client_url, password=client_pass,
+        )
+    elif client_type == "rtorrent":
+        from app.clients.rtorrent import RtorrentClient
+        torrent_client = RtorrentClient(
+            base_url=client_url, username=client_user, password=client_pass,
+        )
+    else:
+        torrent_client = QbitClient(
+            base_url=client_url, username=client_user, password=client_pass,
+        )
+    # qbit_tag is a single string in settings.json, but the client
+    # accepts a list so the future VIP/freeleech work can stack
+    # additional tier-specific tags ("seshat-seed,vip" or
+    # "seshat-seed,freeleech-wedge") without changing the data
+    # type. Phase 1.5 ships with a single static tag.
+    raw_tag = settings.get("qbit_tag", "seshat-seed").strip()
+    qbit_tags = [t.strip() for t in raw_tag.split(",") if t.strip()]
+
+    enricher = _build_metadata_enricher(settings, resolved_secrets)
+    excluded_uploaders = frozenset(
+        u.strip().lower()
+        for u in (settings.get("excluded_uploaders") or [])
+        if u and u.strip()
+    )
+    return DispatcherDeps(
+        filter_config=await _build_filter_config(settings),
+        policy_config=PolicyConfig(
+            vip_only=bool(settings.get("policy_vip_only", False)),
+            free_only=bool(settings.get("policy_free_only", False)),
+            vip_always_grab=bool(settings.get("policy_vip_always_grab", True)),
+            use_wedge=bool(settings.get("policy_use_wedge", False)),
+            min_wedges_reserved=int(settings.get("policy_min_wedges_reserved", 0)),
+            ratio_floor=float(settings.get("policy_ratio_floor", 0.0)),
+        ),
+        mam_token=rs.get("mam_session_id") or settings.get("mam_session_id", ""),
+        qbit_category=settings.get("qbit_watch_category", "[mam-reseed]"),
+        qbit_tags=qbit_tags,
+        budget_cap=int(settings.get("snatch_budget_cap", 200)),
+        queue_max=int(settings.get("snatch_queue_max", 100)),
+        queue_mode_enabled=settings.get("snatch_full_mode", "queue") == "queue",
+        seed_seconds_required=int(
+            settings.get("snatch_seed_hours_required", 72)
+        ) * 3600,
+        db_factory=get_db,
+        fetch_torrent=fetch_torrent,
+        qbit=torrent_client,
+        dry_run=bool(settings.get("dry_run", False)),
+        excluded_uploaders=excluded_uploaders,
+        qbit_download_path=settings.get("qbit_download_path", ""),
+        monthly_download_folders=bool(settings.get("monthly_download_folders", True)),
+        download_folder_structure=settings.get("download_folder_structure", "monthly") or "monthly",
+        qbit_path_prefix=settings.get("qbit_path_prefix", "/data"),
+        local_path_prefix=settings.get("local_path_prefix", "/downloads"),
+        delayed_torrents_path=settings.get("delayed_torrents_path", ""),
+        staging_path=settings.get("staging_path", ""),
+        review_queue_enabled=bool(settings.get("review_queue_enabled", True)),
+        review_staging_path=settings.get("review_staging_path", ""),
+        metadata_review_timeout_days=int(settings.get("metadata_review_timeout_days", 14)),
+        default_sink=settings.get("default_sink", "calibre"),
+        calibre_library_path=settings.get("calibre_library_path", ""),
+        folder_sink_path=settings.get("folder_sink_path", ""),
+        audiobookshelf_library_path=settings.get("audiobookshelf_library_path", ""),
+        cwa_ingest_path=settings.get("cwa_ingest_path", ""),
+        category_routing=settings.get("category_routing", {}),
+        ntfy_url=settings.get("ntfy_url", ""),
+        ntfy_topic=settings.get("ntfy_topic", "seshat"),
+        per_event_notifications=bool(settings.get("per_event_notifications", False)),
+        metadata_enricher=enricher,
+    )
+
+
+# ─── Debounced cookie-rotation persistence ───────────────────
+#
+# MAM rotates the session cookie on every API call. If Seshat is
+# running hot (several inject calls + a budget-watcher poll every
+# 60s + any IRC-triggered grabs), that could mean a few
+# settings.json writes per minute. Debounce so we only flush to disk
+# at most every `_ROTATION_PERSIST_DEBOUNCE_SECONDS` — the in-memory
+# token is always current; the only thing at stake is whether a
+# hard container crash would lose up to 60s of rotation progress.
+# Even the worst case is harmless: on restart we use the slightly
+# older cookie from settings.json, immediately get a fresh one on
+# the first MAM call, and we're back in sync.
+_ROTATION_PERSIST_DEBOUNCE_SECONDS = 60.0
+_rotation_pending_token: Optional[str] = None
+_rotation_persist_task: Optional[asyncio.Task] = None
+
+
+async def _rotation_callback(new_token: str) -> None:
+    """Persist the rotated cookie to settings.json, debounced.
+
+    Called by `app.mam.cookie._handle_response_cookie` on every
+    successful rotation. We stash the new token and (re)schedule a
+    background task to flush it to disk after the debounce window.
+    Multiple rotations within the window collapse into a single
+    disk write of whichever token was seen last.
+    """
+    global _rotation_pending_token, _rotation_persist_task
+    _rotation_pending_token = new_token
+
+    # Cancel any existing pending flush so the debounce timer
+    # resets — the most recent rotation wins, and we don't want a
+    # stale token hitting disk while a fresher one is already in
+    # memory.
+    if _rotation_persist_task is not None and not _rotation_persist_task.done():
+        _rotation_persist_task.cancel()
+
+    _rotation_persist_task = asyncio.create_task(
+        _debounced_persist_rotation()
+    )
+
+
+async def _debounced_persist_rotation() -> None:
+    """Wait out the debounce window, then write the latest token."""
+    try:
+        await asyncio.sleep(_ROTATION_PERSIST_DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        return  # superseded by a newer rotation; nothing to do
+
+    token = _rotation_pending_token
+    if not token:
+        return
+
+    try:
+        settings = load_settings()
+        if settings.get("mam_session_id") == token:
+            return  # already on disk (someone else wrote it)
+        settings = dict(settings)
+        settings["mam_session_id"] = token
+        save_settings(settings)
+        _log.info("MAM session cookie persisted to settings.json")
+    except Exception:
+        _log.exception("failed to persist rotated MAM cookie to settings.json")
+
+
+def _build_irc_config(settings: dict, resolved_secrets: dict = None) -> IrcConfig:
+    """Construct an IrcConfig from a settings snapshot.
+
+    Returns a config with `auth_mode="none"` if no IRC credentials
+    are configured — the lifespan won't start the listener in that
+    case (Seshat runs as a synchronous-call pipeline, useful for
+    testing without IRC).
+    """
+    rs = resolved_secrets or {}
+    nick = rs.get("mam_irc_nick") or settings.get("mam_irc_nick", "")
+    account = rs.get("mam_irc_account") or settings.get("mam_irc_account", "")
+    password = rs.get("mam_irc_password") or settings.get("mam_irc_password", "")
+    auth_mode = "sasl" if (account and password) else "none"
+    return IrcConfig(
+        nick=nick,
+        account=account,
+        password=password,
+        auth_mode=auth_mode,
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup + shutdown wiring."""
+    settings = load_settings()
+    apply_logging(settings.get("verbose_logging", False))
+    install_log_handler()
+    _log.info("Seshat starting")
+    await init_db()
+    _log.info("Database initialized")
+    await init_auth_db()
+    _log.info("Auth database initialized")
+
+    # Initialize the encrypted secret store and migrate any secrets
+    # still in settings.json into the auth DB.
+    from app.secrets import init_secrets_table, migrate_from_settings
+    await init_secrets_table()
+    migrated = await migrate_from_settings()
+    if migrated:
+        _log.info("Migrated %d secret(s) from settings.json to encrypted store", migrated)
+
+    # Resolve secrets from the encrypted store for the dispatcher.
+    resolved_secrets = await _resolve_secrets()
+
+    # Prime the AthenaScout API key cache so the middleware can match
+    # X-API-Key headers without an async DB hit per request.
+    await state.refresh_athenascout_api_key()
+
+    # Seed the MAM cookie from the secret store (preferred) or settings.
+    mam_cookie = resolved_secrets.get("mam_session_id") or settings.get("mam_session_id", "")
+    set_current_token(mam_cookie)
+    set_rotation_callback(_rotation_callback)
+    _log.info("MAM cookie rotation handler wired")
+
+    state.dispatcher = await _build_dispatcher(settings, resolved_secrets)
+    _log.info("Dispatcher initialized")
+
+    # ── Background loops (supervised) ────────────────────────
+    #
+    # Both loops capture the dispatcher singleton at startup time.
+    # If a settings change rebuilds the dispatcher, the loops will
+    # need to be restarted — that plumbing lives with the Settings
+    # UI in Phase 3.
+
+    deps_for_loops = state.dispatcher
+
+    # Budget watcher: polls qBit, reconciles ledger, drains queue.
+    # Auto-disabled if qBit isn't configured (the loop would just
+    # error out on every tick otherwise).
+    if settings.get("qbit_url"):
+        interval = float(
+            settings.get("qbit_poll_interval_seconds", 60)
+        )
+
+        async def _budget_loop_factory():
+            await budget_watcher_loop(deps_for_loops, interval_seconds=interval)
+
+        state._budget_watcher_task = state.supervised_task(
+            _budget_loop_factory, name="snatch-budget-watcher"
+        )
+        _log.info(
+            f"Budget watcher started (interval={interval}s, "
+            f"qbit_category={settings.get('qbit_watch_category', '[mam-reseed]')})"
+        )
+    else:
+        _log.info("Budget watcher disabled (qbit_url not configured)")
+
+    # IRC listener: connects to MAM, parses announces, dispatches
+    # to handle_announce. Auto-disabled if MAM auth isn't configured
+    # OR if the user explicitly toggled mam_irc_enabled off in
+    # settings (e.g. during cookie rotation, or in dry-run-friendly
+    # test setups).
+    irc_enabled = settings.get("mam_irc_enabled", True)
+    irc_config = _build_irc_config(settings, resolved_secrets)
+    if irc_enabled and irc_config.auth_mode != "none" and irc_config.nick:
+        async def _on_announce(announce: Announce) -> None:
+            # Bridge the IRC callback signature to the dispatcher.
+            # The dispatcher's own try/except keeps a single bad
+            # announce from killing the listener; this thin wrapper
+            # is just signature glue.
+            await handle_announce(deps_for_loops, announce)
+
+        irc_client = IrcClient(irc_config, _on_announce)
+        state.irc_client = irc_client
+
+        async def _irc_loop_factory():
+            await irc_client.run_forever()
+
+        state._irc_task = state.supervised_task(
+            _irc_loop_factory, name="mam-irc-listener"
+        )
+        _log.info(
+            f"IRC listener started (server={irc_config.server}, "
+            f"channel={irc_config.channel}, nick={irc_config.nick})"
+        )
+    else:
+        _log.info(
+            "IRC listener disabled (set mam_irc_nick + mam_irc_account + "
+            "mam_irc_password to enable)"
+        )
+
+    # Cookie keep-alive: hits MAM's search endpoint on a fixed
+    # interval (default 7 days) so the in-memory cookie always has
+    # something to chew on, even if Seshat sees no other MAM
+    # activity for weeks. Without this, a long quiet period would
+    # silently expire the cookie despite all the rotation plumbing
+    # working perfectly. Auto-disabled if no cookie is configured
+    # (the keep-alive call would fail with "no MAM session" anyway).
+    if settings.get("mam_session_id"):
+        keepalive_seconds = float(
+            settings.get("cookie_keepalive_interval_hours", 168)
+        ) * 3600.0
+
+        async def _keepalive_loop_factory():
+            await cookie_keepalive_loop(interval_seconds=keepalive_seconds)
+
+        state._cookie_keepalive_task = state.supervised_task(
+            _keepalive_loop_factory, name="cookie-keepalive"
+        )
+        _log.info(
+            f"Cookie keep-alive started "
+            f"(interval={keepalive_seconds / 3600:.1f}h)"
+        )
+    else:
+        _log.info("Cookie keep-alive disabled (mam_session_id not configured)")
+
+    # Cookie retry: re-attempts grabs stuck in failed_cookie_expired.
+    # Runs on a 5-minute interval (configurable). Auto-disabled if
+    # neither MAM cookie nor qBit is configured (nothing to retry with).
+    if settings.get("mam_session_id") and settings.get("qbit_url"):
+        retry_seconds = float(
+            settings.get("cookie_retry_interval_seconds", 300)
+        )
+
+        async def _cookie_retry_loop_factory():
+            await cookie_retry_loop(deps_for_loops, interval_seconds=retry_seconds)
+
+        state._cookie_retry_task = state.supervised_task(
+            _cookie_retry_loop_factory, name="cookie-retry"
+        )
+        _log.info(f"Cookie retry loop started (interval={retry_seconds}s)")
+    else:
+        _log.info("Cookie retry loop disabled (mam_session_id or qbit_url not configured)")
+
+    # Review-queue auto-add timeout: daily tick that promotes
+    # undecided items past their grace period to the sink. Only
+    # starts if the review queue is enabled (default True).
+    if settings.get("review_queue_enabled", True):
+        review_interval = float(
+            settings.get("review_timeout_check_interval_seconds", 86400)
+        )
+
+        async def _review_timeout_factory():
+            await review_timeout_loop(
+                deps_for_loops, interval_seconds=review_interval
+            )
+
+        state._review_timeout_task = state.supervised_task(
+            _review_timeout_factory, name="review-timeout"
+        )
+        _log.info(
+            f"Review-timeout loop started (interval={review_interval}s, "
+            f"grace={settings.get('metadata_review_timeout_days', 14)} days)"
+        )
+    else:
+        _log.info("Review-timeout loop disabled (review_queue_enabled=false)")
+
+    # APScheduler: daily + weekly digest jobs. Only starts if an
+    # ntfy URL is configured — no point running the scheduler just
+    # to send notifications into the void. The jobs do read even
+    # when ntfy is empty, but they skip the send.
+    if settings.get("daily_digest_enabled", True) and settings.get("ntfy_url"):
+        digest_ctx = DigestContext(
+            ntfy_url=settings.get("ntfy_url", ""),
+            ntfy_topic=settings.get("ntfy_topic", "seshat"),
+            weekly_auto_promote_days=7,
+            calibre_library_path=settings.get("calibre_library_path", ""),
+        )
+        scheduler = build_scheduler(
+            daily_digest_hour=int(settings.get("daily_digest_hour", 9)),
+            ctx=digest_ctx,
+        )
+        scheduler.start()
+        state.scheduler = scheduler
+        _log.info(
+            f"APScheduler started (daily digest hour="
+            f"{settings.get('daily_digest_hour', 9)}, weekly=Sun 23:30)"
+        )
+    else:
+        _log.info(
+            "APScheduler disabled (daily_digest_enabled=false or ntfy_url empty)"
+        )
+
+    try:
+        yield
+    finally:
+        _log.info("Seshat shutting down")
+
+        # Stop accepting new rotation notifications. Any request
+        # in flight right now might still try to fire the callback
+        # between now and when its response lands, and we don't
+        # want that racing against the settings.json flush below
+        # or the disk teardown.
+        set_rotation_callback(None)
+
+        # If there's a pending debounced rotation waiting to write,
+        # either flush it immediately or cancel the timer — we do
+        # both: cancel the timer so it doesn't sleep for 60s during
+        # an otherwise-fast shutdown, then write the pending token
+        # synchronously. This guarantees we never lose the most
+        # recent cookie to a shutdown.
+        global _rotation_persist_task
+        if _rotation_persist_task is not None and not _rotation_persist_task.done():
+            _rotation_persist_task.cancel()
+            try:
+                await _rotation_persist_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            _rotation_persist_task = None
+        if _rotation_pending_token:
+            try:
+                current = load_settings()
+                if current.get("mam_session_id") != _rotation_pending_token:
+                    merged = dict(current)
+                    merged["mam_session_id"] = _rotation_pending_token
+                    save_settings(merged)
+                    _log.info(
+                        "Flushed pending MAM cookie rotation during shutdown"
+                    )
+            except Exception:
+                _log.exception("error flushing pending cookie rotation on shutdown")
+
+        # Stop APScheduler before cancelling tasks so its own jobs
+        # don't fire during teardown. wait=False so shutdown doesn't
+        # block on a currently-running digest send.
+        if state.scheduler is not None:
+            try:
+                state.scheduler.shutdown(wait=False)
+            except Exception:
+                _log.exception("error stopping APScheduler")
+            state.scheduler = None
+
+        # Stop the IRC listener cleanly first so its run_forever
+        # loop sees the stop signal and breaks out of any backoff
+        # wait, instead of being hard-cancelled mid-handshake.
+        if state.irc_client is not None:
+            try:
+                await state.irc_client.stop()
+            except Exception:
+                _log.exception("error stopping IRC client during shutdown")
+
+        # Cancel the supervised tasks. supervised_task wraps the
+        # coroutines with restart-on-crash logic, so we need to
+        # cancel the wrapper task itself — the inner coroutine sees
+        # CancelledError and unwinds cleanly.
+        for task_attr in (
+            "_irc_task",
+            "_budget_watcher_task",
+            "_cookie_keepalive_task",
+            "_cookie_retry_task",
+            "_review_timeout_task",
+        ):
+            task = getattr(state, task_attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                setattr(state, task_attr, None)
+
+        # Tear down whatever the dispatcher owns. The qBit client
+        # holds an httpx.AsyncClient; the cookie module holds
+        # another one. Both expose async close methods that are
+        # safe to call multiple times.
+        if state.dispatcher is not None:
+            try:
+                await state.dispatcher.qbit.aclose()
+            except Exception:
+                _log.exception("error closing qBit client during shutdown")
+            enricher = getattr(state.dispatcher, "metadata_enricher", None)
+            if enricher is not None:
+                try:
+                    await enricher.aclose()
+                except Exception:
+                    _log.exception("error closing metadata enricher")
+        try:
+            await aclose_session()
+        except Exception:
+            _log.exception("error closing MAM cookie session during shutdown")
+        state.dispatcher = None
+        state.irc_client = None
+
+
+app = FastAPI(
+    title="Seshat",
+    description="Hermes for the meece — MAM courier and Calibre ingest pipeline",
+    version="0.0.1",
+    lifespan=lifespan,
+)
+
+
+# ─── Authentication middleware ─────────────────────────────────
+# Routes that don't require authentication. Everything else under
+# /api/ requires a valid session cookie. The frontend SPA bundle
+# (anything not under /api/) is always public so the login page
+# can render before the user has a session.
+_PUBLIC_API_PATHS = frozenset({
+    "/api/health",
+    "/api/auth/setup",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/check",
+})
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Enforce authentication on protected /api/* routes.
+
+    Requests outside /api/ pass through unchanged so the frontend
+    bundle (HTML, JS, CSS, images) loads without a cookie. API
+    requests in the public allowlist also pass through. Every other
+    API request must carry either a valid signed session cookie OR
+    a matching `X-API-Key` header (used by AthenaScout for
+    service-to-service calls on the LAN).
+
+    Also forces `Cache-Control: no-store` on every /api/* response
+    so dynamic API payloads never get poisoned by stale cached HTML
+    from the SPA fallback.
+    """
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        if path in _PUBLIC_API_PATHS:
+            response = await call_next(request)
+        else:
+            authed = False
+            api_key = request.headers.get("x-api-key", "")
+            if api_key and state.athenascout_api_key \
+                    and _const_time_eq(api_key, state.athenascout_api_key):
+                authed = True
+            if not authed:
+                token = request.cookies.get(SESSION_COOKIE_NAME, "")
+                if verify_session_token(token) is not None:
+                    authed = True
+            if not authed:
+                response = JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required"},
+                )
+            else:
+                response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+def _const_time_eq(a: str, b: str) -> bool:
+    """Constant-time string compare to blunt timing oracles on the key."""
+    import hmac
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+app.add_middleware(AuthMiddleware)
+
+
+# Auth router is registered first by convention since it gates
+# everything else. The other routers are protected by the middleware.
+app.include_router(athenascout_router)
+app.include_router(auth_router)
+app.include_router(authors_router)
+app.include_router(covers_router)
+app.include_router(credentials_router)
+app.include_router(data_mgmt_router)
+app.include_router(db_editor_router)
+app.include_router(delayed_router)
+app.include_router(enums_router)
+app.include_router(inject_router)
+app.include_router(logs_router)
+app.include_router(mam_router)
+app.include_router(migration_router)
+app.include_router(review_router)
+app.include_router(settings_router)
+app.include_router(tentative_router)
+
+
+@app.get("/api/health")
+async def health():
+    """Liveness check."""
+    return {
+        "status": "ok",
+        "service": "seshat",
+        "dispatcher_ready": state.dispatcher is not None,
+    }
+
+
+# Cached at module load — /app/VERSION is baked into the image at
+# Docker build time via `ARG GIT_SHA` (see Dockerfile). Standalone
+# / dev runs fall back to "unknown" and the Settings page just
+# shows that string instead of a SHA.
+_VERSION_FILE = Path(__file__).parent.parent / "VERSION"
+try:
+    _BUILD_SHA = _VERSION_FILE.read_text().strip() or "unknown"
+except Exception:
+    _BUILD_SHA = "unknown"
+
+
+@app.get("/api/version")
+async def version():
+    """Build identifier for the running container.
+
+    Returns the full git SHA from /app/VERSION (baked at Docker
+    build time) plus a 7-char short form suitable for UI display.
+    Auth-gated by the same middleware as other /api/* routes.
+    """
+    short = _BUILD_SHA[:7] if _BUILD_SHA != "unknown" else "unknown"
+    return {"sha": _BUILD_SHA, "short_sha": short}
+
+
+# ─── Frontend SPA serving ──────────────────────────────────────
+# Mounts `frontend/dist` if it exists. Anything not under /api/
+# falls through to index.html so the SPA router can take over.
+# Top-level files (favicon.ico, icon.svg, etc.) are served from a
+# whitelist built at startup so user input is only ever used as a
+# dict key — path traversal is structurally impossible.
+_FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+if _FRONTEND_DIST.exists():
+    if (_FRONTEND_DIST / "assets").exists():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=_FRONTEND_DIST / "assets"),
+            name="assets",
+        )
+
+    _INDEX_HTML = (_FRONTEND_DIST / "index.html").resolve()
+    _SERVE_FE_FILES: dict[str, Path] = {
+        p.name: p.resolve() for p in _FRONTEND_DIST.iterdir() if p.is_file()
+    }
+
+    @app.get("/{path:path}")
+    async def serve_fe(path: str):
+        """SPA fallback handler.
+
+        Top-level files emitted by vite (index.html, favicon.ico,
+        icon.svg, etc.) are served from a startup-computed whitelist.
+        Anything else falls through to index.html so the React app
+        can take over client-side routing.
+
+        Two important guards:
+          1. Paths that look like API calls return a real 404 instead
+             of the SPA index. Without this, browsers cache index.html
+             against the API URL and silently break polling.
+          2. The SPA index is served with `Cache-Control: no-cache` so
+             the browser revalidates on every request. Hashed assets
+             under /assets/ remain cacheable via StaticFiles.
+        """
+        if path.startswith("api/") or path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        safe_file = _SERVE_FE_FILES.get(path)
+        if safe_file is not None:
+            return FileResponse(safe_file)
+        return FileResponse(_INDEX_HTML, headers={"Cache-Control": "no-cache"})
+else:
+    @app.get("/")
+    async def serve_fe_missing():
+        return {
+            "error": "Frontend not built. Run "
+                     "'cd frontend && npm install && npm run build' first.",
+        }

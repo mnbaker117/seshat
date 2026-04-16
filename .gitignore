@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Seshat runtime
+data/
+*.db
+*.db-shm
+*.db-wal
+settings.json
+auth_secret
+debug.log
+
+# Real docker-compose with secrets — only the .example version is committed
+docker-compose.yml
+docker-compose.override.yml
+
+# Frontend (added in Phase 3)
+node_modules/
+frontend/dist/
+
+# Local scratch
+scratch/
+.tmp/
+*.tsbuildinfo

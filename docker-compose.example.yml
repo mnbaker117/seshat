@@ -1,0 +1,64 @@
+# Seshat docker-compose example.
+#
+# Credentials are entered through the web UI after first boot — NOT
+# as environment variables. The only env vars here are for paths and
+# the web server port.
+#
+# Quick start:
+#   1. Copy this file to docker-compose.yml
+#   2. Adjust the volume mount paths for your system
+#   3. docker compose up -d
+#   4. Open http://your-server:8789 in a browser
+#   5. Create your admin account (first-run setup wizard)
+#   6. Go to Settings → enter MAM, download client, and ntfy credentials
+#
+# After first boot, all configuration is managed via the web UI.
+# settings.json and the encrypted auth database persist in the data volume.
+
+services:
+  seshat:
+    image: ghcr.io/mnbaker117/seshat:latest
+    # Or build from source:
+    # build: .
+    container_name: seshat
+    restart: unless-stopped
+    ports:
+      - "8789:8789"
+    volumes:
+      # Persistent data: settings.json, seshat.db, seshat_auth.db,
+      # auth_secret. Survives container recreation.
+      - ./data:/app/data
+
+      # Calibre library — for the Calibre sink (direct calibredb add).
+      # Only needed if using default_sink=calibre.
+      # - /path/to/calibre/books:/calibre
+
+      # CWA ingest — for the CWA sink (Calibre-Web-Automated).
+      # Drop files here and CWA auto-imports into Calibre.
+      # - /path/to/cwa-import:/cwa-ingest
+
+      # Download client downloads — shared volume with your torrent client.
+      # Seshat reads completed downloads from here for the pipeline.
+      # - /path/to/downloads:/downloads
+
+      # Staging — temporary workspace for metadata patching.
+      # - ./staging:/staging
+
+      # Review staging — patched books awaiting your approval.
+      # - ./review-staging:/review-staging
+
+    environment:
+      # Web server port (default 8789).
+      WEBUI_PORT: "8789"
+
+      # Data directory inside the container (default /app/data).
+      # Change only if you mount a different path above.
+      # DATA_DIR: "/app/data"
+
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8789/api/health').status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

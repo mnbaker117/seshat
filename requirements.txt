@@ -1,0 +1,35 @@
+# Production runtime dependencies for Seshat.
+# Test deps live in requirements-dev.txt.
+
+# Web framework
+fastapi==0.121.0
+uvicorn[standard]==0.30.0
+
+# Async DB
+aiosqlite==0.20.0
+
+# HTTP (MAM cookie validation, .torrent grab, qBittorrent API)
+httpx==0.27.0
+
+# Background scheduling (Phase 3: cookie checks, weekly audit, daily digest)
+apscheduler==3.10.4
+
+# Data validation (FastAPI request/response models)
+pydantic==2.8.0
+
+# Auth scaffolding (Phase 3 — versions matched to AthenaScout)
+bcrypt==4.2.1
+itsdangerous==2.2.0
+
+# Audiobook metadata reading (M4B/MP3 tags via mutagen)
+mutagen==1.47.0
+
+# Metadata scraper HTML parsing (Goodreads, Amazon, etc.)
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# Cloudflare bypass for Amazon + Kobo scraping
+cloudscraper==1.2.71
+
+# Fernet symmetric encryption for the secret store
+cryptography==44.0.0

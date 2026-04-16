@@ -1,0 +1,308 @@
+"""
+Database layer.
+
+Single SQLite database under DATA_DIR (no per-library multiplexing —
+Seshat operates on one workflow at a time, unlike AthenaScout which
+supports multiple Calibre libraries).
+
+Schema and migrations both live in this file. SCHEMA is the up-to-date
+target shape; MIGRATIONS is the ordered list of statements that bring an
+older database forward. `PRAGMA user_version` tracks how many migrations
+have been applied so subsequent startups skip the work.
+
+Connection pragmas:
+  - WAL mode: keeps readers unblocked during writes (important for
+    background workers + UI polling concurrency)
+  - foreign_keys=ON: enforced at runtime, not just declared
+  - busy_timeout=30s: long enough to wait out a slow background writer
+
+Tables cover the full pipeline: author lists, announce audit log,
+grabs + snatch ledger, book review queue, tentative/ignored capture,
+calibre additions counter, and metadata enrichment support.
+"""
+import logging
+
+import aiosqlite
+
+from app.config import APP_DB_PATH
+
+_log = logging.getLogger("seshat.database")
+
+
+# ─── Schema ──────────────────────────────────────────────────
+# CREATE TABLE IF NOT EXISTS is safe to run on every startup. Indexes
+# follow the same pattern.
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS authors_allowed (
+    name              TEXT PRIMARY KEY,
+    normalized        TEXT NOT NULL UNIQUE,
+    source            TEXT NOT NULL,
+    added_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS authors_ignored (
+    name              TEXT PRIMARY KEY,
+    normalized        TEXT NOT NULL UNIQUE,
+    source            TEXT NOT NULL,
+    added_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS authors_weekly_skip (
+    name              TEXT PRIMARY KEY,
+    normalized        TEXT NOT NULL UNIQUE,
+    first_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    hits_count        INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS announces (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    seen_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    raw               TEXT NOT NULL,
+    torrent_id        TEXT,
+    torrent_name      TEXT,
+    category          TEXT,
+    author_blob       TEXT,
+    decision          TEXT NOT NULL,
+    decision_reason   TEXT NOT NULL,
+    matched_author    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS grabs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    announce_id       INTEGER REFERENCES announces(id) ON DELETE SET NULL,
+    mam_torrent_id    TEXT NOT NULL,
+    torrent_name      TEXT NOT NULL,
+    category          TEXT,
+    author_blob       TEXT,
+    torrent_file_path TEXT,
+    qbit_hash         TEXT,
+    state             TEXT NOT NULL,
+    state_updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    grabbed_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    submitted_at      TEXT,
+    completed_at      TEXT,
+    failed_reason     TEXT,
+    failed_with_cookie_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS snatch_ledger (
+    grab_id                  INTEGER PRIMARY KEY REFERENCES grabs(id) ON DELETE CASCADE,
+    qbit_hash                TEXT,
+    seeding_seconds          INTEGER NOT NULL DEFAULT 0,
+    last_check_at            TEXT,
+    released_at              TEXT,
+    released_reason          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending_queue (
+    grab_id     INTEGER PRIMARY KEY REFERENCES grabs(id) ON DELETE CASCADE,
+    priority    INTEGER NOT NULL DEFAULT 0,
+    queued_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS mam_session (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    cookie              TEXT NOT NULL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    last_validated_at   TEXT,
+    validation_ok       INTEGER NOT NULL DEFAULT 0,
+    superseded_at       TEXT
+);
+
+-- Phase 2: post-download pipeline tracking.
+-- One row per grab that has finished downloading and entered the
+-- post-download pipeline. Tracks the file through staging, metadata
+-- review, and sink delivery.
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    grab_id           INTEGER NOT NULL REFERENCES grabs(id) ON DELETE CASCADE,
+    qbit_hash         TEXT,
+    source_path       TEXT,
+    staged_path       TEXT,
+    book_filename     TEXT,
+    book_format       TEXT,
+    metadata_title    TEXT,
+    metadata_author   TEXT,
+    metadata_series   TEXT,
+    metadata_language TEXT,
+    sink_name         TEXT,
+    sink_result       TEXT,
+    state             TEXT NOT NULL,
+    state_updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at      TEXT,
+    error             TEXT
+);
+
+-- Tier 2: mandatory manual review queue for downloaded books.
+-- Every successfully-downloaded book lands here after metadata
+-- enrichment and BEFORE being delivered to the Calibre/CWA sink.
+-- The user approves, rejects, or lets it time out (auto-add).
+CREATE TABLE IF NOT EXISTS book_review_queue (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    grab_id           INTEGER NOT NULL REFERENCES grabs(id) ON DELETE CASCADE,
+    pipeline_run_id   INTEGER REFERENCES pipeline_runs(id) ON DELETE SET NULL,
+    staged_path       TEXT NOT NULL,
+    book_filename     TEXT NOT NULL,
+    book_format       TEXT,
+    metadata_json     TEXT NOT NULL,
+    cover_path        TEXT,
+    status            TEXT NOT NULL DEFAULT 'pending',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at        TEXT,
+    decision_note     TEXT
+);
+
+-- Tier 2: tentative torrent queue for announces that passed all
+-- filters except the author allow-list. We scrape metadata and
+-- stash the MAM URL so the user can decide later. No .torrent
+-- file is fetched until approval — saves snatch budget.
+CREATE TABLE IF NOT EXISTS tentative_torrents (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    mam_torrent_id      TEXT NOT NULL,
+    torrent_name        TEXT NOT NULL,
+    author_blob         TEXT NOT NULL,
+    category            TEXT,
+    language            TEXT,
+    format              TEXT,
+    vip                 INTEGER NOT NULL DEFAULT 0,
+    scraped_metadata_json TEXT,
+    cover_path          TEXT,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at          TEXT
+);
+
+-- Tier 2: 3-tier author taxonomy. When a tentative torrent is
+-- REJECTED the relevant author goes here for one more pass of
+-- weekly review before being auto-promoted to ignored.
+CREATE TABLE IF NOT EXISTS authors_tentative_review (
+    name              TEXT PRIMARY KEY,
+    normalized        TEXT NOT NULL UNIQUE,
+    source            TEXT NOT NULL,
+    added_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Tier 2: capture ignored-author torrents for weekly review.
+-- When an announce is skipped because the author is on the
+-- ignored list, we still want to see the book (cover + metadata)
+-- in case the user changes their mind. One row per announce seen.
+CREATE TABLE IF NOT EXISTS ignored_torrents_seen (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    mam_torrent_id    TEXT NOT NULL,
+    torrent_name      TEXT NOT NULL,
+    author_blob       TEXT NOT NULL,
+    category          TEXT,
+    info_url          TEXT,
+    cover_path        TEXT,
+    seen_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Tier 2: counter for books successfully added to Calibre/CWA.
+-- One row per successful sink delivery. Used by daily/weekly
+-- digests to report throughput without reparsing pipeline_runs.
+CREATE TABLE IF NOT EXISTS calibre_additions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    grab_id           INTEGER NOT NULL REFERENCES grabs(id) ON DELETE CASCADE,
+    review_id         INTEGER REFERENCES book_review_queue(id) ON DELETE SET NULL,
+    title             TEXT,
+    author            TEXT,
+    sink_name         TEXT,
+    added_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    was_timeout       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_announces_seen_at ON announces(seen_at);
+CREATE INDEX IF NOT EXISTS idx_announces_decision ON announces(decision);
+CREATE INDEX IF NOT EXISTS idx_grabs_state ON grabs(state);
+CREATE INDEX IF NOT EXISTS idx_grabs_torrent_id ON grabs(mam_torrent_id);
+CREATE INDEX IF NOT EXISTS idx_snatch_ledger_released ON snatch_ledger(released_at);
+CREATE INDEX IF NOT EXISTS idx_pending_queue_priority ON pending_queue(priority, queued_at);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_state ON pipeline_runs(state);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_grab_id ON pipeline_runs(grab_id);
+CREATE INDEX IF NOT EXISTS idx_review_queue_status ON book_review_queue(status);
+CREATE INDEX IF NOT EXISTS idx_review_queue_created_at ON book_review_queue(created_at);
+CREATE INDEX IF NOT EXISTS idx_tentative_status ON tentative_torrents(status);
+CREATE INDEX IF NOT EXISTS idx_tentative_torrent_id ON tentative_torrents(mam_torrent_id);
+CREATE INDEX IF NOT EXISTS idx_ignored_seen_at ON ignored_torrents_seen(seen_at);
+CREATE INDEX IF NOT EXISTS idx_calibre_add_added_at ON calibre_additions(added_at);
+"""
+
+
+# ─── Migrations ──────────────────────────────────────────────
+# Append-only ordered list. Each entry is one SQL statement that brings
+# an older database forward by exactly one step. `PRAGMA user_version`
+# tracks how many entries have been applied.
+#
+# Empty in Phase 1 — the schema above is the v0 baseline. Migrations
+# only get added when we need to evolve the schema after Seshat is
+# running in production.
+MIGRATIONS: list[str] = [
+    # v1.1 — AthenaScout metadata handoff (plan item 1.2).
+    # Stores the JSON-encoded metadata dict that AthenaScout sends
+    # with /from-athenascout POSTs. When present on a grab row, the
+    # pipeline's _prepare_book uses it to skip the enricher call and
+    # save 6 outbound scraper requests per book.
+    "ALTER TABLE grabs ADD COLUMN source_metadata TEXT",
+]
+
+
+async def get_db() -> aiosqlite.Connection:
+    """Open a connection with the standard pragmas applied."""
+    db = await aiosqlite.connect(str(APP_DB_PATH))
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA foreign_keys=ON")
+    await db.execute("PRAGMA busy_timeout=30000")
+    return db
+
+
+async def init_db():
+    """Create schema and run migrations.
+
+    Idempotent: safe to call on every startup. Skips already-applied
+    migrations via PRAGMA user_version.
+    """
+    db = await get_db()
+    try:
+        # Read current schema version (0 for fresh DBs).
+        cursor = await db.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        current_version = row[0] if row else 0
+        target_version = len(MIGRATIONS)
+
+        # Always ensure base tables + indexes exist.
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+        # Apply only the migrations we haven't seen.
+        if current_version < target_version:
+            _log.info(
+                f"Migrating database schema: v{current_version} → v{target_version}"
+            )
+            for i, migration in enumerate(MIGRATIONS):
+                if i < current_version:
+                    continue
+                try:
+                    await db.execute(migration)
+                except aiosqlite.OperationalError as e:
+                    msg = str(e).lower()
+                    # Tolerate the harmless "already there" cases that show
+                    # up when migrating a legacy database that had columns
+                    # added by an older always-run loop.
+                    if (
+                        "duplicate column" in msg
+                        or "already exists" in msg
+                        or "no such column" in msg
+                    ):
+                        continue
+                    _log.warning(
+                        f"Migration #{i} failed unexpectedly: {e} "
+                        f"(SQL: {migration[:80]}...)"
+                    )
+            await db.commit()
+            await db.execute(f"PRAGMA user_version = {target_version}")
+            await db.commit()
+    finally:
+        await db.close()

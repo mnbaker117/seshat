@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seshat"
+version = "0.0.1"
+description = "Hermes for the meece — MAM courier and Calibre ingest pipeline"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*", "previous-stuff*", "frontend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+# Test discovery: standard `test_*.py` files, `test_*` functions/methods.
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]

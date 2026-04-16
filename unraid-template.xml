@@ -1,0 +1,130 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Seshat</Name>
+  <Repository>ghcr.io/mnbaker117/seshat:latest</Repository>
+  <Branch>
+    <Tag>latest</Tag>
+    <TagDescription>Latest stable release</TagDescription>
+  </Branch>
+  <Registry/>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/mnbaker117/seshat/issues</Support>
+  <Project>https://github.com/mnbaker117/seshat</Project>
+  <Overview>
+    Seshat is a self-hosted MAM (MyAnonamouse) courier and Calibre ingest pipeline. It watches MAM's IRC channel for new book announcements, filters them against your author allow/ignore lists, downloads them via your torrent client, enriches metadata from 7 sources (MAM, Goodreads, Amazon, Hardcover, Kobo, IBDB, Google Books), and queues them for your review before delivering to Calibre/CWA.
+
+    Features: IRC announce monitoring, author-based filtering with tentative/ignored review flows, VIP/freeleech/wedge/ratio policy engine, snatch budget management with queue and delayed folder rotation, mandatory manual review queue with cover images, metadata enrichment from 7 sources, daily/weekly ntfy digest notifications, migration wizard, multi-client support (qBittorrent, Transmission, Deluge, rTorrent), encrypted credential storage, dark/dim/light themes.
+
+    All credentials are entered through the web UI after first boot — no secrets in environment variables.
+  </Overview>
+  <Category>MediaApp:Books</Category>
+  <WebUI>http://[IP]:[PORT:8789]</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/mnbaker117/seshat/main/icon.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <Description>
+    MAM courier and Calibre ingest pipeline. Watches IRC for book announcements, filters by author, downloads via your torrent client, enriches metadata, and queues for review before Calibre delivery. Multi-client, multi-source, encrypted creds, dark/dim/light UI.
+  </Description>
+
+  <!-- ─── Web UI ────────────────────────────────────────────── -->
+  <Config
+    Name="Web UI Port"
+    Target="8789"
+    Default="8789"
+    Mode="tcp"
+    Description="Host port for the Seshat web interface. Default 8789 (avoids AthenaScout's 8787)."
+    Type="Port"
+    Display="always"
+    Required="true"
+    Mask="false">8789</Config>
+
+  <!-- ─── Volume Mounts ─────────────────────────────────────── -->
+  <Config
+    Name="App Data"
+    Target="/app/data"
+    Default="/mnt/user/appdata/seshat/data"
+    Mode="rw"
+    Description="Persistent storage for Seshat's databases (seshat.db, seshat_auth.db), settings.json, auth_secret, and the encrypted credential store. Survives container restarts and image updates."
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false">/mnt/user/appdata/seshat/data</Config>
+
+  <Config
+    Name="Downloads"
+    Target="/downloads"
+    Default=""
+    Mode="rw"
+    Description="Shared volume with your torrent client's download directory. Seshat reads completed book files from here for the post-download pipeline. Must be the same physical directory your torrent client saves to (path translation settings handle namespace differences between containers)."
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false"></Config>
+
+  <Config
+    Name="CWA Ingest Folder"
+    Target="/cwa-ingest"
+    Default=""
+    Mode="rw"
+    Description="Calibre-Web-Automated's watched ingest directory. Approved books are dropped here for auto-import into Calibre. Only needed if using CWA as the default sink."
+    Type="Path"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <Config
+    Name="Calibre Library"
+    Target="/calibre"
+    Default=""
+    Mode="rw"
+    Description="Path to your Calibre library directory (the folder containing metadata.db). Only needed if using the direct Calibre sink (calibredb add)."
+    Type="Path"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <Config
+    Name="Review Staging"
+    Target="/review-staging"
+    Default="/mnt/user/appdata/seshat/review-staging"
+    Mode="rw"
+    Description="Directory where patched book files are parked while awaiting your review approval. Each pending review gets its own subfolder."
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false">/mnt/user/appdata/seshat/review-staging</Config>
+
+  <Config
+    Name="Staging"
+    Target="/staging"
+    Default="/mnt/user/appdata/seshat/staging"
+    Mode="rw"
+    Description="Temporary workspace for metadata extraction and patching before review."
+    Type="Path"
+    Display="always"
+    Required="false"
+    Mask="false">/mnt/user/appdata/seshat/staging</Config>
+
+  <!-- ─── Environment Variables ─────────────────────────────── -->
+  <Config
+    Name="WEBUI_PORT"
+    Target="WEBUI_PORT"
+    Default="8789"
+    Description="Internal web UI port. Must match the container port in the Web UI Port mapping above."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">8789</Config>
+
+  <Config
+    Name="Verbose Logging"
+    Target="VERBOSE_LOGGING"
+    Default="false"
+    Description="Enable detailed debug logging on startup (true/false). Can also be toggled at runtime in the Settings UI."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">false</Config>
+</Container>
