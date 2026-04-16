@@ -194,8 +194,8 @@ function SeshatApp() {
         borderBottom: `1px solid ${t.border}`,
         display: "flex",
         alignItems: "center",
-        padding: "0 16px",
-        height: 48,
+        padding: "0 80px",
+        height: 52,
         position: "sticky",
         top: 0,
         zIndex: 100,
@@ -206,7 +206,7 @@ function SeshatApp() {
           style={{
             cursor: "pointer",
             fontWeight: 800,
-            fontSize: 18,
+            fontSize: 20,
             color: t.accent,
             letterSpacing: "0.02em",
             marginRight: 20,
@@ -227,8 +227,8 @@ function SeshatApp() {
                 color: section === s ? t.accent : t.td,
                 border: `1px solid ${section === s ? t.abr : "transparent"}`,
                 borderRadius: 6,
-                padding: "4px 12px",
-                fontSize: 12,
+                padding: "5px 14px",
+                fontSize: 15,
                 fontWeight: 600,
                 cursor: "pointer",
                 textTransform: "capitalize",
@@ -250,13 +250,13 @@ function SeshatApp() {
                 color: page === item.id ? t.accent : t.tm,
                 border: "none",
                 borderRadius: 6,
-                padding: "6px 10px",
-                fontSize: 13,
+                padding: "6px 12px",
+                fontSize: 14,
                 fontWeight: page === item.id ? 600 : 400,
                 cursor: "pointer",
                 display: "flex",
                 alignItems: "center",
-                gap: 5,
+                gap: 6,
               }}
             >
               <span>{item.icon}</span>
@@ -282,8 +282,8 @@ function SeshatApp() {
                 background: page === btn.id ? t.abg : "transparent",
                 border: "none",
                 cursor: "pointer",
-                fontSize: 16,
-                padding: "4px 6px",
+                fontSize: 18,
+                padding: "4px 8px",
                 borderRadius: 4,
                 opacity: page === btn.id ? 1 : 0.7,
               }}
@@ -294,7 +294,7 @@ function SeshatApp() {
           <button
             onClick={cycle}
             title={`Theme: ${themeName}`}
-            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 16, padding: "4px 6px" }}
+            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, padding: "4px 6px" }}
           >
             {themeIcon}
           </button>
@@ -309,7 +309,7 @@ function SeshatApp() {
               background: "transparent",
               border: "none",
               cursor: "pointer",
-              fontSize: 13,
+              fontSize: 15,
               color: t.td,
               padding: "4px 8px",
             }}

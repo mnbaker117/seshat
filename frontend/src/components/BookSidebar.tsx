@@ -9,7 +9,7 @@ import { Spin } from "./Spin";
 import { SBRow } from "./SBRow";
 import type { MamStatusResponse } from "../types";
 
-export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}:any){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState<any>({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[hermeeceUrl,setHermeeceUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);const[mamOn,setMamOn]=useState(false);const[suggestion,setSuggestion]=useState<any>(null);const[sugBusy,setSugBusy]=useState<any>(null);const[hermSending,setHermSending]=useState(false);
+export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}:any){const t=useTheme();const[mounted,setMounted]=useState(false);useEffect(()=>{requestAnimationFrame(()=>setMounted(true));return()=>setMounted(false)},[]);const[editing,setEditing]=useState(false);const[ef,setEf]=useState<any>({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[hermeeceUrl,setHermeeceUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);const[mamOn,setMamOn]=useState(false);const[suggestion,setSuggestion]=useState<any>(null);const[sugBusy,setSugBusy]=useState<any>(null);const[hermSending,setHermSending]=useState(false);
 useEffect(()=>{api.get("/discovery/settings").then(s=>{setCwUrl(s.calibre_web_url||"");setHermeeceUrl(s.hermeece_url||"")}).catch(()=>{})},[]);
 useEffect(()=>{api.get<MamStatusResponse>("/discovery/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 // Fetch the active series-suggestion (if any) for this book when the
@@ -26,7 +26,7 @@ const saveEdit=async()=>{setSaving(true);try{await api.put(`/discovery/books/${b
 const upE=(k,v)=>setEf(p=>({...p,[k]:v}));
 const ist={padding:"6px 8px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
 
-return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{position:"fixed",top:0,right:0,width:420,maxWidth:"90vw",height:"100vh",background:t.bg2,borderLeft:`1px solid ${t.border}`,zIndex:100,overflowY:"auto",padding:24,display:"flex",flexDirection:"column",gap:16,boxShadow:"-4px 0 20px rgba(0,0,0,0.3)"}}>
+return<div style={{position:"fixed",top:0,right:0,width:420,maxWidth:"90vw",height:"100vh",background:t.bg2,borderLeft:`1px solid ${t.border}`,zIndex:100,overflowY:"auto",padding:24,display:"flex",flexDirection:"column",gap:16,boxShadow:"-4px 0 20px rgba(0,0,0,0.3)",transform:parentClosing?"translateX(100%)":mounted?"translateX(0)":"translateX(100%)",transition:"transform 0.25s ease-out"}}>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
 <h2 style={{fontSize:18,fontWeight:700,color:t.text,margin:0,flex:1,lineHeight:1.3}}>{editing?<input value={ef.title} onChange={e=>upE("title",e.target.value)} style={{...ist,fontSize:16,fontWeight:700}}/>:book.title}</h2>
 <div className="sb-actions" style={{display:"flex",gap:8,flexShrink:0}}>{!editing&&<button onClick={startEdit} style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",color:t.tg,padding:8,minWidth:36,minHeight:36,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.edit}</button>}<button onClick={onClose} style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",color:t.tg,padding:8,minWidth:36,minHeight:36,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.x}</button></div></div>

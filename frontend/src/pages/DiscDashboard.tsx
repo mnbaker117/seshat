@@ -48,20 +48,20 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 {/* Stat cards */}
 <div className="dash-stats" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:12}}>
 {[
-  {label:"Owned",value:d.owned_books,color:t.grnt,icon:"📚",nav:()=>onNav("library")},
-  {label:"Missing",value:d.missing_books,color:t.ylwt,icon:"🔍",nav:()=>onNav("missing")},
+  {label:"Owned",value:d.owned_books,color:t.grnt,icon:"📚",nav:()=>onNav("disc-library")},
+  {label:"Missing",value:d.missing_books,color:t.ylwt,icon:"🔍",nav:()=>onNav("disc-missing")},
   {label:"New Finds",value:d.new_books,color:t.redt,icon:"✨"},
-  {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("authors")},
+  {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("disc-authors")},
   {label:"Series",value:d.total_series,color:t.cyant,icon:"📖"},
-  {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("upcoming")},
+  {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("disc-upcoming")},
   // Only render the Suggestions stat card when there's something to
   // review. Conditionally appended via spread so the grid layout
   // collapses cleanly when the count is 0.
-  ...(sugCount>0?[{label:"Suggestions",value:sugCount,color:t.accent,icon:"💡",nav:()=>onNav("suggestions")}]:[]),
+  ...(sugCount>0?[{label:"Suggestions",value:sugCount,color:t.accent,icon:"💡",nav:()=>onNav("disc-suggestions")}]:[]),
 ].map(c=><div key={c.label} onClick={c.nav} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"16px 18px",cursor:c.nav?"pointer":"default",transition:"border-color 0.2s"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:20}}>{c.icon}</span><span style={{fontSize:24,fontWeight:700,color:c.color}}>{c.value}</span></div><div style={{fontSize:12,color:t.td,marginTop:6}}>{c.label}</div></div>)}
 </div>
 
-{d.mam_enabled&&d.mam?<div onClick={()=>onNav("mam")} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"14px 20px",cursor:"pointer",display:"flex",alignItems:"center",gap:20,flexWrap:"wrap",transition:"border-color 0.2s"}}>
+{d.mam_enabled&&d.mam?<div onClick={()=>onNav("disc-mam")} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"14px 20px",cursor:"pointer",display:"flex",alignItems:"center",gap:20,flexWrap:"wrap",transition:"border-color 0.2s"}}>
 <span style={{fontSize:13,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.04em"}}>MAM</span>
 <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.grnt}}>↑</span><span style={{fontSize:20,fontWeight:700,color:t.grnt}}>{d.mam.upload_candidates||0}</span><span style={{fontSize:12,color:t.td}}>Upload Candidates</span></div>
 <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.cyant}}>↓</span><span style={{fontSize:20,fontWeight:700,color:t.cyant}}>{d.mam.available_to_download||0}</span><span style={{fontSize:12,color:t.td}}>Available on MAM</span></div>
@@ -101,7 +101,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <div style={{flex:"0 0 auto",display:"flex",flexDirection:"column",gap:6,borderLeft:`1px solid ${t.borderL}`,paddingLeft:20,justifyContent:"center"}}>
 {d.calibre_web_url?<button onClick={()=>window.open(d.calibre_web_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.accent+"18",border:`1px solid ${t.accent}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.accent,whiteSpace:"nowrap"}}>📖 Calibre Web <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
 {d.calibre_url?<button onClick={()=>window.open(d.calibre_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.pur+"18",border:`1px solid ${t.pur}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.purt,whiteSpace:"nowrap"}}>📚 Calibre Library <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
-<button onClick={()=>onNav("hidden")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.td,whiteSpace:"nowrap"}}>{Ic.hide} Hidden ({d.hidden_books||0})</button>
+<button onClick={()=>onNav("disc-hidden")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.td,whiteSpace:"nowrap"}}>{Ic.hide} Hidden ({d.hidden_books||0})</button>
 </div>
 </div>
 

@@ -141,7 +141,7 @@ export default function SuggestionsPage({ onNav }: { onNav: NavFn }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
           <div style={{ flex: "1 1 300px", minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 600, color: t.text, marginBottom: 2 }}>{sug.book_title}</div>
-            <button onClick={() => onNav("author", sug.author_id)} style={{
+            <button onClick={() => onNav("disc-author-detail", sug.author_id)} style={{
               background: "none", border: "none", padding: 0, cursor: "pointer",
               fontSize: 13, color: t.purt, textDecoration: "none",
             }}>{sug.author_name}</button>

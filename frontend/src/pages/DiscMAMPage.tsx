@@ -161,10 +161,12 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {ld?<Load/>:books.length===0?<div style={{textAlign:"center",padding:40,color:t.tg}}>No books in this section</div>:vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} onSendToHermeece={hermConf&&tab==="download"?sendToHermeece:undefined} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} onSendToHermeece={hermConf&&tab==="download"?sendToHermeece:undefined} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>}
 
 {/* Pagination */}
-{totalPages>1&&!ld?<div style={{display:"flex",justifyContent:"center",gap:6,paddingTop:8}}>
-<Btn size="sm" variant="ghost" onClick={()=>load(pg-1)} disabled={pg<=1}>← Prev</Btn>
-<span style={{fontSize:12,color:t.tg,padding:"6px 8px"}}>{pg} / {totalPages}</span>
-<Btn size="sm" variant="ghost" onClick={()=>load(pg+1)} disabled={pg>=totalPages}>Next →</Btn>
+{totalPages>1&&!ld?<div style={{display:"flex",justifyContent:"center",gap:6,paddingTop:8,alignItems:"center"}}>
+<Btn size="sm" variant="ghost" onClick={()=>load(1)} disabled={pg<=1}>«</Btn>
+<Btn size="sm" variant="ghost" onClick={()=>load(pg-1)} disabled={pg<=1}>‹ Prev</Btn>
+<span style={{fontSize:13,color:t.tg,padding:"4px 6px",fontWeight:500}}>Page {pg} of {totalPages}</span>
+<Btn size="sm" variant="ghost" onClick={()=>load(pg+1)} disabled={pg>=totalPages}>Next ›</Btn>
+<Btn size="sm" variant="ghost" onClick={()=>load(totalPages)} disabled={pg>=totalPages}>»</Btn>
 </div>:null}
 
 {/* Sidebar */}

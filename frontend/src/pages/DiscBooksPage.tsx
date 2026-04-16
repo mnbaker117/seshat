@@ -77,21 +77,29 @@ else if(grp==="series"&&groupedEntries){content=groupedEntries.map(([name,books]
 else{content=vm==="list"?<BList books={bks} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps}/>:<BGrid books={bks} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}
 
 return<div style={{display:"flex",flexDirection:"column",gap:16}}>
-{/* Sticky sub-header */}
-<div className="bp-sticky" style={{position:"sticky",top:56,zIndex:40,background:t.bg+"ee",backdropFilter:"blur(8px)",padding:"12px 0",marginTop:-12}}>
-<div className="bp-controls" style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-<div><h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>{title}</h1><p style={{fontSize:12,color:t.tf,margin:0}}>{total} {subtitle}</p></div>
-<div className="bp-right" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+{/* Sticky sub-header — two rows */}
+<div className="bp-sticky" style={{position:"sticky",top:56,zIndex:40,background:t.bg+"ee",backdropFilter:"blur(8px)",padding:"8px 0",marginTop:-12}}>
+{/* Row 1: Title + Search/Sort/Filters */}
+<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:6}}>
+<h1 style={{fontSize:24,fontWeight:800,color:t.accent,margin:0,flexShrink:0}}>{title} <span style={{fontSize:15,fontWeight:600,color:t.td,marginLeft:6}}>{total.toLocaleString()} books</span></h1>
+<div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
 <SearchBar value={q} onChange={v=>{setQ(v);setPg(1)}}/>
-{!isGrouped&&<select value={sort} onChange={e=>{setSort(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="title">Sort: Title</option><option value="author">Sort: Author</option><option value="date">Sort: Date</option><option value="added">Sort: Added</option></select>}
-{mamOn?<select value={mamFilter} onChange={e=>{setMamFilter(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:mamFilter?t.accent+"22":t.inp,color:mamFilter?t.accent:t.text2,fontSize:12}}><option value="">MAM: All</option><option value="found">MAM: Found</option><option value="possible">MAM: Possible</option><option value="not_found">MAM: Not Found</option><option value="unscanned">MAM: Unscanned</option></select>:null}
-<select value={grp} onChange={e=>{setGrp(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="all">All</option><option value="author">Group: Author</option><option value="series">Group: Series</option></select>
-{isGrouped&&<Btn size="sm" variant="ghost" onClick={()=>setAllCollapsed(!allCollapsed)}>{allCollapsed?Ic.expand:Ic.collapse} {allCollapsed?"Expand":"Collapse"} All</Btn>}
+{!isGrouped&&<select value={sort} onChange={e=>{setSort(e.target.value);setPg(1)}} style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="title">Sort: Title</option><option value="author">Sort: Author</option><option value="date">Sort: Date</option><option value="added">Sort: Added</option></select>}
+{mamOn?<select value={mamFilter} onChange={e=>{setMamFilter(e.target.value);setPg(1)}} style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:mamFilter?t.accent+"22":t.inp,color:mamFilter?t.accent:t.text2,fontSize:12}}><option value="">MAM: All</option><option value="found">MAM: Found</option><option value="possible">MAM: Possible</option><option value="not_found">MAM: Not Found</option><option value="unscanned">MAM: Unscanned</option></select>:null}
+<select value={grp} onChange={e=>{setGrp(e.target.value);setPg(1)}} style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="all">All</option><option value="author">Group: Author</option><option value="series">Group: Series</option></select>
 <VT mode={vm} setMode={setVm}/>
-{dismissable>0?<Btn size="sm" variant="ghost" onClick={async()=>{await api.post("/discovery/books/dismiss-all");load(pg)}}>Dismiss all ({dismissable})</Btn>:null}
-{exportFilter?<Btn size="sm" variant="ghost" onClick={()=>setShowExp(true)}>{Ic.book} Export</Btn>:null}
-<Btn size="sm" variant={selMode?"accent":"default"} onClick={()=>{setSelMode(!selMode);if(selMode)setSel(new Set())}}>{selMode?"Cancel Select":"Select"}</Btn>
-</div></div>
+</div>
+</div>
+{/* Row 2: Pagination + Actions */}
+<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+<div style={{flex:1}}>{!isGrouped&&totalPages>1?<Pager pg={pg} totalPages={totalPages} onPage={p=>{load(p);window.scrollTo(0,0)}} t={t} compact/>:<div/>}</div>
+<div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+{isGrouped&&<Btn size="sm" variant="ghost" onClick={()=>setAllCollapsed(!allCollapsed)}>{allCollapsed?"Expand":"Collapse"} All</Btn>}
+{dismissable>0?<Btn size="sm" variant="ghost" onClick={async()=>{await api.post("/discovery/books/dismiss-all");load(pg)}}>Dismiss ({dismissable})</Btn>:null}
+{exportFilter?<Btn size="sm" variant="ghost" onClick={()=>setShowExp(true)}>Export</Btn>:null}
+<Btn size="sm" variant={selMode?"accent":"default"} onClick={()=>{setSelMode(!selMode);if(selMode)setSel(new Set())}}>{selMode?"Cancel":"Select"}</Btn>
+</div>
+</div>
 {selMode?<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",marginTop:8,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,flexWrap:"wrap"}}>
 <span style={{fontSize:13,fontWeight:600,color:t.text2}}>{sel.size} book{sel.size===1?"":"s"} selected</span>
 {sel.size>0?<>
@@ -107,7 +115,23 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {sel.size>0?<Btn size="sm" onClick={()=>setSel(new Set())} disabled={busy}>Deselect All</Btn>:null}
 </div>:null}
 </div>
-{ld?<Load/>:<>{content}{!isGrouped&&totalPages>1&&<div style={{display:"flex",justifyContent:"center",gap:8,padding:20,alignItems:"center"}}><Btn size="sm" disabled={pg<=1} onClick={()=>{load(pg-1);window.scrollTo(0,0)}}>← Prev</Btn><span style={{fontSize:13,color:t.td}}>Page {pg} of {totalPages}</span><Btn size="sm" disabled={pg>=totalPages} onClick={()=>{load(pg+1);window.scrollTo(0,0)}}>Next →</Btn></div>}</>}
+{ld?<Load/>:<>{content}{!isGrouped&&totalPages>1&&<Pager pg={pg} totalPages={totalPages} onPage={p=>{load(p);window.scrollTo(0,0)}} t={t}/>}</>}
 {sb&&<BookSidebar book={sb} closing={sbClosing} onClose={closeSb} onAction={onAction} onEdit={()=>load(pg)}/>}
 {showExp?<ExportModal onClose={()=>setShowExp(false)} defaultFilter={exportFilter}/>:null}
 </div>}
+
+function Pager({pg,totalPages,onPage,t,compact}:{pg:number;totalPages:number;onPage:(p:number)=>void;t:any;compact?:boolean}){
+  const[jumpVal,setJumpVal]=useState("");
+  const doJump=()=>{const n=parseInt(jumpVal);if(n>=1&&n<=totalPages){onPage(n);setJumpVal("")}};
+  return <div style={{display:"flex",justifyContent:compact?"flex-start":"center",gap:6,padding:compact?"2px 0":"12px 0",alignItems:"center"}}>
+    <Btn size="sm" disabled={pg<=1} onClick={()=>onPage(1)}>«</Btn>
+    <Btn size="sm" disabled={pg<=1} onClick={()=>onPage(pg-1)}>‹ Prev</Btn>
+    <span style={{fontSize:13,color:t.td,fontWeight:500,padding:"0 4px"}}>Page {pg} of {totalPages}</span>
+    <Btn size="sm" disabled={pg>=totalPages} onClick={()=>onPage(pg+1)}>Next ›</Btn>
+    <Btn size="sm" disabled={pg>=totalPages} onClick={()=>onPage(totalPages)}>»</Btn>
+    <span style={{width:1,height:16,background:t.border,margin:"0 2px"}}/>
+    <input value={jumpVal} onChange={e=>setJumpVal(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")doJump()}}
+      placeholder="#" style={{width:50,padding:"4px 6px",borderRadius:5,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12,textAlign:"center",outline:"none"}}/>
+    <Btn size="sm" variant="ghost" onClick={doJump}>Go</Btn>
+  </div>;
+}

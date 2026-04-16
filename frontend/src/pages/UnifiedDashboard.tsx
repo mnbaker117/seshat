@@ -84,7 +84,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
   useVisibleInterval(refresh, pollMs);
   useVisibleInterval(() => setCd(c => Math.max(0, c - 1)), 1000);
 
-  const hdr = (color?) => ({ fontSize: 12, fontWeight: 700, color: color || t.accent, textTransform: "uppercase" as const, letterSpacing: "0.05em" });
+  const hdr = (color?) => ({ fontSize: 13, fontWeight: 700, color: color || t.accent, textTransform: "uppercase" as const, letterSpacing: "0.05em" });
   const vsep = { borderLeft: `1px solid ${t.border}`, paddingLeft: 20, marginLeft: 4 };
 
   return (
@@ -114,7 +114,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
             <div style={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 10, display: "flex", flexDirection: "column", gap: 6, justifyContent: "center" }}>
               {cwaUrl && <TBtn icon={<Bar color={t.ylw} />} label="CWA" onClick={() => window.open(cwaUrl, "_blank")} />}
               {calibreUrl && <TBtn icon={<Bar color={t.jade} />} label="Calibre" onClick={() => window.open(calibreUrl, "_blank")} />}
-              {!cwaUrl && !calibreUrl && <span style={{ fontSize: 10, color: t.tf }}>No links</span>}
+              {!cwaUrl && !calibreUrl && <span style={{ fontSize: 11, color: t.tf }}>No links</span>}
             </div>
           </div>
         </div>
@@ -133,7 +133,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
                 <Pill label="Cookie" ok={mam?.validation_ok} warn={mam?.cookie_configured && !mam?.validation_ok} />
                 <Pill label="Watcher" ok={health?.dispatcher_ready} />
                 <div style={{ background: t.bg3, borderRadius: 8, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontSize: 11, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>Poll</span>
+                  <span style={{ fontSize: 12, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>Poll</span>
                   <span style={{ fontSize: 18, fontWeight: 700, color: cd <= 5 ? t.accent : t.text2 }}>{cd}s</span>
                 </div>
               </div>
@@ -143,11 +143,11 @@ export default function UnifiedDashboard({ onNav }: Props) {
                 <div style={{ fontSize: 12, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>{mam.username}</div>
                 {mam.classname && <div style={{ fontSize: 11, color: t.tf }}>{mam.classname}</div>}
                 <div style={{ display: "flex", gap: 14, justifyContent: "flex-end", marginTop: 6 }}>
-                  {mam.ratio != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: mam.ratio >= 1 ? t.ok : t.warn }}>{fmtRatio(mam.ratio)}</div><div style={{ fontSize: 10, color: t.td }}>Ratio</div></div>}
-                  {mam.wedges != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: t.accent }}>{fmtNum(mam.wedges)}</div><div style={{ fontSize: 10, color: t.td }}>Wedges</div></div>}
+                  {mam.ratio != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: mam.ratio >= 1 ? t.ok : t.warn }}>{fmtRatio(mam.ratio)}</div><div style={{ fontSize: 11, color: t.td }}>Ratio</div></div>}
+                  {mam.wedges != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: t.accent }}>{fmtNum(mam.wedges)}</div><div style={{ fontSize: 11, color: t.td }}>Wedges</div></div>}
                 </div>
                 {(mam.uploaded_bytes || mam.downloaded_bytes) && (
-                  <div style={{ fontSize: 10, color: t.tf, marginTop: 4 }}>↑ {fmtBytes(mam.uploaded_bytes)} · ↓ {fmtBytes(mam.downloaded_bytes)}</div>
+                  <div style={{ fontSize: 11, color: t.tf, marginTop: 4 }}>↑ {fmtBytes(mam.uploaded_bytes)} · ↓ {fmtBytes(mam.downloaded_bytes)}</div>
                 )}
               </div>
             )}
@@ -161,12 +161,12 @@ export default function UnifiedDashboard({ onNav }: Props) {
         <div style={{ display: "grid", gridTemplateColumns: "200px 1fr 1fr", gap: 0 }}>
           {/* Snatch Budget */}
           <div style={{ paddingRight: 16 }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Snatch Budget</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Snatch Budget</div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
               <span style={{ fontSize: 22, fontWeight: 700, color: (b.budget_used ?? 0) >= (b.budget_cap ?? 1) ? t.warn : t.accent }}>{b.budget_used ?? 0}</span>
               <span style={{ fontSize: 12, color: t.td }}>/ {b.budget_cap ?? 0}</span>
             </div>
-            <div style={{ fontSize: 10, color: t.td, marginTop: 1 }}>
+            <div style={{ fontSize: 11, color: t.td, marginTop: 1 }}>
               {b.ledger_active ?? 0} active + {b.qbit_extras ?? 0} manual
               {(b.queue_size ?? 0) > 0 && <span style={{ color: t.warn }}> · {b.queue_size} queued</span>}
             </div>
@@ -174,17 +174,17 @@ export default function UnifiedDashboard({ onNav }: Props) {
           </div>
           {/* Recent Activity */}
           <div style={{ ...vsep, paddingRight: 16, overflow: "hidden" }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Recent Activity</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Recent Activity</div>
             {grabs.length > 0 ? grabs.slice(0, 5).map((g, i) => (
-              <div key={i} style={{ display: "flex", fontSize: 11, padding: "2px 0", borderBottom: i < 4 ? `1px solid ${t.borderL}` : "none", overflow: "hidden" }}>
+              <div key={i} style={{ display: "flex", fontSize: 12, padding: "2px 0", borderBottom: i < 4 ? `1px solid ${t.borderL}` : "none", overflow: "hidden" }}>
                 <span style={{ color: t.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{g.torrent_name}</span>
                 <span style={{ color: t.tf, marginLeft: 8, flexShrink: 0, fontSize: 10 }}>{g.grabbed_at ? new Date(g.grabbed_at + "Z").toLocaleDateString() : ""}</span>
               </div>
-            )) : <div style={{ fontSize: 11, color: t.tf, fontStyle: "italic" }}>No recent grabs</div>}
+            )) : <div style={{ fontSize: 12, color: t.tf, fontStyle: "italic" }}>No recent grabs</div>}
           </div>
           {/* Seeding Progress */}
           <div style={vsep}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Seeding Progress</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Seeding Progress</div>
             {b.entries?.length > 0 ? (
               <div style={{ maxHeight: 100, overflowY: "auto" }}>
                 {b.entries.map((e, i) => {
@@ -201,7 +201,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
                   );
                 })}
               </div>
-            ) : <div style={{ fontSize: 11, color: t.tf, fontStyle: "italic" }}>No active seeds</div>}
+            ) : <div style={{ fontSize: 12, color: t.tf, fontStyle: "italic" }}>No active seeds</div>}
           </div>
         </div>
       </div>
@@ -225,14 +225,14 @@ export default function UnifiedDashboard({ onNav }: Props) {
             </div>
             {/* Progress display */}
             <div style={vsep}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Progress</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Progress</div>
               <ProgressRow label="Library Sync" scan={libScan} t={t} />
               <ProgressRow label="Source Scan" scan={srcScan} t={t} onCancel={srcScan.running ? cancelSources : undefined} />
               <ProgressRow label="MAM Scan" scan={mamScan} t={t} onCancel={mamScan.running ? cancelMam : undefined} />
             </div>
             {/* Scan stats summary */}
             <div style={{ ...vsep, minWidth: 150 }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Last Scan</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Last Scan</div>
               {srcScan.status === "complete" && srcScan.extra?.source_timeouts && Object.keys(srcScan.extra.source_timeouts).length > 0 ? (
                 <div style={{ fontSize: 12, color: t.warn }}>
                   {Object.entries(srcScan.extra.source_timeouts).map(([src, sec]) => (
@@ -256,7 +256,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
           <div style={{ ...hdr(), marginBottom: 6 }}><Dot color={t.accent} /> Quick Actions</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, flex: 1 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              <div style={{ fontSize: 9, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 1 }}>Discovery</div>
+              <div style={{ fontSize: 10, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 1 }}>Discovery</div>
               <QBtn label=<><Dot color={t.accent} /> Library</> onClick={() => onNav("disc-library")} />
               <QBtn label=<><Dot color={t.accent} /> Authors</> onClick={() => onNav("disc-authors")} />
               <QBtn label=<><Dot color={t.ylw} /> Missing</> onClick={() => onNav("disc-missing")} />
@@ -265,7 +265,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
               <QBtn label=<><Dot color={t.pur} /> Suggestions</> onClick={() => onNav("disc-suggestions")} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              <div style={{ fontSize: 9, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 1 }}>Pipeline</div>
+              <div style={{ fontSize: 10, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 1 }}>Pipeline</div>
               <QBtn label={`Review ${reviewCount ? `(${reviewCount})` : ""}`} primary onClick={() => onNav("pipe-review")} />
               <QBtn label=<><Dot color={t.warn} /> New Authors</> onClick={() => onNav("pipe-tentative")} />
               <QBtn label=<><Dot color={t.td} /> Weekly Ignored</> onClick={() => onNav("pipe-ignored")} />
@@ -275,7 +275,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
             </div>
           </div>
           <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 6, marginTop: 6 }}>
-            <div style={{ fontSize: 9, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 5, textAlign: "center" }}>Tools</div>
+            <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 5, textAlign: "center" }}>Tools</div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
               <TBtn icon={<Bar color={t.ylw} />} label="Migration" onClick={() => onNav("pipe-migration")} />
               <TBtn icon={<Bar color={t.cyan} />} label="MAM" onClick={() => onNav("pipe-mam")} />
@@ -321,7 +321,7 @@ function MiniBox({ value, label, color, onClick }) {
       display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
     }}>
       <div style={{ fontSize: 22, fontWeight: 700, color: color || t.text }}>{value}</div>
-      <div style={{ fontSize: 10, color: t.td, marginTop: 3 }}>{label}</div>
+      <div style={{ fontSize: 11, color: t.td, marginTop: 3 }}>{label}</div>
     </div>
   );
 }
@@ -334,8 +334,8 @@ function Pill({ label, ok, warn }) {
     <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 0" }}>
       <div style={{ width: 10, height: 10, borderRadius: "50%", background: color, boxShadow: ok ? `0 0 6px ${color}66` : "none" }} />
       <div>
-        <div style={{ fontSize: 13, fontWeight: 600, color: t.text2 }}>{label}</div>
-        <div style={{ fontSize: 11, color }}>{text}</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: t.text2 }}>{label}</div>
+        <div style={{ fontSize: 12, color }}>{text}</div>
       </div>
     </div>
   );
@@ -345,9 +345,9 @@ function Tile({ label, value, color, sub, onClick }) {
   const t = useTheme();
   return (
     <div onClick={onClick} style={{ background: t.bg3, borderRadius: 8, padding: "10px 12px", cursor: onClick ? "pointer" : "default" }}>
-      <div style={{ fontSize: 18, fontWeight: 700, color: color || t.text }}>{value === null ? <Spin size={14} /> : value}</div>
-      <div style={{ fontSize: 10, color: t.td, marginTop: 2 }}>{label}</div>
-      {sub && <div style={{ fontSize: 8, color: t.tf, marginTop: 1, textTransform: "uppercase", letterSpacing: "0.04em" }}>{sub}</div>}
+      <div style={{ fontSize: 20, fontWeight: 700, color: color || t.text }}>{value === null ? <Spin size={14} /> : value}</div>
+      <div style={{ fontSize: 12, color: t.td, marginTop: 2 }}>{label}</div>
+      {sub && <div style={{ fontSize: 9, color: t.tf, marginTop: 1, textTransform: "uppercase", letterSpacing: "0.04em" }}>{sub}</div>}
     </div>
   );
 }
