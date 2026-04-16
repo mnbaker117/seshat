@@ -25,7 +25,8 @@ import DatabasePage from "./pages/DatabasePage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 
-// Discovery pages (from AthenaScout)
+// Unified + Discovery pages
+import UnifiedDashboard from "./pages/UnifiedDashboard";
 import DiscDashboard from "./pages/DiscDashboard";
 import DiscBooksPage from "./pages/DiscBooksPage";
 import DiscAuthorsPage from "./pages/DiscAuthorsPage";
@@ -64,6 +65,7 @@ const PIPELINE_NAV = [
 ];
 
 const WIDE_PAGES = new Set([
+  "dashboard", "disc-dashboard", "pipe-dashboard",
   "disc-library", "disc-authors", "disc-author-detail",
   "disc-missing", "disc-upcoming", "disc-mam", "disc-suggestions",
   "disc-hidden", "disc-importexport",
@@ -94,8 +96,9 @@ function renderPage(
 ) {
   switch (page) {
     // Dashboard
-    case "dashboard":          return <PipelineDashboard onNav={nav} />;
+    case "dashboard":          return <UnifiedDashboard onNav={nav} />;
     case "disc-dashboard":     return <DiscDashboard onNav={nav} />;
+    case "pipe-dashboard":     return <PipelineDashboard onNav={nav} />;
 
     // Discovery pages (use onNav prop + useTheme context)
     case "disc-library":       return <DiscBooksPage title="Library" apiPath="/discovery/books" extraParams={{owned: "1"}} />;
