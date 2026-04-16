@@ -1,8 +1,8 @@
 # Seshat docker-compose example.
 #
-# Credentials are entered through the web UI after first boot — NOT
-# as environment variables. The only env vars here are for paths and
-# the web server port.
+# Seshat is a unified book discovery + acquisition platform.
+# One container handles library scanning, metadata lookup, MAM
+# IRC monitoring, torrent management, and Calibre delivery.
 #
 # Quick start:
 #   1. Copy this file to docker-compose.yml
@@ -26,34 +26,35 @@ services:
       - "8789:8789"
     volumes:
       # Persistent data: settings.json, seshat.db, seshat_auth.db,
-      # auth_secret. Survives container recreation.
+      # per-library discovery DBs, auth_secret.
       - ./data:/app/data
 
-      # Calibre library — for the Calibre sink (direct calibredb add).
-      # Only needed if using default_sink=calibre.
-      # - /path/to/calibre/books:/calibre
+      # ── Discovery domain mounts ────────────────────────────
+      # Calibre library — read-only mount for library discovery + sync.
+      # Seshat reads metadata.db to discover your books and authors.
+      - /path/to/calibre/books:/calibre:ro
+
+      # ── Pipeline domain mounts ─────────────────────────────
+      # Download client downloads — shared volume with your torrent client.
+      # Seshat reads completed downloads from here for the pipeline.
+      - /path/to/downloads:/downloads
+
+      # Staging — temporary workspace for metadata patching.
+      - ./staging:/staging
+
+      # Review staging — patched books awaiting your approval.
+      - ./review-staging:/review-staging
 
       # CWA ingest — for the CWA sink (Calibre-Web-Automated).
       # Drop files here and CWA auto-imports into Calibre.
       # - /path/to/cwa-import:/cwa-ingest
 
-      # Download client downloads — shared volume with your torrent client.
-      # Seshat reads completed downloads from here for the pipeline.
-      # - /path/to/downloads:/downloads
-
-      # Staging — temporary workspace for metadata patching.
-      # - ./staging:/staging
-
-      # Review staging — patched books awaiting your approval.
-      # - ./review-staging:/review-staging
-
     environment:
-      # Web server port (default 8789).
+      # Web server port.
       WEBUI_PORT: "8789"
 
-      # Data directory inside the container (default /app/data).
-      # Change only if you mount a different path above.
-      # DATA_DIR: "/app/data"
+      # Calibre library root path inside the container.
+      CALIBRE_PATH: "/calibre"
 
     healthcheck:
       test: ["CMD", "python", "-c",

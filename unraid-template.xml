@@ -12,9 +12,11 @@
   <Support>https://github.com/mnbaker117/seshat/issues</Support>
   <Project>https://github.com/mnbaker117/seshat</Project>
   <Overview>
-    Seshat is a self-hosted MAM (MyAnonamouse) courier and Calibre ingest pipeline. It watches MAM's IRC channel for new book announcements, filters them against your author allow/ignore lists, downloads them via your torrent client, enriches metadata from 7 sources (MAM, Goodreads, Amazon, Hardcover, Kobo, IBDB, Google Books), and queues them for your review before delivering to Calibre/CWA.
+    Seshat is a self-hosted book discovery and acquisition platform. It scans your Calibre library against multiple metadata sources, searches MyAnonamouse for missing titles, and automates the full pipeline from IRC announce monitoring through torrent management, metadata enrichment, and Calibre delivery — all from a single unified interface.
 
-    Features: IRC announce monitoring, author-based filtering with tentative/ignored review flows, VIP/freeleech/wedge/ratio policy engine, snatch budget management with queue and delayed folder rotation, mandatory manual review queue with cover images, metadata enrichment from 7 sources, daily/weekly ntfy digest notifications, migration wizard, multi-client support (qBittorrent, Transmission, Deluge, rTorrent), encrypted credential storage, dark/dim/light themes.
+    Discovery: Sync Calibre libraries, scan 7 metadata sources (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google Books, MAM), manage authors and series, find missing books.
+
+    Pipeline: IRC announce monitoring, author-based filtering, VIP/freeleech/wedge/ratio policy engine, snatch budget management, mandatory review queue with cover images, multi-client support (qBittorrent, Transmission, Deluge, rTorrent), CWA/Calibre/folder delivery sinks.
 
     All credentials are entered through the web UI after first boot — no secrets in environment variables.
   </Overview>
@@ -25,7 +27,7 @@
   <ExtraParams/>
   <PostArgs/>
   <Description>
-    MAM courier and Calibre ingest pipeline. Watches IRC for book announcements, filters by author, downloads via your torrent client, enriches metadata, and queues for review before Calibre delivery. Multi-client, multi-source, encrypted creds, dark/dim/light UI.
+    Self-hosted book discovery and acquisition platform. Scans Calibre libraries, searches MAM for missing titles, monitors IRC for new books, downloads via your torrent client, enriches metadata from 7 sources, and delivers to Calibre after review.
   </Description>
 
   <!-- ─── Web UI ────────────────────────────────────────────── -->
@@ -79,10 +81,10 @@
     Target="/calibre"
     Default=""
     Mode="rw"
-    Description="Path to your Calibre library directory (the folder containing metadata.db). Only needed if using the direct Calibre sink (calibredb add)."
+    Description="Path to your Calibre library directory (the folder containing metadata.db). Used by the Discovery domain for library sync and by the Pipeline for direct Calibre sink delivery."
     Type="Path"
     Display="always"
-    Required="false"
+    Required="true"
     Mask="false"></Config>
 
   <Config
@@ -117,6 +119,16 @@
     Display="advanced"
     Required="false"
     Mask="false">8789</Config>
+
+  <Config
+    Name="Calibre Library Path"
+    Target="CALIBRE_PATH"
+    Default="/calibre"
+    Description="Path to the Calibre library root inside the container. Used for library discovery and sync."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">/calibre</Config>
 
   <Config
     Name="Verbose Logging"
