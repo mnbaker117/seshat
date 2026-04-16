@@ -1,26 +1,39 @@
-// Seshat app shell — mirrors AthenaScout's UI patterns.
+// Seshat — unified book discovery + acquisition platform.
 //
-// Nav structure: primary workflow pages in the horizontal bar,
-// secondary/power-user pages as icon buttons on the right side.
-// Dashboard is the logo click target.
+// Two-section navigation:
+//   Discovery: Library, Authors, Missing, Upcoming, MAM Search, Suggestions
+//   Pipeline:  Review, New Authors, Weekly Ignored, Author Lists, Delayed
+//   Shared:    Dashboard, Settings, Logs, Database, Filters
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { ThemeProvider, useTheme, useThemeControls } from "./theme";
 import { Spin } from "./components/Spin";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+
+// Pipeline pages (from Hermeece)
 import LoginPage from "./pages/LoginPage";
-import AuthorsPage from "./pages/AuthorsPage";
-import Dashboard from "./pages/Dashboard";
+import PipelineDashboard from "./pages/Dashboard";
+import ReviewPage from "./pages/ReviewPage";
+import TentativePage from "./pages/TentativePage";
+import IgnoredWeeklyPage from "./pages/IgnoredWeeklyPage";
+import PipelineAuthorsPage from "./pages/AuthorsPage";
 import DelayedPage from "./pages/DelayedPage";
 import FiltersPage from "./pages/FiltersPage";
-import IgnoredWeeklyPage from "./pages/IgnoredWeeklyPage";
+import MigrationPage from "./pages/MigrationPage";
+import PipelineMamPage from "./pages/MamPage";
 import DatabasePage from "./pages/DatabasePage";
 import LogsPage from "./pages/LogsPage";
-import MamPage from "./pages/MamPage";
-import MigrationPage from "./pages/MigrationPage";
-import ReviewPage from "./pages/ReviewPage";
 import SettingsPage from "./pages/SettingsPage";
-import TentativePage from "./pages/TentativePage";
+
+// Discovery pages (from AthenaScout)
+import DiscDashboard from "./pages/DiscDashboard";
+import DiscBooksPage from "./pages/DiscBooksPage";
+import DiscAuthorsPage from "./pages/DiscAuthorsPage";
+import DiscAuthorDetailPage from "./pages/DiscAuthorDetailPage";
+import DiscMAMPage from "./pages/DiscMAMPage";
+import DiscSuggestionsPage from "./pages/DiscSuggestionsPage";
+import DiscHiddenPage from "./pages/DiscHiddenPage";
+import DiscImportExportPage from "./pages/DiscImportExportPage";
 
 interface AuthState {
   loading: boolean;
@@ -29,248 +42,294 @@ interface AuthState {
   username?: string;
 }
 
-interface CheckResponse {
-  authenticated: boolean;
-  first_run: boolean;
-  username?: string;
-}
+type Section = "discovery" | "pipeline";
 
-// Primary nav: the daily-driver pages. Kept short so the bar doesn't
-// overflow on narrow screens. Mirrors AthenaScout's 6-item main nav.
-const NAV: { id: string; label: string; icon: string }[] = [
-  { id: "review", label: "Book Review", icon: "📚" },
-  { id: "tentative", label: "New Authors", icon: "🔎" },
-  { id: "ignored-weekly", label: "Weekly Ignored", icon: "📊" },
-  { id: "authors", label: "Author Lists", icon: "👤" },
+// ─── Navigation definitions ─────────────────────────────────
+
+const DISCOVERY_NAV = [
+  { id: "disc-library",     label: "Library",     icon: "📖" },
+  { id: "disc-authors",     label: "Authors",     icon: "◉" },
+  { id: "disc-missing",     label: "Missing",     icon: "◌" },
+  { id: "disc-upcoming",    label: "Upcoming",    icon: "📅" },
+  { id: "disc-mam",         label: "MAM Search",  icon: "🔍" },
+  { id: "disc-suggestions", label: "Suggestions", icon: "💡" },
 ];
 
-// ─── Per-page content widths ────────────────────────────────
-// Data-heavy pages (lists, tables, log streams) get a wider
-// container so columns and review cards have breathing room.
-// Form/config pages (Settings, Filters, MAM status panel) stay
-// narrow because line length matters more than horizontal real
-// estate. Navbar uses WIDE_WIDTH too so the nav cluster doesn't
-// overflow on a mid-sized screen (9 nav+icon items + sign-out
-// button is tight at 1120px) AND so wide pages don't look
-// off-center when the navbar above them stops short.
-const NARROW_WIDTH = 1120;
-const WIDE_WIDTH = 1400;
+const PIPELINE_NAV = [
+  { id: "pipe-review",      label: "Review",        icon: "📚" },
+  { id: "pipe-tentative",   label: "New Authors",   icon: "🔎" },
+  { id: "pipe-ignored",     label: "Weekly Ignored", icon: "📊" },
+  { id: "pipe-authors",     label: "Author Lists",  icon: "👤" },
+  { id: "pipe-delayed",     label: "Delayed",       icon: "⏳" },
+];
+
 const WIDE_PAGES = new Set([
-  "review", "tentative", "ignored-weekly", "authors",
-  "delayed", "migration", "logs", "database",
+  "disc-library", "disc-authors", "disc-author-detail",
+  "disc-missing", "disc-upcoming", "disc-mam", "disc-suggestions",
+  "disc-hidden", "disc-importexport",
+  "pipe-review", "pipe-tentative", "pipe-ignored", "pipe-authors",
+  "pipe-delayed", "pipe-migration",
+  "logs", "database",
 ]);
-const widthFor = (page: string): number =>
-  WIDE_PAGES.has(page) ? WIDE_WIDTH : NARROW_WIDTH;
 
 function loadSavedPage(): string {
+  try { return localStorage.getItem("seshat_page") || "dashboard"; }
+  catch { return "dashboard"; }
+}
+
+function loadSavedSection(): Section {
   try {
-    return localStorage.getItem("seshat_page") || "dashboard";
-  } catch {
-    return "dashboard";
+    const s = localStorage.getItem("seshat_section");
+    if (s === "discovery" || s === "pipeline") return s;
+  } catch { /* */ }
+  return "discovery";
+}
+
+// ─── Page rendering ─────────────────────────────────────────
+
+function renderPage(
+  page: string,
+  pageArg: string | number | null,
+  nav: (p: string, arg?: string | number | null) => void,
+  t: ReturnType<typeof useTheme>,
+) {
+  switch (page) {
+    // Dashboard
+    case "dashboard":          return <PipelineDashboard nav={nav} t={t} />;
+    case "disc-dashboard":     return <DiscDashboard nav={nav} t={t} />;
+
+    // Discovery pages
+    case "disc-library":       return <DiscBooksPage nav={nav} t={t} mode="owned" />;
+    case "disc-missing":       return <DiscBooksPage nav={nav} t={t} mode="missing" />;
+    case "disc-upcoming":      return <DiscBooksPage nav={nav} t={t} mode="upcoming" />;
+    case "disc-authors":       return <DiscAuthorsPage nav={nav} t={t} />;
+    case "disc-author-detail": return <DiscAuthorDetailPage nav={nav} t={t} authorId={pageArg as number} />;
+    case "disc-mam":           return <DiscMAMPage nav={nav} t={t} />;
+    case "disc-suggestions":   return <DiscSuggestionsPage nav={nav} t={t} />;
+    case "disc-hidden":        return <DiscHiddenPage nav={nav} t={t} />;
+    case "disc-importexport":  return <DiscImportExportPage nav={nav} t={t} />;
+
+    // Pipeline pages
+    case "pipe-review":        return <ReviewPage nav={nav} t={t} />;
+    case "pipe-tentative":     return <TentativePage nav={nav} t={t} />;
+    case "pipe-ignored":       return <IgnoredWeeklyPage nav={nav} t={t} />;
+    case "pipe-authors":       return <PipelineAuthorsPage nav={nav} t={t} />;
+    case "pipe-delayed":       return <DelayedPage nav={nav} t={t} />;
+    case "pipe-migration":     return <MigrationPage nav={nav} t={t} />;
+    case "pipe-mam":           return <PipelineMamPage nav={nav} t={t} />;
+
+    // Shared pages
+    case "filters":            return <FiltersPage nav={nav} t={t} />;
+    case "settings":           return <SettingsPage nav={nav} t={t} />;
+    case "logs":               return <LogsPage nav={nav} t={t} />;
+    case "database":           return <DatabasePage nav={nav} t={t} />;
+
+    default:                   return <PipelineDashboard nav={nav} t={t} />;
   }
 }
 
-export default function App() {
-  return (
-    <ThemeProvider>
-      <AppInner />
-    </ThemeProvider>
-  );
-}
+// ─── Main App ───────────────────────────────────────────────
 
-function AppInner() {
-  const theme = useTheme();
-  const [auth, setAuth] = useState<AuthState>({
-    loading: true,
-    authenticated: false,
-    firstRun: false,
-  });
-  const [page, setPage] = useState<string>(loadSavedPage);
+function SeshatApp() {
+  const t = useTheme();
+  const { cycle, themeName } = useThemeControls();
 
-  async function checkAuth() {
-    try {
-      const r = await api.get<CheckResponse>("/auth/check");
-      setAuth({
-        loading: false,
-        authenticated: !!r.authenticated,
-        firstRun: !!r.first_run,
-        username: r.username,
-      });
-    } catch {
-      setAuth({ loading: false, authenticated: false, firstRun: false });
-    }
-  }
+  const [auth, setAuth] = useState<AuthState>({ loading: true, authenticated: false, firstRun: false });
+  const [page, setPage] = useState(loadSavedPage);
+  const [pageArg, setPageArg] = useState<string | number | null>(null);
+  const [section, setSection] = useState<Section>(loadSavedSection);
 
-  useEffect(() => {
-    checkAuth();
-    const onAuthRequired = () => {
-      setAuth((s) =>
-        s.authenticated
-          ? { loading: false, authenticated: false, firstRun: false }
-          : s,
-      );
-    };
-    window.addEventListener("seshat:auth-required", onAuthRequired);
-    return () =>
-      window.removeEventListener("seshat:auth-required", onAuthRequired);
-  }, []);
-
-  function nav(p: string) {
+  const nav = (p: string, arg?: string | number | null) => {
     setPage(p);
+    setPageArg(arg ?? null);
     try { localStorage.setItem("seshat_page", p); } catch { /* */ }
     window.scrollTo(0, 0);
-  }
+  };
 
-  async function logout() {
-    if (!confirm("Sign out of Seshat?")) return;
-    try { await api.post("/auth/logout"); } catch { /* */ }
-    setAuth({ loading: false, authenticated: false, firstRun: false });
-  }
+  const switchSection = (s: Section) => {
+    setSection(s);
+    try { localStorage.setItem("seshat_section", s); } catch { /* */ }
+  };
+
+  // Auth check
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const r = await api.get<{ authenticated: boolean; first_run: boolean; username?: string }>("/auth/check");
+        setAuth({ loading: false, authenticated: r.authenticated, firstRun: r.first_run, username: r.username });
+      } catch {
+        setAuth({ loading: false, authenticated: false, firstRun: false });
+      }
+    };
+    check();
+    const onAuthRequired = () => setAuth(a => ({ ...a, authenticated: false }));
+    window.addEventListener("seshat:auth-required", onAuthRequired);
+    return () => window.removeEventListener("seshat:auth-required", onAuthRequired);
+  }, []);
 
   if (auth.loading) {
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: theme.bg }}>
-        <Spin />
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100vh", background: t.bg }}>
+        <Spin size={28} />
       </div>
     );
   }
 
   if (!auth.authenticated) {
-    return <LoginPage firstRun={auth.firstRun} onLoginSuccess={() => checkAuth()} />;
+    return <LoginPage onLogin={() => setAuth(a => ({ ...a, authenticated: true, loading: false }))} firstRun={auth.firstRun} t={t} />;
   }
 
+  const themeIcon = themeName === "dark" ? "🌙" : themeName === "dim" ? "⛅" : "☀️";
+  const activeNav = section === "discovery" ? DISCOVERY_NAV : PIPELINE_NAV;
+  const maxW = WIDE_PAGES.has(page) ? 1400 : 1120;
+
   return (
-    <div style={{ minHeight: "100vh", background: theme.bg, color: theme.text2 }}>
-      {/* ── Sticky nav ── */}
+    <div style={{ minHeight: "100vh", background: t.bg, color: t.text }}>
+      {/* ─── Navbar ─────────────────────────────────────────── */}
       <nav style={{
-        position: "sticky", top: 0, zIndex: 50,
-        background: theme.bg + "ee", backdropFilter: "blur(12px)",
-        borderBottom: `1px solid ${theme.borderL}`,
+        background: t.bg2,
+        borderBottom: `1px solid ${t.border}`,
+        display: "flex",
+        alignItems: "center",
+        padding: "0 16px",
+        height: 48,
+        position: "sticky",
+        top: 0,
+        zIndex: 100,
       }}>
-        <div style={{
-          maxWidth: WIDE_WIDTH, margin: "0 auto", padding: "0 24px",
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          height: 64, gap: 10,
-        }}>
-          {/* Logo / Dashboard link */}
-          <button onClick={() => nav("dashboard")} style={{
-            background: "none", border: "none", cursor: "pointer",
-            fontSize: 20, fontWeight: 700, color: theme.accent, padding: 0,
-            flexShrink: 0, position: "relative", paddingBottom: 4,
-          }}>
-            Seshat
-            {page === "dashboard" && (
-              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 2, background: theme.accent, borderRadius: 1 }} />
-            )}
-          </button>
+        {/* Logo / Dashboard */}
+        <div
+          onClick={() => nav("dashboard")}
+          style={{
+            cursor: "pointer",
+            fontWeight: 800,
+            fontSize: 18,
+            color: t.accent,
+            letterSpacing: "0.02em",
+            marginRight: 20,
+            userSelect: "none",
+          }}
+        >
+          𓋹 Seshat
+        </div>
 
-          {/* Primary nav items */}
-          <div style={{ display: "flex", gap: 4, flex: 1, marginLeft: 20, overflowX: "auto" }}>
-            {NAV.map((n) => (
-              <button
-                key={n.id}
-                onClick={() => nav(n.id)}
-                style={{
-                  padding: "9px 16px", borderRadius: 8, fontSize: 15,
-                  fontWeight: 500, border: "none", cursor: "pointer",
-                  display: "inline-flex", alignItems: "center", gap: 7,
-                  height: 40, whiteSpace: "nowrap", flexShrink: 0,
-                  background: page === n.id ? theme.bg4 : "transparent",
-                  color: page === n.id ? theme.accent : theme.text2,
-                }}
-              >
-                <span style={{ fontSize: 17, lineHeight: 1 }}>{n.icon}</span>
-                {n.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Separator between nav pages and icon cluster */}
-          <div style={{ width: 1, height: 28, background: theme.border, flexShrink: 0, marginLeft: 8, marginRight: 4 }} />
-
-          {/* Right-side icon cluster: secondary pages + user actions */}
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-            <NavIcon page={page} target="filters" icon="🎯" title="Torrent Filters" onClick={() => nav("filters")} />
-            <NavIcon page={page} target="mam" icon="📡" title="MAM Status" onClick={() => nav("mam")} />
-            <NavIcon page={page} target="logs" icon="📝" title="Logs" onClick={() => nav("logs")} />
-            <NavIcon page={page} target="database" icon="🗄️" title="Database browser" onClick={() => nav("database")} />
-            <NavIcon page={page} target="settings" icon="⚙️" title="Settings" onClick={() => nav("settings")} />
-            <ThemeToggleButton />
-            <button onClick={logout} style={{
-              background: "transparent", border: `1px solid ${theme.border}`,
-              color: theme.text2, padding: "7px 12px", borderRadius: 8,
-              fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
-            }}>
-              Sign out
+        {/* Section switcher */}
+        <div style={{ display: "flex", gap: 2, marginRight: 16 }}>
+          {(["discovery", "pipeline"] as Section[]).map(s => (
+            <button
+              key={s}
+              onClick={() => switchSection(s)}
+              style={{
+                background: section === s ? t.abg : "transparent",
+                color: section === s ? t.accent : t.td,
+                border: `1px solid ${section === s ? t.abr : "transparent"}`,
+                borderRadius: 6,
+                padding: "4px 12px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                textTransform: "capitalize",
+              }}
+            >
+              {s}
             </button>
-          </div>
+          ))}
+        </div>
+
+        {/* Section nav items */}
+        <div style={{ display: "flex", gap: 4, flex: 1 }}>
+          {activeNav.map(item => (
+            <button
+              key={item.id}
+              onClick={() => nav(item.id)}
+              style={{
+                background: page === item.id ? t.abg : "transparent",
+                color: page === item.id ? t.accent : t.tm,
+                border: "none",
+                borderRadius: 6,
+                padding: "6px 10px",
+                fontSize: 13,
+                fontWeight: page === item.id ? 600 : 400,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+            >
+              <span>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Right icons */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {[
+            { id: "filters", icon: "🎯", title: "Filters" },
+            { id: "pipe-mam", icon: "📡", title: "MAM Status" },
+            { id: "logs", icon: "📋", title: "Logs" },
+            { id: "database", icon: "🗄️", title: "Database" },
+            { id: "settings", icon: "⚙️", title: "Settings" },
+          ].map(btn => (
+            <button
+              key={btn.id}
+              onClick={() => nav(btn.id)}
+              title={btn.title}
+              style={{
+                background: page === btn.id ? t.abg : "transparent",
+                border: "none",
+                cursor: "pointer",
+                fontSize: 16,
+                padding: "4px 6px",
+                borderRadius: 4,
+                opacity: page === btn.id ? 1 : 0.7,
+              }}
+            >
+              {btn.icon}
+            </button>
+          ))}
+          <button
+            onClick={cycle}
+            title={`Theme: ${themeName}`}
+            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 16, padding: "4px 6px" }}
+          >
+            {themeIcon}
+          </button>
+          <button
+            onClick={async () => {
+              if (!confirm("Sign out of Seshat?")) return;
+              try { await api.post("/auth/logout", {}); } catch { /* */ }
+              setAuth({ loading: false, authenticated: false, firstRun: false });
+            }}
+            title="Sign out"
+            style={{
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 13,
+              color: t.td,
+              padding: "4px 8px",
+            }}
+          >
+            ⏻
+          </button>
         </div>
       </nav>
 
-      {/* ── Main content ── */}
-      <main style={{ maxWidth: widthFor(page), margin: "0 auto", padding: "28px 24px" }}>
-        <ErrorBoundary onReset={() => nav("dashboard")} key={page}>
-          <div style={{ animation: "fade-in 0.2s ease-out" }}>
-            {page === "dashboard" && <Dashboard onNav={nav} />}
-            {page === "review" && <ReviewPage />}
-            {page === "tentative" && <TentativePage />}
-            {page === "ignored-weekly" && <IgnoredWeeklyPage />}
-            {page === "authors" && <AuthorsPage />}
-            {page === "filters" && <FiltersPage />}
-            {page === "delayed" && <DelayedPage />}
-            {page === "migration" && <MigrationPage />}
-            {page === "mam" && <MamPage />}
-            {page === "logs" && <LogsPage />}
-            {page === "database" && <DatabasePage />}
-            {page === "settings" && <SettingsPage />}
-          </div>
+      {/* ─── Page content ───────────────────────────────────── */}
+      <main style={{ maxWidth: maxW, margin: "0 auto", padding: "24px 16px" }}>
+        <ErrorBoundary>
+          {renderPage(page, pageArg, nav, t)}
         </ErrorBoundary>
       </main>
     </div>
   );
 }
 
-function NavIcon({ page, target, icon, title, onClick }: {
-  page: string; target: string; icon: string; title: string; onClick: () => void;
-}) {
-  const theme = useTheme();
+export default function App() {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        width: 40, height: 40, borderRadius: 8,
-        fontSize: 20, border: "none", cursor: "pointer",
-        background: page === target ? theme.bg4 : "transparent",
-        color: page === target ? theme.accent : theme.text2,
-        display: "inline-flex", alignItems: "center", justifyContent: "center",
-        transition: "background 0.15s",
-      }}
-    >
-      {icon}
-    </button>
-  );
-}
-
-function ThemeToggleButton() {
-  const theme = useTheme();
-  const { themeName, cycle } = useThemeControls();
-  const icon = themeName === "dark" ? "🌙" : themeName === "dim" ? "⛅" : "☀️";
-  const next = themeName === "dark" ? "Dim" : themeName === "dim" ? "Light" : "Dark";
-  return (
-    <button
-      onClick={cycle}
-      title={`Theme: ${theme.name} — click for ${next}`}
-      aria-label="Cycle theme"
-      style={{
-        width: 40, height: 40, borderRadius: 8,
-        fontSize: 20, border: "none", cursor: "pointer",
-        background: "transparent", color: theme.text2,
-        display: "inline-flex", alignItems: "center", justifyContent: "center",
-        transition: "background 0.15s",
-      }}
-    >
-      {icon}
-    </button>
+    <ThemeProvider>
+      <SeshatApp />
+    </ThemeProvider>
   );
 }

@@ -1,0 +1,223 @@
+// Shared types for AthenaScout frontend.
+//
+// Kept intentionally lean — only the shapes that cross component
+// boundaries or come back from the API live here. Single-component
+// internal shapes stay inline next to their use site.
+
+import type { CSSProperties, ReactNode } from "react";
+
+// ─── Theme ──────────────────────────────────────────────────
+// Mirrors the palette object in theme.ts. Every key that components
+// read off `useTheme()` must appear here so consumers get IDE
+// completion and miss-typed colors fail compilation.
+export interface Theme {
+  name: string;
+  bg: string; bg2: string; bg3: string; bg4: string;
+  border: string; borderH: string; borderL: string;
+  text: string; text2: string;
+  tm: string; td: string; tf: string; tg: string; ti: string;
+  accent: string; abg: string; abr: string;
+  grn: string; grnt: string; grnb: string;
+  red: string; redt: string; redb: string;
+  ylw: string; ylwt: string; ylwb: string;
+  pur: string; purt: string; purb: string;
+  cyan: string; cyant: string; cyanb: string;
+  inp: string;
+}
+
+export type ThemeName = "dark" | "dim" | "light";
+
+// ─── Common UI prop shapes ──────────────────────────────────
+export interface ChildrenProps {
+  children?: ReactNode;
+}
+
+export interface StyleProps {
+  style?: CSSProperties;
+  className?: string;
+}
+
+// ─── App-level callback shapes ──────────────────────────────
+// `NavFn` is the page-router callback that App.tsx hands down to
+// every page. The arg is page-specific — author detail uses an
+// author id (number), other pages either don't pass anything or
+// pass a string discriminator.
+export type NavFn = (page: string, arg?: number | string | null) => void;
+
+// `BookAction` enumerates the per-row actions BookSidebar /
+// BookViews emit upward. Centralized so a renamed/added action is
+// caught at every consumer instead of silently ignored.
+export type BookAction = "hide" | "unhide" | "dismiss" | "delete";
+export type BookActionHandler = (action: BookAction, bookId: number) => void | Promise<void>;
+
+// `SendToHermeece` is the bulk-send callback used by the MAM page
+// + book sidebar. Returns void; errors surface as toasts.
+export type SendToHermeeceFn = (bookIds: number[]) => void | Promise<void>;
+
+// ─── API response shapes ────────────────────────────────────
+// One per high-traffic endpoint. Use as the generic on api.get<T>()
+// at the call site. Add new ones here as endpoints are typed —
+// don't sprinkle inline anonymous types at call sites.
+
+export interface AuthorsResponse {
+  authors: Author[];
+}
+
+export interface BooksResponse {
+  books: Book[];
+  total: number;
+}
+
+export interface PenNamesResponse {
+  links: PenNameLink[];
+}
+
+export interface MamStatusResponse {
+  enabled: boolean;
+  validation_ok?: boolean;
+  stats?: {
+    upload_candidates?: number;
+    available_to_download?: number;
+    missing_everywhere?: number;
+    total_unscanned?: number;
+  };
+}
+
+export interface ScanStatusResponse {
+  scans: ScanProgress[];
+}
+
+export interface LibrariesResponse {
+  libraries: Library[];
+}
+
+export interface AuthCheckResponse {
+  authenticated: boolean;
+  first_run?: boolean;
+}
+
+export interface SeriesSuggestionCountResponse {
+  pending: number;
+}
+
+// ─── API entity shapes ──────────────────────────────────────
+// Tracks the JSON shape the FastAPI routers actually return. Fields
+// not consumed by the UI are intentionally omitted to keep the
+// surface area small — add them as the UI starts using them.
+export interface Author {
+  id: number;
+  name: string;
+  sort_name?: string | null;
+  bio?: string | null;
+  image_url?: string | null;
+  total_books?: number;
+  owned_count?: number;
+  missing_count?: number;
+  new_count?: number;
+  series_count?: number;
+  link_count?: number;
+  last_lookup_at?: number | null;
+}
+
+export interface Book {
+  id: number;
+  title: string;
+  author_id?: number;
+  author_name?: string;
+  series_id?: number | null;
+  series_name?: string | null;
+  series_index?: number | null;
+  series_total?: number;
+  mainline_total?: number;
+  owned?: 0 | 1;
+  hidden?: 0 | 1;
+  is_unreleased?: 0 | 1;
+  is_omnibus?: 0 | 1;
+  is_new?: 0 | 1;
+  expected_date?: string | null;
+  pub_date?: string | null;
+  publisher?: string | null;
+  language?: string | null;
+  isbn?: string | null;
+  description?: string | null;
+  cover_url?: string | null;
+  cover_path?: string | null;
+  page_count?: number | null;
+  source?: string | null;
+  source_url?: string | null;
+  goodreads_id?: string | null;
+  hardcover_id?: string | null;
+  kobo_id?: string | null;
+  amazon_id?: string | null;
+  ibdb_id?: string | null;
+  google_books_id?: string | null;
+  // MAM
+  mam_url?: string | null;
+  mam_status?: "found" | "possible" | "not_found" | null;
+  mam_formats?: string | null;
+  mam_torrent_id?: string | null;
+  mam_has_multiple?: 0 | 1;
+  mam_my_snatched?: 0 | 1;
+  // Calibre linkage
+  calibre_id?: number | null;
+}
+
+export interface Series {
+  id: number;
+  name: string;
+  book_count?: number;
+  author_book_count?: number;
+  owned_count?: number;
+  missing_count?: number;
+  multi_author?: 0 | 1;
+}
+
+export interface Library {
+  slug: string;
+  name: string;
+  display_name?: string;
+  app_type?: string;
+  content_type?: string;  // "ebook" | "audiobook" | etc. — used for the nav-bar emoji prefix
+  source_db_path?: string;
+  library_path?: string;
+  active?: boolean;
+}
+
+export type LinkType = "pen_name" | "co_author";
+
+export interface PenNameLink {
+  id: number;
+  canonical_author_id: number;
+  alias_author_id: number;
+  canonical_name: string;
+  alias_name: string;
+  link_type: LinkType;
+}
+
+// Unified scan-status entry (one per kind: lookup / mam / library).
+export interface ScanProgress {
+  kind: "lookup" | "mam" | "library";
+  type: string;
+  label: string;
+  running: boolean;
+  current: number;
+  total: number;
+  current_label?: string | null;
+  current_book?: string | null;
+  status: string;
+  completed_at?: number | null;
+  extra?: Record<string, number | null | undefined>;
+}
+
+// ─── App-level event names ──────────────────────────────────
+// Exhaustive list of CustomEvent names dispatched on `window`.
+// Use `window.addEventListener(EVT.X, ...)` to keep typos out.
+export const EVT = {
+  AuthRequired:        "seshat:auth-required",
+  ScansUpdated:        "seshat:scans-updated",
+  ScanCompleted:       "seshat:scan-completed",
+  ScanStarted:         "seshat:scan-started",
+  MamStateChanged:     "seshat:mam-state-changed",
+  SuggestionsChanged:  "seshat:suggestions-changed",
+  Toast:               "seshat:toast",
+} as const;

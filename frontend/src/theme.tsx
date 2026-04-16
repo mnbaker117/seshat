@@ -1,20 +1,20 @@
-// Theme definitions, React context, and hook.
+// Seshat theme — Egyptian goddess color scheme.
 //
-// Three brightness variants mirror AthenaScout's set:
-//   - dark:  near-black with soft accents, default
-//   - dim:   warm charcoal, gentler than full dark
-//   - light: off-white, high readability in bright rooms
+// Three brightness variants:
+//   - dark:  deep indigo with gold accents
+//   - dim:   warm charcoal with muted gold
+//   - light: warm papyrus with rich bronze accents
+//
+// Color palette inspired by Egyptian aesthetics:
+//   - Gold (#d4a357) — primary accent, highlights, links
+//   - Deep indigo (#0a0b1a, #11132a) — dark mode surfaces
+//   - Warm sand/papyrus (#f5f0e8) — light mode surfaces
+//   - Jade green (#4daf8b) — tertiary accent, success states
 //
 // Usage:
 //   import { useTheme } from "../theme";
-//   function MyComponent() {
-//     const t = useTheme();
-//     return <div style={{color: t.text, background: t.bg2}}/>;
-//   }
-//
-// Switching: `useThemeControls()` exposes the current theme name and
-// a `cycle()` callback that rotates through the three variants and
-// persists the selection in localStorage.
+//   const t = useTheme();
+//   <div style={{color: t.text, background: t.bg2}} />
 import {
   createContext,
   useCallback,
@@ -27,81 +27,116 @@ import {
 
 export interface Theme {
   name: string;
-  bg: string;
-  bg2: string;
-  bg3: string;
-  bg4: string;
-  border: string;
-  borderL: string;
-  borderH: string;
-  text: string;
-  text2: string;
-  textDim: string;
-  accent: string;
-  accentDim: string;
-  ok: string;
-  warn: string;
-  err: string;
+  bg: string;   bg2: string;  bg3: string;  bg4: string;
+  border: string; borderL: string; borderH: string;
+  text: string; text2: string;
+  // Extended text gradations (medium → dim → faint → ghost → invisible)
+  tm: string; td: string; tf: string; tg: string; ti: string;
+  // Gold accent
+  accent: string; accentDim: string;
+  abg: string;  // accent background tint
+  abr: string;  // accent border tint
+  // Jade green (tertiary)
+  jade: string; jadeDim: string;
+  // Semantic colors with tints + backgrounds
+  grn: string; grnt: string; grnb: string;
+  red: string; redt: string; redb: string;
+  ylw: string; ylwt: string; ylwb: string;
+  pur: string; purt: string; purb: string;
+  cyan: string; cyant: string; cyanb: string;
+  // Aliases for simple usage
+  ok: string; warn: string; err: string;
   inp: string;
 }
 
 export const THEMES: Record<string, Theme> = {
   dark: {
     name: "Dark",
-    bg: "#0e0f13",
-    bg2: "#161821",
-    bg3: "#1f2230",
-    bg4: "#2a2e3e",
-    border: "#2e3242",
-    borderL: "#1c1f2c",
-    borderH: "#4a4f66",
-    text: "#f0f0f4",
-    text2: "#d6d8df",
-    textDim: "#8a8e9b",
-    accent: "#6fa8ff",
-    accentDim: "#4f7fcc",
-    ok: "#4ec995",
-    warn: "#e8c14a",
-    err: "#ef6464",
-    inp: "#1f2230",
+    // Deep indigo backgrounds
+    bg:  "#0a0b1a",
+    bg2: "#11132a",
+    bg3: "#0e1022",
+    bg4: "#1a1c30",
+    border:  "#2a2c4a",
+    borderL: "#1a1c30",
+    borderH: "#4a4c6a",
+    // Cool-tinted text
+    text:  "#e8e4f0",
+    text2: "#c8c4d8",
+    tm: "#a8a4c0", td: "#8884a0", tf: "#706c90",
+    tg: "#585478", ti: "#404060",
+    // Gold accent
+    accent:    "#d4a357",
+    accentDim: "#b08840",
+    abg: "rgba(212,163,87,0.14)",
+    abr: "rgba(212,163,87,0.30)",
+    // Jade green
+    jade:    "#4daf8b",
+    jadeDim: "#3a8c6e",
+    // Semantic
+    grn: "#4daf8b", grnt: "#3a8c6e", grnb: "rgba(77,175,139,0.12)",
+    red: "#e06060", redt: "#c04848", redb: "rgba(224,96,96,0.12)",
+    ylw: "#e0b84a", ylwt: "#c8a040", ylwb: "rgba(224,184,74,0.12)",
+    pur: "#a07cc8", purt: "#8866b0", purb: "rgba(160,124,200,0.12)",
+    cyan: "#5ab8c8", cyant: "#4898a8", cyanb: "rgba(90,184,200,0.12)",
+    ok: "#4daf8b", warn: "#e0b84a", err: "#e06060",
+    inp: "#11132a",
   },
   dim: {
     name: "Dim",
-    bg: "#2a2a30",
-    bg2: "#333338",
-    bg3: "#2e2e34",
-    bg4: "#3a3a40",
-    border: "#4a4a52",
-    borderL: "#404048",
-    borderH: "#66666e",
-    text: "#eaeaea",
-    text2: "#d8d8d8",
-    textDim: "#9a9ea8",
-    accent: "#7fb0ff",
-    accentDim: "#5f8fcc",
-    ok: "#5bcc9e",
-    warn: "#e8c14a",
-    err: "#ef7070",
-    inp: "#333338",
+    // Warm charcoal
+    bg:  "#28282e",
+    bg2: "#313136",
+    bg3: "#2c2c32",
+    bg4: "#38383e",
+    border:  "#48484e",
+    borderL: "#3e3e44",
+    borderH: "#62626a",
+    text:  "#eae8e4",
+    text2: "#d8d6d0",
+    tm: "#b8b6b0", td: "#989690", tf: "#808078",
+    tg: "#686860", ti: "#585850",
+    accent:    "#e0aa50",
+    accentDim: "#c09040",
+    abg: "rgba(224,170,80,0.16)",
+    abr: "rgba(224,170,80,0.32)",
+    jade:    "#52b890",
+    jadeDim: "#40966e",
+    grn: "#52b890", grnt: "#40966e", grnb: "rgba(82,184,144,0.14)",
+    red: "#e87070", redt: "#c85858", redb: "rgba(232,112,112,0.14)",
+    ylw: "#e8c050", ylwt: "#d0a848", ylwb: "rgba(232,192,80,0.14)",
+    pur: "#a888cc", purt: "#9070b4", purb: "rgba(168,136,204,0.14)",
+    cyan: "#60c0cc", cyant: "#50a0b0", cyanb: "rgba(96,192,204,0.14)",
+    ok: "#52b890", warn: "#e8c050", err: "#e87070",
+    inp: "#313136",
   },
   light: {
     name: "Light",
-    bg: "#f4f5f8",
-    bg2: "#ffffff",
-    bg3: "#fafaf8",
-    bg4: "#eef0f4",
-    border: "#d8dae0",
-    borderL: "#e8eaf0",
-    borderH: "#b0b3bc",
-    text: "#1a1d26",
-    text2: "#30343c",
-    textDim: "#6a6e78",
-    accent: "#3b6fcc",
-    accentDim: "#2e58a0",
-    ok: "#1f8a5e",
-    warn: "#a07824",
-    err: "#c04242",
-    inp: "#ffffff",
+    // Warm papyrus / sand
+    bg:  "#f5f0e8",
+    bg2: "#fffdf8",
+    bg3: "#faf6f0",
+    bg4: "#eee8e0",
+    border:  "#d8d0c4",
+    borderL: "#e8e0d4",
+    borderH: "#b0a898",
+    text:  "#1a1820",
+    text2: "#2a2830",
+    tm: "#504840", td: "#686058", tf: "#887868",
+    tg: "#a09888", ti: "#c0b8a8",
+    accent:    "#b8862d",
+    accentDim: "#9c7028",
+    abg: "rgba(184,134,45,0.10)",
+    abr: "rgba(184,134,45,0.28)",
+    jade:    "#2e8a62",
+    jadeDim: "#247050",
+    grn: "#2e8a62", grnt: "#247050", grnb: "rgba(46,138,98,0.10)",
+    red: "#c04242", redt: "#a03636", redb: "rgba(192,66,66,0.10)",
+    ylw: "#a07824", ylwt: "#886420", ylwb: "rgba(160,120,36,0.10)",
+    pur: "#7856a0", purt: "#644888", purb: "rgba(120,86,160,0.10)",
+    cyan: "#388898", cyant: "#307080", cyanb: "rgba(56,136,152,0.10)",
+    ok: "#2e8a62", warn: "#a07824", err: "#c04242",
+    inp: "#fffdf8",
   },
 };
 
@@ -133,9 +168,7 @@ function loadSavedTheme(): string {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved && THEMES[saved]) return saved;
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
   return "dark";
 }
 
@@ -146,11 +179,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const setThemeName = useCallback((name: string) => {
     if (!THEMES[name]) return;
     setThemeNameState(name);
-    try {
-      localStorage.setItem(STORAGE_KEY, name);
-    } catch {
-      /* ignore */
-    }
+    try { localStorage.setItem(STORAGE_KEY, name); } catch { /* ignore */ }
   }, []);
 
   const cycle = useCallback(() => {
@@ -159,9 +188,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setThemeName(next);
   }, [themeName, setThemeName]);
 
-  // Keep the document background in sync with the active theme so
-  // the initial paint before React mounts doesn't flash the browser
-  // default. Cheap, one DOM write per theme change.
   useEffect(() => {
     document.documentElement.style.background = theme.bg;
     document.documentElement.style.colorScheme =
