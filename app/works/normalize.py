@@ -38,8 +38,15 @@ import unicodedata
 
 _ARTICLE_RX = re.compile(r"^\s*(the|a|an)\s+", re.IGNORECASE)
 _PARENS_RX = re.compile(r"[\(\[\{].*?[\)\]\}]")
+# Trailing series marker — comma-only on purpose. Using `-`/`:`/`;` as
+# separators caused distinct volumes of the same series to collapse
+# ("The Hero-Killing Bride: Volume 1/2/3" all normalizing to
+# "hero killing bride"). In practice, titles that append their volume
+# number via `, Book N` are the accidentally-decorated ones Seshat
+# needs to clean up; titles that carry the volume as part of the name
+# use `:` or `-` and should stay distinct.
 _TRAILING_SERIES_RX = re.compile(
-    r"[,\-:;]\s*(book|vol(?:ume)?|part|chapter|no)\s*[.:]?\s*\d+(?:\s*of\s*\d+)?\s*$",
+    r",\s*(book|vol(?:ume)?|part|chapter|no)\s*[.:]?\s*\d+(?:\s*of\s*\d+)?\s*$",
     re.IGNORECASE,
 )
 _TRAILING_HASH_RX = re.compile(r",?\s*#\d+(?:\.\d+)?\s*$")

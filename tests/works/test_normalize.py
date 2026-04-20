@@ -57,6 +57,28 @@ class TestNormalizeTitle:
         assert normalize_title("Mistborn: The Final Empire, Book 1") == \
                normalize_title("Mistborn: The Final Empire")
 
+    def test_keeps_colon_separated_volume_marker(self):
+        """Distinct volumes in the same series MUST NOT collapse.
+
+        'The Hero-Killing Bride: Volume 1/2/3' are three different books
+        that happen to share a base name. Pre-fix the trailing-series
+        regex treated the `:` as a separator and stripped ': Volume 3',
+        merging all three into one work.
+        """
+        v1 = normalize_title("The Hero-Killing Bride: Volume 1")
+        v2 = normalize_title("The Hero-Killing Bride: Volume 2")
+        v3 = normalize_title("The Hero-Killing Bride: Volume 3")
+        assert v1 != v2
+        assert v2 != v3
+        assert v1 != v3
+
+    def test_keeps_dash_separated_volume_marker(self):
+        """Same concern with dash-separated volume markers — these are
+        part of the title, not decoration."""
+        v1 = normalize_title("Halo - Book One")
+        v2 = normalize_title("Halo - Book Two")
+        assert v1 != v2
+
     def test_drops_trailing_hash(self):
         assert normalize_title("Halo #7") == "halo"
         assert normalize_title("The Stormlight Archive, #1") == "stormlight archive"
