@@ -3,6 +3,8 @@ Unit tests for the Audiobookshelf sink.
 """
 from pathlib import Path
 
+import httpx
+
 from app.metadata.extract import BookMetadata
 from app.sinks.audiobookshelf import AudiobookshelfSink
 
@@ -72,3 +74,100 @@ class TestAudiobookshelfSink:
         assert len(subdirs) == 1
         assert '"' not in str(subdirs[0])
         assert '/' not in subdirs[0].parent.name
+
+
+class TestAudiobookshelfSinkScanTrigger:
+    """Tests for the post-drop ABS library-scan API call."""
+
+    def _inject_transport(self, monkeypatch, handler):
+        orig = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **kw: orig(
+                transport=httpx.MockTransport(handler),
+                **{k: v for k, v in kw.items() if k != "transport"},
+            ),
+        )
+
+    async def test_scan_fires_when_fully_configured(self, tmp_path, monkeypatch):
+        scan_calls: list = []
+
+        def handler(request):
+            assert request.method == "POST"
+            assert request.headers.get("Authorization") == "Bearer test-token"
+            scan_calls.append(request.url.path)
+            return httpx.Response(200, json={})
+
+        self._inject_transport(monkeypatch, handler)
+
+        src = tmp_path / "book.m4b"
+        src.write_bytes(b"content")
+        library = tmp_path / "abs-library"
+
+        sink = AudiobookshelfSink(
+            str(library),
+            abs_base_url="http://abs:13378",
+            abs_api_key="test-token",
+            abs_library_id="lib-xyz",
+        )
+        result = await sink.deliver(
+            str(src), BookMetadata(author="A", title="B"),
+        )
+        assert result.success is True
+        assert scan_calls == ["/api/libraries/lib-xyz/scan"]
+
+    async def test_scan_skipped_when_api_not_configured(self, tmp_path, monkeypatch):
+        """Drop still succeeds when ABS API config is missing."""
+        calls: list = []
+
+        def handler(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json={})
+
+        self._inject_transport(monkeypatch, handler)
+
+        src = tmp_path / "book.m4b"
+        src.write_bytes(b"content")
+        sink = AudiobookshelfSink(str(tmp_path / "abs-library"))
+        result = await sink.deliver(str(src), BookMetadata(author="A", title="B"))
+        assert result.success is True
+        assert calls == []
+
+    async def test_scan_failure_doesnt_fail_delivery(self, tmp_path, monkeypatch):
+        """Network hiccup on scan POST is logged but delivery is still success."""
+        def handler(request):
+            raise httpx.ConnectError("abs down", request=request)
+
+        self._inject_transport(monkeypatch, handler)
+
+        src = tmp_path / "book.m4b"
+        src.write_bytes(b"content")
+        sink = AudiobookshelfSink(
+            str(tmp_path / "abs-library"),
+            abs_base_url="http://abs:13378",
+            abs_api_key="test-token",
+            abs_library_id="lib-xyz",
+        )
+        result = await sink.deliver(str(src), BookMetadata(author="A", title="B"))
+        assert result.success is True
+
+    async def test_scan_not_fired_when_copy_fails(self, tmp_path, monkeypatch):
+        """If the copy step fails, we must not POST a scan request."""
+        calls: list = []
+
+        def handler(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json={})
+
+        self._inject_transport(monkeypatch, handler)
+
+        sink = AudiobookshelfSink(
+            str(tmp_path / "abs-library"),
+            abs_base_url="http://abs:13378",
+            abs_api_key="test-token",
+            abs_library_id="lib-xyz",
+        )
+        # Missing source file → deliver() returns failure before scan.
+        result = await sink.deliver("/nope/book.m4b", BookMetadata())
+        assert result.success is False
+        assert calls == []

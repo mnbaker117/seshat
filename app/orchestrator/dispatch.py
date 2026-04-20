@@ -161,6 +161,13 @@ class DispatcherDeps:
     calibre_library_path: str = ""
     folder_sink_path: str = ""
     audiobookshelf_library_path: str = ""
+    # Audiobookshelf API hookup — optional, and only consulted by the
+    # audiobookshelf sink. All three must be set together for the
+    # post-drop library-scan POST to fire; any missing one degrades
+    # gracefully to "drop and let ABS's watcher find it".
+    abs_base_url: str = ""
+    abs_api_key: str = ""
+    abs_library_id: str = ""
     cwa_ingest_path: str = ""
     category_routing: dict = field(default_factory=dict)
     ntfy_url: str = ""

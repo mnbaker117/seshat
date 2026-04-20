@@ -34,6 +34,7 @@ import DiscAuthorDetailPage from "./pages/DiscAuthorDetailPage";
 import DiscMAMPage from "./pages/DiscMAMPage";
 import DiscSuggestionsPage from "./pages/DiscSuggestionsPage";
 import DiscImportExportPage from "./pages/DiscImportExportPage";
+import WorksPage from "./pages/WorksPage";
 
 interface AuthState {
   loading: boolean;
@@ -51,6 +52,7 @@ const DISCOVERY_NAV = [
   { id: "disc-authors",     label: "Authors",     icon: "◉" },
   { id: "disc-missing",     label: "Missing",     icon: "◌" },
   { id: "disc-upcoming",    label: "Upcoming",    icon: "📅" },
+  { id: "disc-works",       label: "Works",       icon: "🔗" },
   { id: "disc-mam",         label: "MAM Search",  icon: "🔍" },
   { id: "disc-suggestions", label: "Suggestions", icon: "💡" },
   { id: "disc-hidden",      label: "Hidden",      icon: "🚫" },
@@ -69,7 +71,7 @@ const WIDE_PAGES = new Set([
   "dashboard", "disc-dashboard", "pipe-dashboard",
   "disc-library", "disc-authors", "disc-author-detail",
   "disc-missing", "disc-upcoming", "disc-mam", "disc-suggestions",
-  "disc-hidden", "disc-importexport",
+  "disc-hidden", "disc-importexport", "disc-works",
   "pipe-review", "pipe-tentative", "pipe-ignored", "pipe-authors",
   "pipe-delayed", "pipe-migration",
   "logs", "database",
@@ -109,8 +111,9 @@ function renderPage(
     case "disc-author-detail": return <DiscAuthorDetailPage authorId={pageArg as number} onNav={nav} />;
     case "disc-mam":           return <DiscMAMPage onNav={nav} />;
     case "disc-suggestions":   return <DiscSuggestionsPage onNav={nav} />;
-    case "disc-hidden":        return <DiscBooksPage title="Hidden Books" apiPath="/discovery/books/hidden" />;
+    case "disc-hidden":        return <DiscBooksPage title="Hidden Books" apiPath="/discovery/books/hidden" showFormatTabs={false} />;
     case "disc-importexport":  return <DiscImportExportPage />;
+    case "disc-works":         return <WorksPage />;
 
     // Pipeline pages (no props — use useTheme context)
     case "pipe-review":        return <ReviewPage />;

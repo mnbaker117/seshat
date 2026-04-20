@@ -26,63 +26,118 @@ from app import state
 from app.config import load_settings
 from app.discovery.database import get_db, HF, cleanup_empty_series
 from app.discovery.lookup import lookup_author
+from app.discovery.cross_library import (
+    run_across_libraries,
+    sort_and_paginate,
+    sort_key_for,
+)
 
 logger = logging.getLogger("seshat.discovery")
 
 router = APIRouter(prefix="/api/discovery", tags=["authors"])
 
 
+def _build_authors_sql(search, has_missing, book_type, include_orphans, sort, sort_dir):
+    q = (
+        f"SELECT a.*, "
+        f"COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as total_books, "
+        f"SUM(CASE WHEN b.owned=1 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count, "
+        f"SUM(CASE WHEN b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count, "
+        f"SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as new_count, "
+        f"COUNT(DISTINCT b.series_id) as series_count, "
+        f"(SELECT COUNT(*) FROM pen_name_links pl "
+        f" WHERE pl.canonical_author_id=a.id OR pl.alias_author_id=a.id) as link_count "
+        f"FROM authors a LEFT JOIN books b ON a.id=b.author_id"
+    )
+    p: list = []; c: list[str] = []
+    if search:
+        c.append("a.name LIKE ?"); p.append(f"%{search}%")
+    if book_type == "series":
+        c.append("b.series_id IS NOT NULL")
+    elif book_type == "standalone":
+        c.append("b.series_id IS NULL")
+    if c:
+        q += " WHERE " + " AND ".join(c)
+    q += " GROUP BY a.id"
+    having = []
+    if not include_orphans:
+        having.append("total_books > 0")
+    if has_missing:
+        having.append("missing_count > 0")
+    if having:
+        q += " HAVING " + " AND ".join(having)
+    d = "DESC" if sort_dir == "desc" else "ASC"
+    q += {
+        "missing": f" ORDER BY missing_count {d}, a.sort_name ASC",
+        "new": f" ORDER BY new_count {d}, a.sort_name ASC",
+        "total": f" ORDER BY total_books {d}, a.sort_name ASC",
+    }.get(sort, f" ORDER BY a.sort_name {d}")
+    return q, p
+
+
 @router.get("/authors")
-async def get_authors(search: str = Query(None), sort: str = Query("name"), sort_dir: str = Query("asc"), has_missing: bool = Query(None), book_type: str = Query(None), include_orphans: bool = Query(False)):
-    """List authors for the Authors page browse view.
+async def get_authors(search: str = Query(None), sort: str = Query("name"), sort_dir: str = Query("asc"), has_missing: bool = Query(None), book_type: str = Query(None), include_orphans: bool = Query(False), content_type: str = Query(None)):
+    """List authors.
+
+    `content_type` selects active-library (omitted) vs. cross-library
+    aggregation ("ebook" / "audiobook" / "all"). In cross-library
+    mode, authors with the same normalized name across libraries get
+    their per-library stats merged so a user with Calibre + ABS sees
+    one "Pierce Brown" row with owned/missing counts summed — not one
+    row per library.
 
     By default, "orphan" authors with zero linked book rows are hidden.
-    These are typically secondary co-authors of multi-author books in
-    the user's Calibre library: calibre_sync.py:170-194 creates an
-    author row for every author of every book, but :225-230 only
-    links the book to its primary (`book["authors"][0]`) author. The
-    secondary authors get DB rows but no books, which clutters the
-    Authors page browse with names the user has nothing by.
-
-    The orphan rows are kept (not deleted) so multi-author series
-    cross-references still resolve and so an author auto-reappears in
-    the browse list as soon as the user acquires their first book by
-    them. `?include_orphans=true` is the escape hatch for debugging
-    and admin scripts that need to see the full set.
+    `?include_orphans=true` shows everything.
     """
+    if content_type:
+        sql, params = _build_authors_sql(
+            search, has_missing, book_type, include_orphans, sort, sort_dir,
+        )
+
+        async def q(db):
+            rows = await (await db.execute(sql, params)).fetchall()
+            return [dict(r) for r in rows]
+
+        rows = await run_across_libraries(content_type, q)
+        # Merge per-normalized-name so Pierce Brown in Calibre and
+        # Pierce Brown in ABS collapse to one row with summed stats.
+        from app.works.normalize import normalize_author
+        merged: dict[str, dict] = {}
+        for r in rows:
+            key = normalize_author(r.get("name", ""))
+            if not key:
+                continue
+            if key in merged:
+                base = merged[key]
+                for counter in ("total_books", "owned_count", "missing_count",
+                                "new_count", "series_count"):
+                    base[counter] = (base.get(counter) or 0) + (r.get(counter) or 0)
+                # Track which libraries + per-library ids the author
+                # appears in — frontend uses these to navigate into
+                # the right library's author-detail page.
+                base["library_slugs"].append(r["library_slug"])
+                base["author_ids_by_slug"][r["library_slug"]] = r.get("id")
+            else:
+                merged[key] = {
+                    **r,
+                    "library_slugs": [r["library_slug"]],
+                    "author_ids_by_slug": {r["library_slug"]: r.get("id")},
+                }
+        sort_fn = {
+            "missing": lambda x: (-(x.get("missing_count") or 0), (x.get("sort_name") or "").lower()),
+            "new": lambda x: (-(x.get("new_count") or 0), (x.get("sort_name") or "").lower()),
+            "total": lambda x: (-(x.get("total_books") or 0), (x.get("sort_name") or "").lower()),
+        }.get(sort, lambda x: ((x.get("sort_name") or x.get("name") or "").lower(),))
+        reverse = sort_dir == "desc" and sort not in ("missing", "new", "total")
+        authors = sorted(merged.values(), key=sort_fn, reverse=reverse)
+        return {"authors": authors}
+
     db = await get_db()
     try:
-        # link_count is a scalar subquery (not a JOIN) so it doesn't
-        # multiply rows against the books JOIN. Used by the Authors
-        # page to render a small "linked" chip next to authors that
-        # have any pen-name / co-author link.
-        q = (
-            f"SELECT a.*, "
-            f"COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as total_books, "
-            f"SUM(CASE WHEN b.owned=1 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count, "
-            f"SUM(CASE WHEN b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count, "
-            f"SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as new_count, "
-            f"COUNT(DISTINCT b.series_id) as series_count, "
-            f"(SELECT COUNT(*) FROM pen_name_links pl "
-            f" WHERE pl.canonical_author_id=a.id OR pl.alias_author_id=a.id) as link_count "
-            f"FROM authors a LEFT JOIN books b ON a.id=b.author_id"
+        sql, p = _build_authors_sql(
+            search, has_missing, book_type, include_orphans, sort, sort_dir,
         )
-        p = []; c = []
-        if search: c.append("a.name LIKE ?"); p.append(f"%{search}%")
-        if book_type == "series": c.append("b.series_id IS NOT NULL")
-        elif book_type == "standalone": c.append("b.series_id IS NULL")
-        if c: q += " WHERE " + " AND ".join(c)
-        q += " GROUP BY a.id"
-        having = []
-        if not include_orphans:
-            having.append("total_books > 0")
-        if has_missing:
-            having.append("missing_count > 0")
-        if having:
-            q += " HAVING " + " AND ".join(having)
-        d = "DESC" if sort_dir == "desc" else "ASC"
-        q += {"missing": f" ORDER BY missing_count {d}, a.sort_name ASC", "new": f" ORDER BY new_count {d}, a.sort_name ASC", "total": f" ORDER BY total_books {d}, a.sort_name ASC"}.get(sort, f" ORDER BY a.sort_name {d}")
-        return {"authors": [dict(r) for r in await (await db.execute(q, p)).fetchall()]}
+        return {"authors": [dict(r) for r in await (await db.execute(sql, p)).fetchall()]}
     finally:
         await db.close()
 

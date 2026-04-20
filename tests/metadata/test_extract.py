@@ -149,6 +149,134 @@ class TestExtractM4b:
         assert meta.format == "m4b"
 
 
+class _FakeMP4Info:
+    def __init__(self, length):
+        self.length = length
+
+
+class _FakeMP4:
+    """Stand-in for `mutagen.mp4.MP4` — skips the real file parse.
+
+    We mock MP4 rather than crafting a real MP4 container because tag
+    extraction logic is what we're testing; mutagen is trusted to
+    surface the raw atoms once the container is parsed.
+    """
+    def __init__(self, _path):
+        self.tags = _FakeMP4._pending_tags
+        self.info = _FakeMP4._pending_info
+
+    _pending_tags: dict = {}
+    _pending_info = _FakeMP4Info(0.0)
+
+
+def _tag_freeform(value: str) -> list:
+    """Shape a freeform iTunes atom the way mutagen returns it."""
+    return [value.encode("utf-8")]
+
+
+class TestExtractM4bEnhanced:
+    """Tests for the audiobook-specific fields on M4B extraction."""
+
+    def test_pulls_narrator_from_freeform_atom(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {
+            "\xa9nam": ["The Way of Kings"],
+            "\xa9ART": ["Brandon Sanderson"],
+            "\xa9alb": ["The Stormlight Archive"],
+            "----:com.apple.iTunes:NARRATOR": _tag_freeform("Michael Kramer, Kate Reading"),
+        }
+        _FakeMP4._pending_info = _FakeMP4Info(45 * 3600)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        meta = extract_mod.extract(m4b)
+        assert meta.title == "The Way of Kings"
+        assert meta.author == "Brandon Sanderson"
+        assert meta.series == "The Stormlight Archive"
+        assert meta.narrator == "Michael Kramer, Kate Reading"
+        assert meta.duration_sec == 45 * 3600
+        assert meta.format == "m4b"
+
+    def test_narrator_falls_back_to_composer(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {
+            "\xa9nam": ["Book"],
+            "\xa9ART": ["Author"],
+            "\xa9wrt": ["Narrator Name"],
+        }
+        _FakeMP4._pending_info = _FakeMP4Info(0.0)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        assert extract_mod.extract(m4b).narrator == "Narrator Name"
+
+    def test_asin_from_freeform_atom(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {
+            "\xa9nam": ["Book"],
+            "\xa9ART": ["Author"],
+            "----:com.apple.iTunes:ASIN": _tag_freeform("B00BPVBI4A"),
+        }
+        _FakeMP4._pending_info = _FakeMP4Info(0.0)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        assert extract_mod.extract(m4b).asin == "B00BPVBI4A"
+
+    def test_asin_sniffed_from_comment(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {
+            "\xa9nam": ["Book"],
+            "\xa9ART": ["Author"],
+            "\xa9cmt": ["https://audible.com/pd/B00BPVBI4A rip by XYZ"],
+        }
+        _FakeMP4._pending_info = _FakeMP4Info(0.0)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        assert extract_mod.extract(m4b).asin == "B00BPVBI4A"
+
+    def test_pub_year_from_day_atom(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {
+            "\xa9nam": ["Book"],
+            "\xa9ART": ["Author"],
+            "\xa9day": ["2011-04-01"],
+        }
+        _FakeMP4._pending_info = _FakeMP4Info(0.0)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        assert extract_mod.extract(m4b).pub_year == "2011"
+
+    def test_abridged_flag(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {
+            "\xa9nam": ["Book"],
+            "\xa9ART": ["Author"],
+            "----:com.apple.iTunes:ABRIDGED": _tag_freeform("1"),
+        }
+        _FakeMP4._pending_info = _FakeMP4Info(0.0)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        assert extract_mod.extract(m4b).abridged is True
+
+    def test_missing_tags_gives_empty_strings(self, tmp_path, monkeypatch):
+        from app.metadata import extract as extract_mod
+        m4b = tmp_path / "x.m4b"
+        m4b.write_bytes(b"stub")
+        _FakeMP4._pending_tags = {}
+        _FakeMP4._pending_info = _FakeMP4Info(0.0)
+        monkeypatch.setattr("mutagen.mp4.MP4", _FakeMP4)
+        meta = extract_mod.extract(m4b)
+        assert meta.format == "m4b"
+        assert meta.narrator == ""
+        assert meta.asin == ""
+        assert meta.abridged is False
+        assert meta.duration_sec == 0.0
+
+
 class TestExtractEdgeCases:
     def test_nonexistent_file(self, tmp_path):
         meta = extract(tmp_path / "nope.epub")

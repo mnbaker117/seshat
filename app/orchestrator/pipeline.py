@@ -136,6 +136,9 @@ async def process_completion(
     calibre_library_path: str,
     folder_sink_path: str,
     audiobookshelf_library_path: str = "",
+    abs_base_url: str = "",
+    abs_api_key: str = "",
+    abs_library_id: str = "",
     cwa_ingest_path: str = "",
     category_routing: dict[str, str] = None,
     ntfy_url: str,
@@ -202,6 +205,9 @@ async def process_completion(
             folder_sink_path=folder_sink_path,
             per_event_notifications=per_event_notifications,
             audiobookshelf_library_path=audiobookshelf_library_path,
+            abs_base_url=abs_base_url,
+            abs_api_key=abs_api_key,
+            abs_library_id=abs_library_id,
             cwa_ingest_path=cwa_ingest_path,
             ntfy_url=ntfy_url,
             ntfy_topic=ntfy_topic,
@@ -686,6 +692,9 @@ async def _deliver_prepared(
     review_id: Optional[int],
     was_timeout: bool,
     per_event_notifications: bool = False,
+    abs_base_url: str = "",
+    abs_api_key: str = "",
+    abs_library_id: str = "",
 ) -> bool:
     """Steps 6-9: sink delivery, auto-train, counter, notify."""
     run_id = event.pipeline_run_id
@@ -694,6 +703,9 @@ async def _deliver_prepared(
         default_sink, calibre_library_path,
         folder_sink_path, audiobookshelf_library_path,
         cwa_ingest_path,
+        abs_base_url=abs_base_url,
+        abs_api_key=abs_api_key,
+        abs_library_id=abs_library_id,
     )
 
     try:
@@ -780,6 +792,9 @@ async def deliver_reviewed(
     calibre_library_path: str,
     folder_sink_path: str,
     audiobookshelf_library_path: str = "",
+    abs_base_url: str = "",
+    abs_api_key: str = "",
+    abs_library_id: str = "",
     cwa_ingest_path: str = "",
     ntfy_url: str = "",
     ntfy_topic: str = "",
@@ -906,6 +921,9 @@ async def deliver_reviewed(
         calibre_library_path=calibre_library_path,
         folder_sink_path=folder_sink_path,
         audiobookshelf_library_path=audiobookshelf_library_path,
+        abs_base_url=abs_base_url,
+        abs_api_key=abs_api_key,
+        abs_library_id=abs_library_id,
         cwa_ingest_path=cwa_ingest_path,
         ntfy_url=ntfy_url,
         ntfy_topic=ntfy_topic,
@@ -988,13 +1006,22 @@ def _pick_sink(
     folder_sink_path: str,
     audiobookshelf_library_path: str,
     cwa_ingest_path: str,
+    *,
+    abs_base_url: str = "",
+    abs_api_key: str = "",
+    abs_library_id: str = "",
 ):
     if default_sink == "calibre":
         return CalibreSink(calibre_library_path)
     if default_sink == "cwa":
         return CWASink(cwa_ingest_path)
     if default_sink == "audiobookshelf":
-        return AudiobookshelfSink(audiobookshelf_library_path)
+        return AudiobookshelfSink(
+            audiobookshelf_library_path,
+            abs_base_url=abs_base_url,
+            abs_api_key=abs_api_key,
+            abs_library_id=abs_library_id,
+        )
     return FolderSink(folder_sink_path)
 
 

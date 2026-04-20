@@ -3,6 +3,21 @@ Library app base class — the interface every library backend implements.
 
 Each library app represents a different ebook or audiobook management
 application that Seshat can sync from for its discovery domain.
+
+Two discovery shapes are supported:
+
+  * **File-based** (Calibre) — `db_filename` sentinel + directory scan.
+    `get_root_path()` reads `env_root_var` from the environment, and
+    `discover()` walks that path one level deep looking for directories
+    containing `db_filename`.
+  * **API-based** (Audiobookshelf) — override `discover()` to call a
+    remote API. The base `discover()` default becomes a no-op when
+    `db_filename` is empty. Credentials live in the encrypted secrets
+    store, not in the library dict.
+
+The sync contract takes a `library: dict` produced by `discover()` so
+app-specific fields (e.g. `abs_library_id`, `base_url`) ride along
+without forcing the base class to enumerate them.
 """
 import os
 import logging
@@ -24,9 +39,11 @@ class LibraryApp(ABC):
     env_extra_var: str = ""
 
     def get_root_path(self) -> str:
-        return os.getenv(self.env_root_var, "")
+        return os.getenv(self.env_root_var, "") if self.env_root_var else ""
 
     def get_extra_paths(self) -> list:
+        if not self.env_extra_var:
+            return []
         raw = os.getenv(self.env_extra_var, "")
         if not raw:
             return []
@@ -47,9 +64,16 @@ class LibraryApp(ABC):
     def discover(self, root_path: str) -> list:
         """Discover libraries under a root path.
 
-        Scans one level deep for directories containing self.db_filename.
+        Default behavior: scan one level deep for directories containing
+        `db_filename`. API-based apps should override this entirely —
+        see `AudiobookshelfApp.discover` for the API shape.
+
+        Returns [] when `db_filename` is empty (API-based apps that
+        haven't provided an override yet).
         """
         from app.config import slugify
+        if not self.db_filename:
+            return []
         libraries = []
         seen_slugs = set()
         root = Path(root_path)
@@ -113,17 +137,37 @@ class LibraryApp(ABC):
         return libraries
 
     @abstractmethod
-    async def sync(self, source_db_path: str, library_path: str) -> dict:
-        """Sync from the source database into Seshat's discovery database."""
+    async def sync(self, library: dict) -> dict:
+        """Sync from the source into Seshat's discovery database.
+
+        `library` is one of the dicts returned by `discover()`. Apps
+        pull app-specific fields (`source_db_path`, `library_path`,
+        `abs_library_id`, `base_url`, …) as needed.
+        """
         pass
 
     @abstractmethod
     def get_cover_path(self, book_path: str, library_path: str) -> Optional[str]:
-        """Get the filesystem path to a book's cover image."""
+        """Get the filesystem path to a book's cover image.
+
+        API-based apps that don't expose local cover paths should
+        return None; the frontend falls back to an API-served cover
+        URL in that case.
+        """
         pass
 
-    def get_mtime(self, source_db_path: str) -> float:
+    def get_mtime(self, library: dict) -> float:
+        """Return a monotonic mtime-like value for change detection.
+
+        File-based default reads `source_db_path`'s mtime. API-based
+        apps should override to return a remote timestamp (e.g. ABS's
+        library `lastUpdate`) so the scheduled sync can skip unchanged
+        libraries.
+        """
+        path = library.get("source_db_path")
+        if not path:
+            return 0.0
         try:
-            return os.path.getmtime(source_db_path)
+            return os.path.getmtime(path)
         except OSError:
             return 0.0

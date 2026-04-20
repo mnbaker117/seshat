@@ -160,6 +160,20 @@ export interface Book {
   mam_my_snatched?: 0 | 1;
   // Calibre linkage
   calibre_id?: number | null;
+  // Audiobook-specific — populated when the book came from an ABS
+  // library; null / undefined for ebook rows.
+  audiobookshelf_id?: string | null;
+  asin?: string | null;
+  narrator?: string | null;
+  duration_sec?: number | null;
+  abridged?: 0 | 1;
+  audio_formats?: string | null;
+  // Cross-library metadata — set by the aggregation helper in
+  // `app/discovery/cross_library.py` when the books endpoint is
+  // called with a `content_type` query param.
+  library_slug?: string;
+  library_name?: string;
+  content_type?: "ebook" | "audiobook" | string;
 }
 
 export interface Series {

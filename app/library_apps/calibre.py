@@ -1,9 +1,5 @@
 """
 Calibre Library App — adapter for Calibre ebook management.
-
-Note: The actual sync logic (calibre_sync.py) will be ported in Phase 2
-when the full discovery domain is brought over. For now, this provides
-the discovery interface that config.discover_libraries() needs.
 """
 import os
 import logging
@@ -23,12 +19,12 @@ class CalibreApp(LibraryApp):
     env_root_var = "CALIBRE_PATH"
     env_extra_var = "CALIBRE_EXTRA_PATHS"
 
-    async def sync(self, source_db_path: str, library_path: str) -> dict:
+    async def sync(self, library: dict) -> dict:
         """Sync Calibre metadata.db into Seshat's discovery database."""
         from app.discovery.calibre_sync import sync_calibre
         return await sync_calibre(
-            calibre_db_path=source_db_path,
-            calibre_library_path=library_path,
+            calibre_db_path=library["source_db_path"],
+            calibre_library_path=library["library_path"],
         )
 
     def get_cover_path(self, book_path: str, library_path: str) -> Optional[str]:

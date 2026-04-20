@@ -99,6 +99,18 @@ return<div style={{position:"fixed",top:0,right:0,width:420,maxWidth:"90vw",heig
 {book.language?<SBRow label="Language" value={book.language}/>:null}
 {book.publisher?<SBRow label="Publisher" value={book.publisher}/>:null}
 {book.formats?<SBRow label="Formats" value={book.formats}/>:null}
+{/* ── Audiobook-specific rows ── */}
+{/* Gated by `content_type === "audiobook"` OR presence of any
+    audiobook-only field, so rows that arrived without a library
+    badge (legacy caches) still surface narrator/duration. */}
+{(book.content_type==="audiobook"||book.audiobookshelf_id||book.narrator||book.duration_sec||book.asin||book.audio_formats)?<>
+  {book.narrator?<SBRow label="Narrator" value={book.narrator}/>:null}
+  {book.duration_sec?<SBRow label="Duration" value={`${Math.floor(book.duration_sec/3600)}h ${Math.round((book.duration_sec%3600)/60)}m`}/>:null}
+  {book.audio_formats?<SBRow label="Audio Formats" value={book.audio_formats}/>:null}
+  {book.asin?<SBRow label="ASIN" value={<a href={`https://www.audible.com/pd/${book.asin}`} target="_blank" rel="noopener noreferrer" style={{color:t.accent,textDecoration:"none"}}>{book.asin} <span style={{fontSize:10,opacity:0.7}}>↗</span></a>}/>:null}
+  {book.abridged?<SBRow label="Edition" value={<span style={{color:t.ylwt,fontWeight:600}}>Abridged</span>}/>:null}
+</>:null}
+{book.library_name?<SBRow label="Library" value={<span style={{fontSize:12,padding:"1px 8px",borderRadius:4,background:book.content_type==="audiobook"?t.purb:t.cyanb,color:book.content_type==="audiobook"?t.purt:t.cyant,border:`1px solid ${book.content_type==="audiobook"?t.pur+"33":t.cyan+"33"}`}}>{book.content_type==="audiobook"?"🎧":"📖"} {book.library_name}</span>}/>:null}
 {book.tags?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Tags</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{book.tags.split(", ").map(tag=><span key={tag} style={{padding:"2px 8px",borderRadius:4,fontSize:11,background:t.purb,color:t.purt,border:`1px solid ${t.pur}33`}}>{tag}</span>)}</div></div>:null}
 {book.description?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Description</div><p style={{fontSize:13,color:t.td,lineHeight:1.5,margin:0,maxHeight:200,overflow:"auto"}}>{book.description}</p></div>:null}
 </>}

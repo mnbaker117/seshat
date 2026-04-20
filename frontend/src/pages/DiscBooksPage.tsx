@@ -31,9 +31,14 @@ interface BooksPageProps {
   extraParams?: Record<string, string | number | boolean>;
   showAuthor?: boolean;
   exportFilter?: string;
+  // When truthy, renders an Ebooks/Audiobooks/All tab row. The
+  // selected tab is persisted per page-title and translates into a
+  // `content_type` query param on every fetch. Omit for pages that
+  // deliberately stay active-library-scoped (e.g. Hidden).
+  showFormatTabs?: boolean;
 }
 
-export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}:BooksPageProps){const t=useTheme();const[bks,setBks]=useState<Book[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<ViewMode>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[sb,setSb]=useState<Book|null>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
+export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter,showFormatTabs=true}:BooksPageProps){const t=useTheme();const[bks,setBks]=useState<Book[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<ViewMode>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[fmt,setFmt]=usePersist<string>(`bp_${title}_fmt`,"all");const[sb,setSb]=useState<Book|null>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
 const[mamFilter,setMamFilter]=usePersist<string>(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState<Set<number>>(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
@@ -43,7 +48,7 @@ const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(
 const isGrouped=grp!=="all";
 const perPage=isGrouped?5000:60;
 const sortParam=grp==="author"?"author":grp==="series"?"series":sort;
-const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const init:Record<string,string>={search:q,sort:sortParam,per_page:String(perPage),page:String(page)};for(const[k,v]of Object.entries(extraParams))init[k]=String(v);const p=new URLSearchParams(init);if(mamFilter)p.set("mam_status",mamFilter);return api.get<BooksResponse>(`${apiPath}?${p}`,signal).then(d=>{setBks(d.books);setTotal(d.total??d.books.length);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[q,sortParam,apiPath,grp,mamFilter]);
+const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const init:Record<string,string>={search:q,sort:sortParam,per_page:String(perPage),page:String(page)};for(const[k,v]of Object.entries(extraParams))init[k]=String(v);const p=new URLSearchParams(init);if(mamFilter)p.set("mam_status",mamFilter);if(showFormatTabs)p.set("content_type",fmt);return api.get<BooksResponse>(`${apiPath}?${p}`,signal).then(d=>{setBks(d.books);setTotal(d.total??d.books.length);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[q,sortParam,apiPath,grp,mamFilter,fmt,showFormatTabs]);
 useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
 useEffect(()=>{api.get<MamStatusResponse>("/discovery/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const totalPages=Math.max(1,Math.ceil(total/perPage));
@@ -79,9 +84,10 @@ else{content=vm==="list"?<BList books={bks} onAction={onAction} onBookClick={tog
 return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {/* Sticky sub-header — two rows */}
 <div className="bp-sticky" style={{position:"sticky",top:56,zIndex:40,background:t.bg+"ee",backdropFilter:"blur(8px)",padding:"8px 0",marginTop:-12}}>
+{showFormatTabs?<FormatTabs fmt={fmt} setFmt={v=>{setFmt(v);setPg(1)}}/>:null}
 {/* Row 1: Title + Search/Sort/Filters */}
 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:6}}>
-<h1 style={{fontSize:24,fontWeight:800,color:t.accent,margin:0,flexShrink:0}}>{title} <span style={{fontSize:15,fontWeight:600,color:t.td,marginLeft:6}}>{total.toLocaleString()} books</span></h1>
+<h1 style={{fontSize:24,fontWeight:800,color:t.accent,margin:0,flexShrink:0}}>{title} <span style={{fontSize:15,fontWeight:600,color:t.td,marginLeft:6}}>{total.toLocaleString()} {fmt==="audiobook"?"audiobooks":fmt==="ebook"?"ebooks":"books"}</span></h1>
 <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
 <SearchBar value={q} onChange={v=>{setQ(v);setPg(1)}}/>
 {!isGrouped&&<select value={sort} onChange={e=>{setSort(e.target.value);setPg(1)}} style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="title">Sort: Title</option><option value="author">Sort: Author</option><option value="date">Sort: Date</option><option value="added">Sort: Added</option></select>}
@@ -119,6 +125,38 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {sb&&<BookSidebar book={sb} closing={sbClosing} onClose={closeSb} onAction={onAction} onEdit={()=>load(pg)}/>}
 {showExp?<ExportModal onClose={()=>setShowExp(false)} defaultFilter={exportFilter}/>:null}
 </div>}
+
+// ─── Format Tabs (Ebooks / Audiobooks / All) ───────────────
+// Renders above the sticky header on Library / Missing / Upcoming.
+// The selected tab feeds `content_type` on the API call — "all" maps
+// to a cross-library union across every library regardless of type,
+// "ebook" / "audiobook" narrow to libraries of that type. A user
+// with ABS-only still sees everything via the Audiobooks or All
+// tab; the Ebooks tab in that setup will return an empty list.
+function FormatTabs({fmt,setFmt}:{fmt:string;setFmt:(v:string)=>void}){
+  const t=useTheme();
+  const tabs=[
+    {id:"all",label:"All",icon:""},
+    {id:"ebook",label:"Ebooks",icon:"📖"},
+    {id:"audiobook",label:"Audiobooks",icon:"🎧"},
+  ];
+  return <div style={{display:"flex",gap:4,marginBottom:8}}>
+    {tabs.map(tab=>(
+      <button key={tab.id} onClick={()=>setFmt(tab.id)} style={{
+        background:fmt===tab.id?t.abg:"transparent",
+        color:fmt===tab.id?t.accent:t.tm,
+        border:`1px solid ${fmt===tab.id?t.abr:"transparent"}`,
+        borderRadius:6,padding:"4px 12px",fontSize:13,
+        fontWeight:fmt===tab.id?600:500,cursor:"pointer",
+        display:"flex",alignItems:"center",gap:5,
+      }}>
+        {tab.icon?<span>{tab.icon}</span>:null}
+        <span>{tab.label}</span>
+      </button>
+    ))}
+  </div>;
+}
+
 
 function Pager({pg,totalPages,onPage,t,compact}:{pg:number;totalPages:number;onPage:(p:number)=>void;t:any;compact?:boolean}){
   const[jumpVal,setJumpVal]=useState("");

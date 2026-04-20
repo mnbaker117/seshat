@@ -60,13 +60,13 @@ async def trigger_sync():
         if lib:
             app_instance = get_app(lib.get("app_type", "calibre"))
             if app_instance:
-                result = await app_instance.sync(lib["source_db_path"], lib["library_path"])
+                result = await app_instance.sync(lib)
             else:
                 result = await sync_calibre(lib["source_db_path"], lib["library_path"])
             # Update mtime after successful manual sync
             s = load_settings()
             mtimes = s.get("library_mtimes", {})
-            mtimes[active_slug] = os.path.getmtime(lib["source_db_path"])
+            mtimes[active_slug] = app_instance.get_mtime(lib) if app_instance else os.path.getmtime(lib["source_db_path"])
             s["library_mtimes"] = mtimes
             save_settings(s)
             try:
@@ -82,6 +82,15 @@ async def trigger_sync():
             result = await sync_calibre()
         state._last_library_sync_check["at"] = time.time()
         state._last_library_sync_check["synced"] = True
+
+        # Refresh cross-library links after a manual sync. Non-fatal —
+        # matcher failures don't break the sync response.
+        try:
+            from app.works.matcher import rebuild_matches
+            await rebuild_matches()
+        except Exception:
+            logger.debug("works matcher post-sync failed", exc_info=True)
+
         return {"status": "ok", **result}
     except Exception as e:
         raise HTTPException(500, str(e))

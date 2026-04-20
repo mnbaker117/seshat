@@ -15,6 +15,11 @@ from fastapi import APIRouter, Body, HTTPException, Query
 
 from app import state
 from app.discovery.database import get_db, HF, cleanup_empty_series
+from app.discovery.cross_library import (
+    run_across_libraries,
+    sort_and_paginate,
+    sort_key_for,
+)
 
 logger = logging.getLogger("seshat.discovery")
 
@@ -65,25 +70,125 @@ _BOOKS_SELECT = (
 
 
 # ─── Books ───────────────────────────────────────────────────
+def _build_books_where(search, author_id, series_id, owned, book_type, mam_status, include_hidden, hidden_only):
+    """Compose the WHERE clause + params used by every books-query path.
+
+    Kept separate so the per-library helper (`_query_books_for_lib`)
+    and the active-library code path share the same filter logic.
+    """
+    c: list[str] = []
+    p: list = []
+    if hidden_only:
+        c.append("b.hidden=1")
+    elif not include_hidden:
+        c.append(HF)
+    if search:
+        c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)")
+        p.extend([f"%{search}%"] * 3)
+    if author_id:
+        c.append("b.author_id=?"); p.append(author_id)
+    if series_id:
+        c.append("b.series_id=?"); p.append(series_id)
+    if owned is True:
+        c.append("b.owned=1")
+    elif owned is False:
+        c.append("b.owned=0")
+    if book_type == "series":
+        c.append("b.series_id IS NOT NULL")
+    elif book_type == "standalone":
+        c.append("b.series_id IS NULL")
+    if mam_status == "found":
+        c.append("b.mam_status='found'")
+    elif mam_status == "possible":
+        c.append("b.mam_status='possible'")
+    elif mam_status == "not_found":
+        c.append("b.mam_status='not_found'")
+    elif mam_status == "unscanned":
+        c.append("b.mam_status IS NULL")
+    return (" AND ".join(c) if c else "1=1"), p
+
+
+_BOOKS_SELECT_X = (
+    "SELECT b.*, a.name as author_name, a.sort_name as author_sort_name, "
+    "s.name as series_name, "
+    "COALESCE(st.series_total, 0) as series_total, "
+    "COALESCE(st.mainline_total, 0) as mainline_total "
+    "FROM books b "
+    "JOIN authors a ON b.author_id=a.id "
+    "LEFT JOIN series s ON b.series_id=s.id "
+    f"{_SERIES_TOTAL_JOIN}"
+)
+
+
+async def _query_books_for_lib(db, where_sql: str, where_params: list, sort: str, sort_dir: str):
+    """Run a books query against one library's DB.
+
+    Returns the full row set (no LIMIT) — aggregation sorting + pagination
+    happens in Python across libraries, so each library has to hand over
+    every row that matches its filters. For the typical personal library
+    that's still tens of thousands of rows at most.
+
+    Uses `_BOOKS_SELECT_X` (cross-library variant) which adds
+    `author_sort_name` to the projection so the Python-side sort can
+    order by it without an extra per-row lookup.
+    """
+    d = "DESC" if sort_dir == "desc" else "ASC"
+    o = {
+        "title": f"b.title {d}",
+        "author": f"a.sort_name {d}, b.title ASC",
+        "series": f"COALESCE(s.name,'zzz') {d}, b.series_index ASC",
+        "date": f"b.pub_date {d}",
+        "added": f"b.first_seen_at {d}",
+    }.get(sort, f"b.title {d}")
+    base = f"{_BOOKS_SELECT_X} WHERE {where_sql} ORDER BY {o}"
+    rows = await (await db.execute(base, where_params)).fetchall()
+    return [dict(r) for r in rows]
+
+
 @router.get("/books")
-async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False), hidden_only: bool = Query(False)):
+async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False), hidden_only: bool = Query(False), content_type: str = Query(None)):
+    """
+    List books. `content_type` selects among:
+      * omitted / "" — active library only (legacy behavior)
+      * "ebook" / "audiobook" — aggregate across every discovered
+        library of that type
+      * "all" — aggregate across EVERY discovered library regardless
+        of type (mixed ebook+audiobook view)
+
+    In cross-library mode each row gets stamped with `library_slug`,
+    `library_name`, and `content_type` so the UI can render badges
+    and per-library metadata without extra round-trips.
+    """
+    # ── Cross-library path ────────────────────────────────────
+    if content_type:
+        where_sql, where_params = _build_books_where(
+            search, author_id, series_id, owned, book_type, mam_status,
+            include_hidden, hidden_only,
+        )
+
+        async def q(db):
+            return await _query_books_for_lib(db, where_sql, where_params, sort, sort_dir)
+
+        rows = await run_across_libraries(content_type, q)
+        window, total = sort_and_paginate(
+            rows,
+            sort_key=sort_key_for(sort),
+            reverse=(sort_dir == "desc"),
+            page=page, per_page=per_page,
+        )
+        return {
+            "books": window, "total": total, "page": page,
+            "per_page": per_page,
+            "pages": max(1, (total + per_page - 1) // per_page),
+        }
+
+    # ── Active-library path ───────────────────────────────────
     db = await get_db()
     try:
-        c = []; p = []
-        if hidden_only: c.append("b.hidden=1")
-        elif not include_hidden: c.append(HF)
-        if search: c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)"); p.extend([f"%{search}%"]*3)
-        if author_id: c.append("b.author_id=?"); p.append(author_id)
-        if series_id: c.append("b.series_id=?"); p.append(series_id)
-        if owned is True: c.append("b.owned=1")
-        elif owned is False: c.append("b.owned=0")
-        if book_type == "series": c.append("b.series_id IS NOT NULL")
-        elif book_type == "standalone": c.append("b.series_id IS NULL")
-        if mam_status == "found": c.append("b.mam_status='found'")
-        elif mam_status == "possible": c.append("b.mam_status='possible'")
-        elif mam_status == "not_found": c.append("b.mam_status='not_found'")
-        elif mam_status == "unscanned": c.append("b.mam_status IS NULL")
-        w = " AND ".join(c) if c else "1=1"
+        w, p = _build_books_where(
+            search, author_id, series_id, owned, book_type, mam_status,
+            include_hidden, hidden_only,
+        )
         cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
         d = "DESC" if sort_dir == "desc" else "ASC"
         o = {"title": f"b.title {d}", "author": f"a.sort_name {d}, b.title ASC", "series": f"COALESCE(s.name,'zzz') {d}, b.series_index ASC", "date": f"b.pub_date {d}", "added": f"b.first_seen_at {d}"}.get(sort, f"b.title {d}")
@@ -94,12 +199,142 @@ async def get_books(search: str = Query(None), author_id: int = Query(None), ser
 
 
 @router.get("/missing")
-async def get_missing(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False)):
-    return await get_books(search=search, author_id=author_id, series_id=series_id, owned=False, book_type=book_type, mam_status=mam_status, sort=sort, sort_dir=sort_dir, page=page, per_page=per_page, include_hidden=include_hidden, hidden_only=False)
+async def get_missing(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False), content_type: str = Query(None)):
+    """
+    List missing (unowned, non-future) books.
+
+    When `content_type` is supplied, aggregates across libraries AND
+    applies the per-author format-preference filter: books whose
+    author has `tracking_mode="audiobook"` set don't surface as
+    missing when they'd be ebook entries, and vice versa. Global
+    default comes from `settings.audiobook_tracking_mode`.
+    """
+    base = await get_books(
+        search=search, author_id=author_id, series_id=series_id,
+        owned=False, book_type=book_type, mam_status=mam_status,
+        sort=sort, sort_dir=sort_dir, page=1,
+        # Pull a wide window then re-paginate after the tracking-mode
+        # filter — avoids a partial page caused by filter evictions.
+        per_page=5000,
+        include_hidden=include_hidden, hidden_only=False,
+        content_type=content_type,
+    )
+    if not content_type:
+        # Active-library path: nothing to re-filter; hand `base` back
+        # after slicing down to the requested page.
+        off = (page - 1) * per_page
+        all_books = base.get("books", [])
+        total = base.get("total", len(all_books))
+        return {
+            "books": all_books[off:off + per_page], "total": total,
+            "page": page, "per_page": per_page,
+            "pages": max(1, (total + per_page - 1) // per_page),
+        }
+
+    # Cross-library path: apply per-author tracking-mode filter.
+    filtered = await _apply_tracking_mode_filter(
+        base.get("books", []), content_type,
+    )
+    off = (page - 1) * per_page
+    total = len(filtered)
+    return {
+        "books": filtered[off:off + per_page], "total": total,
+        "page": page, "per_page": per_page,
+        "pages": max(1, (total + per_page - 1) // per_page),
+    }
+
+
+async def _apply_tracking_mode_filter(
+    books: list[dict], content_type: str,
+) -> list[dict]:
+    """Drop books whose author's tracking_mode excludes this format.
+
+    Rules:
+      * content_type="all" — keep only books whose author's mode
+        allows the book's own content_type. An "audiobook only" author
+        hides ebook rows; an "ebook only" author hides audiobook rows.
+      * content_type="ebook" — keep only books whose author's mode
+        includes ebook (i.e. mode == "ebook" or "both").
+      * content_type="audiobook" — symmetric.
+
+    Bulk-loads the preferences table once, then does O(1) lookups
+    per book. Books with no preference row inherit the global
+    default via `effective_tracking_mode`.
+    """
+    from app.works.normalize import normalize_author
+    from app.works.preferences import list_preferences, _global_default
+
+    prefs = {p.normalized_name: p.tracking_mode for p in await list_preferences()}
+    global_mode = _global_default()
+
+    def mode_for(author: str) -> str:
+        return prefs.get(normalize_author(author), global_mode)
+
+    out: list[dict] = []
+    for b in books:
+        row_type = b.get("content_type") or "ebook"
+        mode = mode_for(b.get("author_name") or "")
+        if mode == "both":
+            out.append(b)
+            continue
+        if content_type == "all":
+            # Book's own content_type vs mode.
+            if mode == row_type:
+                out.append(b)
+            continue
+        # content_type in {"ebook", "audiobook"} — request already
+        # narrowed to one format; only the mode match has to agree.
+        if mode == content_type:
+            out.append(b)
+    return out
 
 
 @router.get("/upcoming")
-async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), mam_status: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
+async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), mam_status: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), content_type: str = Query(None)):
+    """Upcoming (unreleased) books.
+
+    Same `content_type` semantics as `/books`: omitted reads the
+    active library; "ebook" / "audiobook" / "all" aggregate.
+    """
+    if content_type:
+        def where_params():
+            c = [HF, "b.owned=0", "b.is_unreleased=1"]; p = []
+            if search:
+                c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)")
+                p.extend([f"%{search}%"] * 3)
+            if mam_status == "found": c.append("b.mam_status='found'")
+            elif mam_status == "possible": c.append("b.mam_status='possible'")
+            elif mam_status == "not_found": c.append("b.mam_status='not_found'")
+            elif mam_status == "unscanned": c.append("b.mam_status IS NULL")
+            return " AND ".join(c), p
+
+        w, p = where_params()
+        d = "DESC" if sort_dir == "desc" else "ASC"
+        o = {
+            "date": f"COALESCE(b.expected_date, '9999') {d}",
+            "title": f"b.title {d}",
+            "author": f"a.sort_name {d}",
+        }.get(sort, f"COALESCE(b.expected_date, '9999') {d}")
+
+        async def q(db):
+            rows = await (await db.execute(
+                f"{_BOOKS_SELECT_X} WHERE {w} ORDER BY {o}",
+                p,
+            )).fetchall()
+            return [dict(r) for r in rows]
+
+        rows = await run_across_libraries(content_type, q)
+        window, total = sort_and_paginate(
+            rows, sort_key=sort_key_for(sort),
+            reverse=(sort_dir == "desc"),
+            page=page, per_page=per_page,
+        )
+        return {
+            "books": window, "total": total, "page": page,
+            "per_page": per_page,
+            "pages": max(1, (total + per_page - 1) // per_page),
+        }
+
     db = await get_db()
     try:
         c = [HF, "b.owned=0", "b.is_unreleased=1"]; p = []

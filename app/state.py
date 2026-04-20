@@ -174,6 +174,24 @@ _migration_status: Dict[str, Any] = {
 # Library discovery cache — populated in lifespan startup.
 _discovered_libraries: list[dict] = []
 
+
+def get_active_library_content_type() -> str:
+    """Return the content_type of the currently active library.
+
+    Defaults to "ebook" when no library is active (pre-setup) or the
+    active slug can't be found in the discovered list. Callers use this
+    to pick content-appropriate metadata sources — see
+    `app.discovery.lookup._sources_for_content_type`.
+    """
+    from app.discovery.database import get_active_library
+    slug = get_active_library()
+    if not slug:
+        return "ebook"
+    for lib in _discovered_libraries:
+        if lib.get("slug") == slug:
+            return lib.get("content_type") or "ebook"
+    return "ebook"
+
 # Updated after every successful library sync.
 _last_library_sync_check: Dict[str, Any] = {"at": None, "synced": False}
 

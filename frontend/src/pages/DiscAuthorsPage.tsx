@@ -35,6 +35,7 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
   const [sort, setSort] = usePersist<string>("ap_sort", "name");
   const [vm, setVm] = usePersist<ViewMode>("ap_vm", "list");
   const [letter, setLetter] = usePersist<string>("ap_letter", "");
+  const [fmt, setFmt] = usePersist<string>("ap_fmt", "all");
   const [pg, setPg] = useState(1);
   const [selMode, setSelMode] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
@@ -48,11 +49,12 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
   useEffect(() => {
     const c = new AbortController();
     setLd(true);
-    api.get<AuthorsResponse>(`/discovery/authors?search=${encodeURIComponent(q)}&sort=${sort}`, c.signal)
+    const params = new URLSearchParams({ search: q, sort, content_type: fmt });
+    api.get<AuthorsResponse>(`/discovery/authors?${params}`, c.signal)
       .then(d => { setAus(d.authors || []); setLd(false); })
       .catch(e => { if (!api.isAbort(e)) setLd(false); });
     return () => c.abort();
-  }, [q, sort]);
+  }, [q, sort, fmt]);
 
   // Filter by letter
   const filtered = useMemo(() => {
@@ -74,7 +76,11 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
   const visible = filtered.slice((page - 1) * perPage, page * perPage);
 
   const toggleSel = id => setSel(p => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  const reload = () => { setLd(true); api.get<AuthorsResponse>(`/discovery/authors?search=${q}&sort=${sort}`).then(d => { setAus(d.authors || []); setLd(false); }); };
+  const reload = () => {
+    setLd(true);
+    const params = new URLSearchParams({ search: q, sort, content_type: fmt });
+    api.get<AuthorsResponse>(`/discovery/authors?${params}`).then(d => { setAus(d.authors || []); setLd(false); });
+  };
 
   const linkAuthors = async (linkType) => {
     if (sel.size < 2) return;
@@ -147,6 +153,28 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
       <div style={{ flex: 1, minWidth: 0, paddingLeft: 12 }}>
         {/* Sticky header */}
         <div style={{ position: "sticky", top: 56, zIndex: 20, background: t.bg + "ee", backdropFilter: "blur(8px)", padding: "8px 0", marginBottom: 8 }}>
+          {/* Format tabs — same semantics as DiscBooksPage: "all" is
+              the cross-library union, "ebook" / "audiobook" narrow to
+              authors who have books in that library type. */}
+          <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+            {[
+              { id: "all", label: "All", icon: "" },
+              { id: "ebook", label: "Ebooks", icon: "📖" },
+              { id: "audiobook", label: "Audiobooks", icon: "🎧" },
+            ].map(tab => (
+              <button key={tab.id} onClick={() => { setFmt(tab.id); setPg(1); }} style={{
+                background: fmt === tab.id ? t.abg : "transparent",
+                color: fmt === tab.id ? t.accent : t.tm,
+                border: `1px solid ${fmt === tab.id ? t.abr : "transparent"}`,
+                borderRadius: 6, padding: "4px 12px", fontSize: 13,
+                fontWeight: fmt === tab.id ? 600 : 500, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 5,
+              }}>
+                {tab.icon ? <span>{tab.icon}</span> : null}
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
             <h1 style={{ fontSize: 24, fontWeight: 800, color: t.accent, margin: 0, flexShrink: 0 }}>
               Authors <span style={{ fontSize: 15, fontWeight: 600, color: t.td, marginLeft: 6 }}>

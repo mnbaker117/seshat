@@ -227,6 +227,48 @@ CREATE INDEX IF NOT EXISTS idx_tentative_status ON tentative_torrents(status);
 CREATE INDEX IF NOT EXISTS idx_tentative_torrent_id ON tentative_torrents(mam_torrent_id);
 CREATE INDEX IF NOT EXISTS idx_ignored_seen_at ON ignored_torrents_seen(seen_at);
 CREATE INDEX IF NOT EXISTS idx_calibre_add_added_at ON calibre_additions(added_at);
+
+-- ── Cross-library work linking ───────────────────────────────
+-- `work_links` groups books from different libraries that represent
+-- the same underlying work (e.g. an ebook in Calibre and its audiobook
+-- equivalent in Audiobookshelf). Each row is one (library, book) →
+-- work_id membership. Multiple rows share a work_id when they point
+-- at different formats / libraries of the same work.
+--
+-- `book_id` references the per-library discovery DB's `books.id` —
+-- NOT a foreign key here (can't FK across SQLite files). The auto-
+-- matcher and reconcile pass handle orphan cleanup when a linked
+-- book disappears from its source library.
+CREATE TABLE IF NOT EXISTS work_links (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id         TEXT NOT NULL,
+    library_slug    TEXT NOT NULL,
+    book_id         INTEGER NOT NULL,
+    content_type    TEXT NOT NULL,        -- "ebook" | "audiobook"
+    link_source     TEXT NOT NULL DEFAULT 'auto',  -- "auto" | "manual"
+    created_at      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+    UNIQUE(library_slug, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_links_work_id ON work_links(work_id);
+CREATE INDEX IF NOT EXISTS idx_work_links_lib_book ON work_links(library_slug, book_id);
+CREATE INDEX IF NOT EXISTS idx_work_links_content_type ON work_links(content_type);
+
+-- ── Per-author format preference ────────────────────────────
+-- Keyed by normalized author name (lowercased, whitespace-collapsed)
+-- so a preference set on "Brandon Sanderson" in a Calibre library
+-- is also honored when the same author appears in an ABS library.
+-- `tracking_mode`:
+--   "ebook"     — missing-book detection counts only ebook absences
+--   "audiobook" — only audiobook absences count
+--   "both"      — owning either format satisfies (default)
+-- NULL tracking_mode = fall back to the global `audiobook_tracking_mode`
+-- setting (default "both").
+CREATE TABLE IF NOT EXISTS author_format_preferences (
+    normalized_name TEXT PRIMARY KEY,
+    display_name    TEXT NOT NULL,
+    tracking_mode   TEXT NOT NULL,
+    updated_at      REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+);
 """
 
 
@@ -245,6 +287,29 @@ MIGRATIONS: list[str] = [
     # pipeline's _prepare_book uses it to skip the enricher call and
     # save 6 outbound scraper requests per book.
     "ALTER TABLE grabs ADD COLUMN source_metadata TEXT",
+    # v1.2 — cross-library work linking (Phase 5). Tables and indexes
+    # also exist in SCHEMA above, but older DBs need the migration step
+    # to pick them up without a fresh init. CREATE TABLE IF NOT EXISTS
+    # makes re-runs on fresh DBs a no-op.
+    """CREATE TABLE IF NOT EXISTS work_links (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        work_id         TEXT NOT NULL,
+        library_slug    TEXT NOT NULL,
+        book_id         INTEGER NOT NULL,
+        content_type    TEXT NOT NULL,
+        link_source     TEXT NOT NULL DEFAULT 'auto',
+        created_at      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+        UNIQUE(library_slug, book_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_work_links_work_id ON work_links(work_id)",
+    "CREATE INDEX IF NOT EXISTS idx_work_links_lib_book ON work_links(library_slug, book_id)",
+    "CREATE INDEX IF NOT EXISTS idx_work_links_content_type ON work_links(content_type)",
+    """CREATE TABLE IF NOT EXISTS author_format_preferences (
+        normalized_name TEXT PRIMARY KEY,
+        display_name    TEXT NOT NULL,
+        tracking_mode   TEXT NOT NULL,
+        updated_at      REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+    )""",
 ]
 
 

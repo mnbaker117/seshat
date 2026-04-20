@@ -99,6 +99,11 @@ MAM_SCAN_INTERVAL_MINUTES = int(os.getenv("MAM_SCAN_INTERVAL_MINUTES", "360"))
 ENV_HARDCOVER_API_KEY = os.getenv("HARDCOVER_API_KEY", "")
 ENV_CALIBRE_WEB_URL = os.getenv("CALIBRE_WEB_URL", "")
 ENV_CALIBRE_URL = os.getenv("CALIBRE_URL", "")
+# Audiobookshelf API base URL (e.g. http://host:13378) — first-run seed
+# for `abs_url`. The API key itself is never env-sourced; it belongs in
+# the encrypted secrets store. Empty string leaves ABS disabled until
+# the user configures it via Settings.
+ENV_ABS_URL = os.getenv("ABS_URL", "")
 
 LANGUAGE_OPTIONS = [
     "Afrikaans", "Albanian", "Arabic", "Armenian", "Basque", "Bengali",
@@ -252,6 +257,27 @@ DEFAULT_SETTINGS = {
     # Calibre integration — no direct metadata.db writes.
     "cwa_ingest_path": "",
 
+    # ── Audiobookshelf integration ──────────────────────────
+    # Base URL of the ABS instance Seshat talks to (e.g.
+    # "http://audiobookshelf:13378"). API key lives in the encrypted
+    # secrets store under `abs_api_key`, not here.
+    "abs_url": "",
+    # Web UI URL for the dashboard quick-launch button. Usually
+    # matches abs_url from the user's browser perspective; kept
+    # separate so container-to-container and browser URLs can
+    # differ (host.docker.internal vs public hostname).
+    "abs_web_url": "",
+    # Which ABS library the sink delivers into. Only needed when
+    # default_sink="audiobookshelf"; the post-drop scan-trigger POST
+    # targets this library id. Empty means "don't trigger a rescan"
+    # (ABS's watcher still picks up the drop within ~60s).
+    "abs_sink_library_id": "",
+    # Tracking scope for audiobook-aware features (author watch,
+    # missing-book detection, MAM scanning): "ebook", "audiobook",
+    # or "both". "both" = owning either format satisfies ownership.
+    # Per-author overrides live on the authors row (Phase 2+).
+    "audiobook_tracking_mode": "both",
+
     # ── Calibre integration ─────────────────────────────────
     "calibre_library_path": "",
     # Web UI URLs for dashboard quick-launch buttons.
@@ -295,7 +321,26 @@ DEFAULT_SETTINGS = {
         "kobo",
         "ibdb",
         "google_books",
+        "audible",
     ],
+    # Audiobook-specific provider priority. Used when the pipeline
+    # detects an audiobook grab (format=m4b/mp3/m4a or MAM category
+    # starts with "audiobooks"). Audible + Audnexus lead because
+    # they carry the audiobook-specific fields (narrator, duration,
+    # ASIN); ebook sources backfill description / ISBN / cover.
+    "metadata_audiobook_priority": [
+        "audible",
+        "audnexus",
+        "goodreads",
+        "hardcover",
+        "google_books",
+    ],
+    # Audible regional catalog selector. Maps English-speaking
+    # markets first — .com, .co.uk, .com.au, .ca — plus non-English
+    # markets via Audnexus's region codes. "us" stays the safe
+    # default because .com has the largest catalog regardless of
+    # the user's Audible account region.
+    "audible_region": "us",
     # Providers the user has explicitly disabled (names that appear
     # in metadata_provider_priority but should be skipped). Names
     # here must match MetaSource.name.
@@ -379,6 +424,11 @@ DEFAULT_SETTINGS = {
     "amazon_enabled": False,
     "ibdb_enabled": False,
     "google_books_enabled": False,
+    # Discovery-side Audible source — ON by default but only consulted
+    # for audiobook libraries (ebook libraries skip it entirely via
+    # the content-type router in lookup.py).
+    "audible_enabled": True,
+    "rate_audible": 0.5,
     "google_books_auto_disabled_at": None,
     "theme": "dark",
     "languages": ["English"],
@@ -546,6 +596,8 @@ def _apply_env_overrides(settings: dict):
         settings["calibre_web_url"] = ENV_CALIBRE_WEB_URL
     if ENV_CALIBRE_URL and not settings.get("calibre_url"):
         settings["calibre_url"] = ENV_CALIBRE_URL
+    if ENV_ABS_URL and not settings.get("abs_url"):
+        settings["abs_url"] = ENV_ABS_URL
 
 
 def save_settings(settings: dict):

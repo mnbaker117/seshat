@@ -415,6 +415,26 @@ MIGRATIONS = [
     # write, so the bug only surfaced via ibdb.
     "ALTER TABLE authors ADD COLUMN ibdb_id TEXT",
     "ALTER TABLE authors ADD COLUMN google_books_id TEXT",
+    # Audiobookshelf integration — audiobook-specific columns. Null on
+    # ebook-library DBs (Calibre), populated on ABS-library DBs. Keeps
+    # a single schema across both library types so cross-library
+    # matching queries (Phase 2) don't have to branch on schema shape.
+    #   audiobookshelf_id — ABS library item UUID (stable across rescans)
+    #   asin              — Audible ASIN (Amazon Standard Identification Number)
+    #   narrator          — comma-separated, mirrors `authors` flattening
+    #   duration_sec      — total runtime in seconds (float for fractional)
+    #   abridged          — 0/1 flag; MAM & ABS both carry this bit
+    #   audio_formats     — comma-separated extensions (m4b, mp3, m4a)
+    "ALTER TABLE books ADD COLUMN audiobookshelf_id TEXT",
+    "ALTER TABLE books ADD COLUMN asin TEXT",
+    "ALTER TABLE books ADD COLUMN narrator TEXT",
+    "ALTER TABLE books ADD COLUMN duration_sec REAL",
+    "ALTER TABLE books ADD COLUMN abridged INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE books ADD COLUMN audio_formats TEXT",
+    "ALTER TABLE authors ADD COLUMN audiobookshelf_id TEXT",
+    "ALTER TABLE series ADD COLUMN audiobookshelf_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_books_abs ON books(audiobookshelf_id)",
+    "CREATE INDEX IF NOT EXISTS idx_books_asin ON books(asin)",
 ]
 
 

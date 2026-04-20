@@ -45,6 +45,7 @@ SECRET_KEYS: dict[str, str] = {
     "mam_irc_password": "MAM IRC password",
     "qbit_password": "qBittorrent password",
     "hardcover_api_key": "Hardcover API Bearer token",
+    "abs_api_key": "Audiobookshelf API Bearer token",
 }
 
 

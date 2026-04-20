@@ -181,6 +181,7 @@ const SECTIONS = [
   { id: "rates", label: "Source Rate Limits", group: "Discovery" },
   { id: "scanning", label: "Author Scanning", group: "Discovery" },
   { id: "library", label: "Library Management", group: "Discovery" },
+  { id: "audiobookshelf", label: "Audiobookshelf", group: "Discovery" },
   { id: "discmam", label: "Discovery MAM", group: "Discovery" },
   { id: "operational", label: "Operational", group: "Shared" },
   { id: "data", label: "Data Management", group: "Shared" },
@@ -229,6 +230,7 @@ export default function SettingsPage() {
   const mamCreds = creds.filter(c => ["mam_session_id", "mam_irc_password"].includes(c.key));
   const qbitCreds = creds.filter(c => c.key === "qbit_password");
   const apiCreds = creds.filter(c => c.key === "hardcover_api_key");
+  const absCreds = creds.filter(c => c.key === "abs_api_key");
 
   // Group sections for sidebar
   const groups = ["Pipeline", "Discovery", "Shared"];
@@ -526,6 +528,8 @@ export default function SettingsPage() {
 
         {section === "library" && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} />}
 
+        {section === "audiobookshelf" && <AudiobookshelfSection s={s} upd={upd} ist={ist} creds={absCreds} onCredSaved={loadCreds} />}
+
         {section === "discmam" && <DiscMamSection s={s} upd={upd} ist={ist} nist={nist} />}
 
 
@@ -622,6 +626,211 @@ function LibrarySection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
     </SF>
     <SF label="Calibre Content Server URL" desc="Calibre Content Server for direct library access.">
       <input value={(s.calibre_url as string) || ""} onChange={e => upd("calibre_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
+    </SF>
+  </>;
+}
+
+// ── Audiobookshelf Section ────────────────────────────────────
+
+interface AbsLibrary { id: string; name: string; mediaType?: string; folders?: { fullPath: string }[]; lastUpdate?: number; }
+
+function AudiobookshelfSection({ s, upd, ist, creds, onCredSaved }: {
+  s: S; upd: (k: string, v: unknown) => void; ist: any;
+  creds: CredItem[]; onCredSaved: () => void;
+}) {
+  const t = useTheme();
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [libs, setLibs] = useState<AbsLibrary[] | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildResult, setRebuildResult] = useState<string | null>(null);
+
+  const apiKeyConfigured = creds.some(c => c.key === "abs_api_key" && c.configured);
+  const url = (s.abs_url as string) || "";
+
+  const testConnection = async () => {
+    setTesting(true); setTestResult(null); setLibs(null);
+    try {
+      const r = await api.post<{ ok: boolean; libraries?: AbsLibrary[]; error?: string }>(
+        "/discovery/audiobookshelf/test",
+      );
+      if (r.ok) {
+        setLibs(r.libraries || []);
+        setTestResult(`✓ Connected — found ${(r.libraries || []).length} library/libraries`);
+      } else {
+        setTestResult(`✗ ${r.error || "Connection failed"}`);
+      }
+    } catch (e: any) { setTestResult(`✗ ${e.message || String(e)}`); }
+    finally { setTesting(false); setTimeout(() => setTestResult(null), 10000); }
+  };
+
+  const rebuildWorks = async () => {
+    setRebuilding(true); setRebuildResult(null);
+    try {
+      const r = await api.post<{
+        works_created: number; links_added: number;
+        stale_auto_removed: number; orphans_pruned: number;
+      }>("/v1/works/rebuild");
+      setRebuildResult(
+        `✓ ${r.links_added} links added, ${r.works_created} new works, ` +
+        `${r.stale_auto_removed} stale cleared, ${r.orphans_pruned} orphans pruned`,
+      );
+    } catch (e: any) { setRebuildResult(`✗ ${e.message || String(e)}`); }
+    finally { setRebuilding(false); setTimeout(() => setRebuildResult(null), 10000); }
+  };
+
+  return <>
+    <p style={{ fontSize: 12, color: t.textDim, marginBottom: 12, lineHeight: 1.5 }}>
+      Audiobookshelf pairs with your Calibre library as a second content source.
+      Seshat discovers audiobooks via the ABS REST API, syncs them into a
+      per-library discovery DB, and auto-links ebook ↔ audiobook pairs into
+      cross-library "works".
+    </p>
+
+    <SF label="ABS Base URL" desc='Address Seshat uses to talk to ABS (server-to-server).' example="e.g. http://audiobookshelf:13378">
+      <input
+        value={url}
+        onChange={e => upd("abs_url", e.target.value.trim())}
+        placeholder="http://host:13378"
+        style={{ ...ist, width: 280 }}
+      />
+    </SF>
+
+    <SF label="ABS Web URL" desc="Address the dashboard links out to (browser-facing, may differ from base URL in container setups).">
+      <input
+        value={(s.abs_web_url as string) || ""}
+        onChange={e => upd("abs_web_url", e.target.value.trim())}
+        placeholder="http://host:13378"
+        style={{ ...ist, width: 280 }}
+      />
+    </SF>
+
+    {creds.map(c => (
+      <CredField
+        key={c.key}
+        item={c}
+        onSaved={onCredSaved}
+        desc="Bearer token from ABS → Settings → Users → [your user] → API Token."
+      />
+    ))}
+
+    <SF label="Test Connection" desc="Hits /api/libraries and lists discovered book libraries.">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Btn
+          variant="ghost"
+          onClick={testConnection}
+          disabled={testing || !url || !apiKeyConfigured}
+        >{testing ? <Spin size={14} /> : "Test"}</Btn>
+        {testResult && <span style={{
+          fontSize: 12, color: testResult.startsWith("✓") ? t.ok : t.err, fontWeight: 600,
+        }}>{testResult}</span>}
+        {!apiKeyConfigured && <span style={{ fontSize: 11, color: t.textDim }}>(set API token above)</span>}
+      </div>
+    </SF>
+
+    {libs && libs.length > 0 && (
+      <div style={{
+        marginTop: 8, marginBottom: 8, padding: 12,
+        background: t.bg3, borderRadius: 8, border: `1px solid ${t.borderL}`,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: t.text2, marginBottom: 6 }}>
+          ABS Libraries
+        </div>
+        {libs.map(lib => (
+          <div key={lib.id} style={{ fontSize: 12, padding: "4px 0", color: t.text2 }}>
+            <span style={{ fontWeight: 600 }}>{lib.name}</span>
+            <span style={{ color: t.textDim, marginLeft: 8 }}>
+              {lib.mediaType} · {(lib.folders || []).map(f => f.fullPath).join(", ")}
+            </span>
+            <button
+              onClick={() => upd("abs_sink_library_id", lib.id)}
+              style={{
+                marginLeft: 12, fontSize: 11, padding: "2px 8px",
+                background: (s.abs_sink_library_id === lib.id) ? t.accent + "22" : t.bg2,
+                color: (s.abs_sink_library_id === lib.id) ? t.accent : t.textDim,
+                border: `1px solid ${(s.abs_sink_library_id === lib.id) ? t.accent : t.border}`,
+                borderRadius: 4, cursor: "pointer", fontWeight: 600,
+              }}
+            >
+              {(s.abs_sink_library_id === lib.id) ? "✓ Sink target" : "Use as sink"}
+            </button>
+          </div>
+        ))}
+      </div>
+    )}
+
+    <SF
+      label="Sink Library ID"
+      desc="Which ABS library the audiobook sink delivers into. Click 'Use as sink' above after testing, or paste a library UUID."
+    >
+      <input
+        value={(s.abs_sink_library_id as string) || ""}
+        onChange={e => upd("abs_sink_library_id", e.target.value.trim())}
+        placeholder="UUID from Test above"
+        style={{ ...ist, width: 280, fontFamily: "monospace", fontSize: 11 }}
+      />
+    </SF>
+
+    <SF
+      label="Audiobook Tracking Mode"
+      desc="Default for all authors — Works UI lets you override per-author. 'Both' treats owning either format as satisfied."
+    >
+      <select
+        value={(s.audiobook_tracking_mode as string) || "both"}
+        onChange={e => upd("audiobook_tracking_mode", e.target.value)}
+        style={{ ...ist, width: 180, cursor: "pointer", appearance: "auto" }}
+      >
+        <option value="both">Both (either format satisfies)</option>
+        <option value="ebook">Ebook only</option>
+        <option value="audiobook">Audiobook only</option>
+      </select>
+    </SF>
+
+    <SF
+      label="Audible Region"
+      desc="Controls which Audible TLD catalog searches hit. Audnexus regional data follows the same code."
+    >
+      <select
+        value={(s.audible_region as string) || "us"}
+        onChange={e => upd("audible_region", e.target.value)}
+        style={{ ...ist, width: 180, cursor: "pointer", appearance: "auto" }}
+      >
+        <option value="us">us — .com (default)</option>
+        <option value="uk">uk — .co.uk</option>
+        <option value="ca">ca — .ca</option>
+        <option value="au">au — .com.au</option>
+        <option value="de">de — .de</option>
+        <option value="fr">fr — .fr</option>
+        <option value="it">it — .it</option>
+        <option value="es">es — .es</option>
+        <option value="jp">jp — .co.jp</option>
+        <option value="in">in — .in</option>
+      </select>
+    </SF>
+
+    <SF
+      label="Discovery Audible Source"
+      desc="Use Audible + Audnexus when scanning audiobook libraries for an author's catalog."
+    >
+      <STog
+        on={(s.audible_enabled as boolean) ?? true}
+        onToggle={() => upd("audible_enabled", !(s.audible_enabled ?? true))}
+        label
+      />
+    </SF>
+
+    <SF
+      label="Rebuild Cross-Library Links"
+      desc="Re-run the matcher across every discovered library. Safe at any time — manual links are preserved."
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Btn variant="ghost" onClick={rebuildWorks} disabled={rebuilding}>
+          {rebuilding ? <Spin size={14} /> : "Rebuild"}
+        </Btn>
+        {rebuildResult && <span style={{
+          fontSize: 12, color: rebuildResult.startsWith("✓") ? t.ok : t.err, fontWeight: 600,
+        }}>{rebuildResult}</span>}
+      </div>
     </SF>
   </>;
 }

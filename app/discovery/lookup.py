@@ -41,6 +41,7 @@ from app.discovery.sources.kobo import KoboSource
 from app.discovery.sources.amazon import AmazonSource
 from app.discovery.sources.ibdb import IbdbSource
 from app.discovery.sources.google_books import GoogleBooksSource
+from app.discovery.sources.audible import AudibleDiscoverySource
 from app.discovery.sources.base import AuthorResult
 from app import state
 
@@ -162,10 +163,11 @@ kobo = KoboSource()
 amazon = AmazonSource()
 ibdb = IbdbSource()
 google_books = GoogleBooksSource()
+audible = AudibleDiscoverySource()
 
 
 def reload_sources():
-    global hardcover, goodreads, kobo, amazon, ibdb, google_books
+    global hardcover, goodreads, kobo, amazon, ibdb, google_books, audible
     s = load_settings()
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
     goodreads = GoodreadsSource(rate_limit=s.get("rate_goodreads", 2))
@@ -173,6 +175,10 @@ def reload_sources():
     amazon = AmazonSource(rate_limit=s.get("rate_amazon", 2))
     ibdb = IbdbSource(rate_limit=s.get("rate_ibdb", 1))
     google_books = GoogleBooksSource(rate_limit=s.get("rate_google_books", 0.5))
+    audible = AudibleDiscoverySource(
+        region=s.get("audible_region", "us"),
+        rate_limit=s.get("rate_audible", 0.5),
+    )
 
 
 # ─── Source orchestration registry ──────────────────────────
@@ -214,8 +220,13 @@ def _src_kobo():         return kobo
 def _src_amazon():       return amazon
 def _src_ibdb():         return ibdb
 def _src_google_books(): return google_books
+def _src_audible():      return audible
 
 
+# Ebook-library source list. Walked for every library whose
+# `content_type == "ebook"`. Same shape as the AthenaScout-era
+# registry — Goodreads primary, Hardcover primary, rest filling
+# supplementary roles.
 SOURCES: list[SourceSpec] = [
     SourceSpec("goodreads",    "goodreads_enabled",    "primary",       300.0, _src_goodreads,    True),
     SourceSpec("hardcover",    "hardcover_enabled",    "primary",       180.0, _src_hardcover,    True),
@@ -224,6 +235,33 @@ SOURCES: list[SourceSpec] = [
     SourceSpec("ibdb",         "ibdb_enabled",         "supplementary",  90.0, _src_ibdb,         False),
     SourceSpec("google_books", "google_books_enabled", "supplementary",  60.0, _src_google_books, False),
 ]
+
+
+# Audiobook-library source list. Used for libraries whose
+# `content_type == "audiobook"` (e.g. an Audiobookshelf-backed
+# library). Audible runs as primary since its catalog + Audnexus
+# hydration covers narrator/duration/series cleanly. Hardcover
+# stays secondary because it does track audiobook editions when
+# given an API key. Goodreads/Kobo/etc. are omitted — they don't
+# surface audiobook-specific metadata and the catalog coverage
+# heavily overlaps Audible.
+AUDIOBOOK_SOURCES: list[SourceSpec] = [
+    SourceSpec("audible",   "audible_enabled",   "primary",   300.0, _src_audible,   True),
+    SourceSpec("hardcover", "hardcover_enabled", "secondary", 180.0, _src_hardcover, True),
+]
+
+
+def _sources_for_content_type(content_type: str) -> list[SourceSpec]:
+    """Pick the right source-registry list for a library.
+
+    Routes by the library's `content_type` (from the registered
+    `LibraryApp`). Defaults to `SOURCES` for anything other than
+    "audiobook" so unknown/future content types fall back to the
+    ebook scan — safer than silently skipping the scan entirely.
+    """
+    if content_type == "audiobook":
+        return AUDIOBOOK_SOURCES
+    return SOURCES
 
 # Total wall-clock budget across all sources for a single author.
 # At 15 minutes, even worst-case (Goodreads timing out at 300s + a
@@ -1738,6 +1776,7 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     amazon._on_book = _on_book
     ibdb._on_book = _on_book
     google_books._on_book = _on_book
+    audible._on_book = _on_book
 
     # Per-book new-candidate counter. Fired by each source from inside
     # its slow DETAIL-fetch loop — same call sites as `_on_book` but
@@ -1765,6 +1804,7 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     amazon._on_new_candidate = _on_new_candidate
     ibdb._on_new_candidate = _on_new_candidate
     google_books._on_new_candidate = _on_new_candidate
+    audible._on_new_candidate = _on_new_candidate
 
     # ── Walk the source registry ──────────────────────────────
     # Iterates SOURCES in declared priority order. Each source is
@@ -1791,7 +1831,12 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     except Exception:
         _hc_key = settings.get("hardcover_api_key")
 
-    for spec in SOURCES:
+    # Pick ebook vs audiobook source list based on the active library.
+    # Content type is stamped on each discovered library at startup.
+    active_sources = _sources_for_content_type(
+        state.get_active_library_content_type()
+    )
+    for spec in active_sources:
         # Gate by user setting. default_enabled mirrors the historical
         # behavior of the per-source if-block (Amazon/IBDB/GB default off).
         if not settings.get(spec.setting_key, spec.default_enabled):
@@ -1807,7 +1852,7 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
             logger.warning(
                 f"  Per-author scan budget ({PER_AUTHOR_BUDGET_SEC}s) exceeded for "
                 f"'{author_name}' — skipping remaining sources: "
-                f"{[s.name for s in SOURCES[SOURCES.index(spec):]]}"
+                f"{[s.name for s in active_sources[active_sources.index(spec):]]}"
             )
             break
 

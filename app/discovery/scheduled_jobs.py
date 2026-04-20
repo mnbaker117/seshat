@@ -72,22 +72,27 @@ async def sync_all_libraries() -> None:
         for lib in state._discovered_libraries:
             try:
                 set_active_library(lib["slug"])
-                current_mtime = os.path.getmtime(lib["source_db_path"])
+                lib_app = get_app(lib.get("app_type", "calibre"))
+                # Pull current mtime via the app so API-based sources
+                # (ABS `lastUpdate`) route through the same change-detection
+                # path that Calibre's file mtime uses.
+                current_mtime = (
+                    lib_app.get_mtime(lib)
+                    if lib_app
+                    else os.path.getmtime(lib["source_db_path"])
+                )
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
                     logger.debug(
-                        f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping"
+                        f"Scheduled sync: '{lib['name']}' source unchanged, skipping"
                     )
                     continue
-                lib_app = get_app(lib.get("app_type", "calibre"))
                 logger.info(
                     f"Scheduled sync: '{lib['name']}' "
-                    f"{lib_app.db_filename if lib_app else 'database'} changed, syncing..."
+                    f"{lib_app.display_name if lib_app else 'database'} changed, syncing..."
                 )
                 if lib_app:
-                    sync_result = await lib_app.sync(
-                        lib["source_db_path"], lib["library_path"]
-                    )
+                    sync_result = await lib_app.sync(lib)
                 else:
                     sync_result = await sync_calibre(
                         lib["source_db_path"], lib["library_path"]
@@ -125,6 +130,23 @@ async def sync_all_libraries() -> None:
                 "current_book": "",
                 "completed_at": time.time(),
             })
+
+        # Post-sync: refresh cross-library work links once the ebook
+        # + audiobook libraries are both current. Only run when at
+        # least one library actually synced — saves cross-library
+        # reads on no-op ticks.
+        if any_synced:
+            try:
+                from app.works.matcher import rebuild_matches
+                result = await rebuild_matches()
+                if result.links_added or result.orphans_pruned:
+                    logger.info(
+                        "works matcher post-sync: +%d links, "
+                        "%d orphans pruned",
+                        result.links_added, result.orphans_pruned,
+                    )
+            except Exception as e:
+                logger.warning(f"works matcher post-sync failed: {e}")
     finally:
         state._library_sync_in_progress = False
 

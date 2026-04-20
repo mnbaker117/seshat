@@ -43,6 +43,14 @@ class MetaRecord:
     source_url: Optional[str] = None
     external_id: Optional[str] = None
     confidence: float = 0.0
+    # ── Audiobook-specific ──────────────────────────────────
+    # Populated by Audible/Audnexus sources and left None by the
+    # ebook-centric sources. Merged through `_merge_records` the
+    # same as ebook fields — first-non-None wins.
+    narrator: Optional[str] = None
+    duration_sec: Optional[float] = None
+    asin: Optional[str] = None
+    abridged: Optional[bool] = None
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -62,6 +70,10 @@ class MetaRecord:
             "source_url": self.source_url,
             "external_id": self.external_id,
             "confidence": self.confidence,
+            "narrator": self.narrator,
+            "duration_sec": self.duration_sec,
+            "asin": self.asin,
+            "abridged": self.abridged,
         }
         # Per-source contribution log, attached by the enricher.
         if hasattr(self, "_source_log"):

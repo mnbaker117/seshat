@@ -40,6 +40,8 @@ from app.metadata.scoring import score_match
 from app.metadata.sources.base import MetaSource
 from app.metadata.sources.goodreads import GoodreadsSource
 from app.metadata.sources.amazon import AmazonSource
+from app.metadata.sources.audible import AudibleSource
+from app.metadata.sources.audnexus import AudnexusSource
 from app.metadata.sources.google_books import GoogleBooksSource
 from app.metadata.sources.hardcover import HardcoverSource
 from app.metadata.sources.ibdb import IbdbSource
@@ -52,6 +54,11 @@ _log = logging.getLogger("seshat.metadata.enricher")
 # uses the cached torrent_info response). External scrapers follow
 # in the user's spec order (#21) for fields MAM doesn't carry
 # (covers, page count, pub date, ISBN).
+#
+# Audible + Audnexus land after the ebook-centric sources because
+# they contribute zero signal for ebook searches (no ASIN → no
+# audiobook-side hit). For audiobook grabs the routing layer puts
+# them first via `DEFAULT_AUDIOBOOK_PRIORITY` instead.
 DEFAULT_PRIORITY: tuple[str, ...] = (
     "mam",
     "goodreads",
@@ -59,6 +66,20 @@ DEFAULT_PRIORITY: tuple[str, ...] = (
     "hardcover",
     "kobo",
     "ibdb",
+    "google_books",
+    "audible",
+)
+
+# Audiobook-first priority. Used when the pipeline routes a grab
+# based on MAM category `audiobooks …` or an audio file extension
+# (.m4b/.mp3/.m4a). MAM still runs first because it's free and
+# often has the category/tag metadata no external source carries.
+DEFAULT_AUDIOBOOK_PRIORITY: tuple[str, ...] = (
+    "mam",
+    "audible",
+    "audnexus",
+    "goodreads",
+    "hardcover",
     "google_books",
 )
 
@@ -106,6 +127,8 @@ _SOURCE_REGISTRY: dict[str, type[MetaSource]] = {
     KoboSource.name: KoboSource,
     IbdbSource.name: IbdbSource,
     GoogleBooksSource.name: GoogleBooksSource,
+    AudibleSource.name: AudibleSource,
+    AudnexusSource.name: AudnexusSource,
 }
 
 
@@ -118,6 +141,7 @@ class MetadataEnricher:
         *,
         sources: Optional[list[MetaSource]] = None,
         hardcover_api_key: str = "",
+        audible_region: str = "us",
     ):
         self.config = config
         if sources is not None:
@@ -125,7 +149,9 @@ class MetadataEnricher:
             self._sources = sources
         else:
             self._sources = _build_default_sources(
-                config, hardcover_api_key=hardcover_api_key,
+                config,
+                hardcover_api_key=hardcover_api_key,
+                audible_region=audible_region,
             )
 
     async def enrich(
@@ -266,7 +292,10 @@ class MetadataEnricher:
 
 
 def _build_default_sources(
-    config: EnrichmentConfig, *, hardcover_api_key: str = "",
+    config: EnrichmentConfig,
+    *,
+    hardcover_api_key: str = "",
+    audible_region: str = "us",
 ) -> list[MetaSource]:
     """Instantiate the priority-ordered source list.
 
@@ -275,6 +304,10 @@ def _build_default_sources(
     `settings.json` (which is blanked after the Sprint 6 migration).
     A missing key leaves Hardcover registered but unauthenticated,
     in which case it returns None silently on every search.
+
+    `audible_region` controls which Audible TLD the catalog search
+    hits (and the `region` query param on Audnexus). User-visible
+    via the `audible_region` setting; defaults to "us".
     """
     if not hardcover_api_key:
         _log.info(
@@ -292,6 +325,8 @@ def _build_default_sources(
             continue
         if name == "hardcover" and hardcover_api_key:
             out.append(cls(api_key=hardcover_api_key))
+        elif name in ("audible", "audnexus"):
+            out.append(cls(region=audible_region))
         else:
             out.append(cls())
     return out
@@ -329,6 +364,15 @@ def _merge_records(
     # Cover preference: stick with the current cover (higher-priority
     # source) unless it's empty. Highest-priority non-empty wins.
     into.cover_url = _pick(into.cover_url, new.cover_url)
+    # Audiobook-specific fields: ebook sources leave these None, so
+    # first-non-None wins pulls them through from whichever audiobook
+    # source supplies them. `abridged` specifically requires the
+    # None check because False is a valid, informative value.
+    into.narrator = _pick(into.narrator, new.narrator)
+    into.duration_sec = _pick(into.duration_sec, new.duration_sec)
+    into.asin = _pick(into.asin, new.asin)
+    if into.abridged is None:
+        into.abridged = new.abridged
     # Confidence is a max over all sources — any strong match boosts
     # our belief that the merged record is correct.
     into.confidence = max(into.confidence, new.confidence)

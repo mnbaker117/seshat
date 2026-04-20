@@ -74,6 +74,7 @@ from app.routers.mam import router as mam_router
 from app.routers.migration import router as migration_router
 from app.routers.review import router as review_router
 from app.routers.settings import router as settings_router
+from app.routers.works import router as works_router
 from app.routers.tentative import router as tentative_router
 from app.metadata.enricher import EnrichmentConfig, MetadataEnricher
 
@@ -86,6 +87,7 @@ from app.discovery.routers.scan import router as disc_scan_router
 from app.discovery.routers.mam import router as disc_mam_router
 from app.discovery.routers.libraries import router as disc_libraries_router
 from app.discovery.routers.covers import router as disc_covers_router
+from app.discovery.routers.audiobookshelf import router as disc_abs_router
 from app.discovery.routers.import_export import router as disc_import_export_router
 from app.discovery.routers.config import router as disc_config_router
 
@@ -215,7 +217,12 @@ def _build_metadata_enricher(
     )
     rs = resolved_secrets or {}
     hardcover_key = rs.get("hardcover_api_key") or ""
-    return MetadataEnricher(cfg, hardcover_api_key=hardcover_key)
+    audible_region = (settings.get("audible_region") or "us").lower()
+    return MetadataEnricher(
+        cfg,
+        hardcover_api_key=hardcover_key,
+        audible_region=audible_region,
+    )
 
 
 async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> DispatcherDeps:
@@ -304,6 +311,9 @@ async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> Di
         calibre_library_path=settings.get("calibre_library_path", ""),
         folder_sink_path=settings.get("folder_sink_path", ""),
         audiobookshelf_library_path=settings.get("audiobookshelf_library_path", ""),
+        abs_base_url=settings.get("abs_url", ""),
+        abs_api_key=(resolved_secrets or {}).get("abs_api_key", "") or "",
+        abs_library_id=settings.get("abs_sink_library_id", ""),
         cwa_ingest_path=settings.get("cwa_ingest_path", ""),
         category_routing=settings.get("category_routing", {}),
         ntfy_url=settings.get("ntfy_url", ""),
@@ -642,15 +652,19 @@ async def lifespan(app: FastAPI):
         for lib in state._discovered_libraries:
             set_active_library(lib["slug"])
             try:
-                current_mtime = _os.path.getmtime(lib["source_db_path"])
+                lib_app = get_app(lib.get("app_type", "calibre"))
+                current_mtime = (
+                    lib_app.get_mtime(lib)
+                    if lib_app
+                    else _os.path.getmtime(lib["source_db_path"])
+                )
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
-                    _log.info(f"Library '{lib['name']}': metadata.db unchanged, skipping sync")
+                    _log.info(f"Library '{lib['name']}': source unchanged, skipping sync")
                 else:
-                    lib_app = get_app(lib.get("app_type", "calibre"))
                     _log.info(f"Library '{lib['name']}': syncing...")
                     if lib_app:
-                        await lib_app.sync(lib["source_db_path"], lib["library_path"])
+                        await lib_app.sync(lib)
                     mtimes[lib["slug"]] = current_mtime
                     settings["library_mtimes"] = mtimes
                     save_settings(settings)
@@ -903,6 +917,7 @@ app.include_router(migration_router)
 app.include_router(review_router)
 app.include_router(settings_router)
 app.include_router(tentative_router)
+app.include_router(works_router)
 
 # ── Discovery domain routers ──────────────────────────────────
 app.include_router(disc_books_router)
@@ -913,6 +928,7 @@ app.include_router(disc_scan_router)
 app.include_router(disc_mam_router)
 app.include_router(disc_libraries_router)
 app.include_router(disc_covers_router)
+app.include_router(disc_abs_router)
 app.include_router(disc_import_export_router)
 app.include_router(disc_config_router)
 
