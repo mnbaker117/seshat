@@ -107,6 +107,18 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "delayed_torrents_path",
     "emergency_export_path",
     "sink_max_retries",
+    # Audiobookshelf integration (Phase 4+) — all non-secret; the
+    # API token itself lives in the encrypted store under
+    # `abs_api_key` via /v1/credentials, not here.
+    "abs_url",
+    "abs_web_url",
+    "abs_sink_library_id",
+    "audiobookshelf_library_path",
+    "audiobook_tracking_mode",
+    "audible_region",
+    "audible_enabled",
+    "rate_audible",
+    "metadata_audiobook_priority",
     # Operational
     "verbose_logging",
     "dry_run",

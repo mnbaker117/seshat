@@ -687,20 +687,20 @@ function AudiobookshelfSection({ s, upd, ist, creds, onCredSaved }: {
       cross-library "works".
     </p>
 
-    <SF label="ABS Base URL" desc='Address Seshat uses to talk to ABS (server-to-server).' example="e.g. http://audiobookshelf:13378">
+    <SF label="ABS Base URL" desc="Address Seshat's backend uses to talk to ABS's API. For most setups (ABS reachable at the same IP:port from both Seshat and your browser) this is the same as Web URL below." example="e.g. http://10.0.10.20:13378">
       <input
         value={url}
         onChange={e => upd("abs_url", e.target.value.trim())}
-        placeholder="http://host:13378"
+        placeholder="http://10.0.10.20:13378"
         style={{ ...ist, width: 280 }}
       />
     </SF>
 
-    <SF label="ABS Web URL" desc="Address the dashboard links out to (browser-facing, may differ from base URL in container setups).">
+    <SF label="ABS Web URL" desc="Address the dashboard opens in a new tab. Only differs from Base URL when the browser uses a different hostname than the Seshat container does (e.g. public DNS vs. Docker network name).">
       <input
         value={(s.abs_web_url as string) || ""}
         onChange={e => upd("abs_web_url", e.target.value.trim())}
-        placeholder="http://host:13378"
+        placeholder="http://10.0.10.20:13378"
         style={{ ...ist, width: 280 }}
       />
     </SF>
