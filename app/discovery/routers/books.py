@@ -380,12 +380,31 @@ async def unhide(bid: int):
 
 
 @router.get("/books/hidden")
-async def get_hidden(search: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
+async def get_hidden(search: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), content_type: str = Query(None)):
+    """Hidden books. `content_type` routes cross-library when supplied."""
+    c = ["b.hidden=1"]; p: list = []
+    if search:
+        c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)")
+        p.extend([f"%{search}%"] * 3)
+    w = " AND ".join(c)
+
+    if content_type:
+        async def q(db):
+            return await _query_books_for_lib(db, w, p, sort, sort_dir)
+        rows = await run_across_libraries(content_type, q)
+        window, total = sort_and_paginate(
+            rows, sort_key=sort_key_for(sort),
+            reverse=(sort_dir == "desc"),
+            page=page, per_page=per_page,
+        )
+        return {
+            "books": window, "total": total, "page": page,
+            "per_page": per_page,
+            "pages": max(1, (total + per_page - 1) // per_page),
+        }
+
     db = await get_db()
     try:
-        c = ["b.hidden=1"]; p = []
-        if search: c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)"); p.extend([f"%{search}%"]*3)
-        w = " AND ".join(c)
         cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
         d = "DESC" if sort_dir == "desc" else "ASC"
         o = {"title": f"b.title {d}", "author": f"a.sort_name {d}, b.title ASC", "series": f"COALESCE(s.name,'zzz') {d}, b.series_index ASC", "date": f"b.pub_date {d}", "added": f"b.first_seen_at {d}"}.get(sort, f"b.title {d}")

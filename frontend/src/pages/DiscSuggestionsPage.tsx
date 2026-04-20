@@ -6,6 +6,7 @@ import { Ic } from "../icons";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
+import { usePersist } from "../hooks/usePersist";
 import type { NavFn } from "../types";
 
 // Source-consensus series suggestion review page.
@@ -35,17 +36,19 @@ function fmtSeriesValue(name: string | null | undefined, idx: number | null | un
 export default function SuggestionsPage({ onNav }: { onNav: NavFn }) {
   const t = useTheme();
   const [status, setStatus] = useState("pending");
+  const [fmt, setFmt] = usePersist<string>("sg_fmt", "all");
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState<any>({});
 
   const load = () => {
     setData(null);
-    api.get(`/discovery/series-suggestions?status=${status}`)
+    const params = new URLSearchParams({ status, content_type: fmt });
+    api.get(`/discovery/series-suggestions?${params}`)
       .then(setData)
       .catch(e => { console.error(e); setData({ suggestions: [], count: 0 }); });
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [status]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [status, fmt]);
 
   const act = async (sug, action) => {
     if (busy[sug.id]) return;
@@ -85,6 +88,28 @@ export default function SuggestionsPage({ onNav }: { onNav: NavFn }) {
         the disagreement appears here for your review. Apply to accept, Ignore to suppress this exact suggestion,
         or Delete to remove it (a future scan may recreate it if the consensus still holds).
       </p>
+    </div>
+
+    {/* Format tabs (ebook / audiobook / all) — matches the other
+        Discovery pages. Cross-library aggregation in the backend. */}
+    <div style={{ display: "flex", gap: 4 }}>
+      {[
+        { id: "all", label: "All", icon: "" },
+        { id: "ebook", label: "Ebooks", icon: "📖" },
+        { id: "audiobook", label: "Audiobooks", icon: "🎧" },
+      ].map(tab => (
+        <button key={tab.id} onClick={() => setFmt(tab.id)} style={{
+          background: fmt === tab.id ? t.abg : "transparent",
+          color: fmt === tab.id ? t.accent : t.tm,
+          border: `1px solid ${fmt === tab.id ? t.abr : "transparent"}`,
+          borderRadius: 6, padding: "4px 12px", fontSize: 13,
+          fontWeight: fmt === tab.id ? 600 : 500, cursor: "pointer",
+          display: "flex", alignItems: "center", gap: 5,
+        }}>
+          {tab.icon ? <span>{tab.icon}</span> : null}
+          <span>{tab.label}</span>
+        </button>
+      ))}
     </div>
 
     {/* Status tabs */}

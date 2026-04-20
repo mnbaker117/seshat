@@ -760,6 +760,19 @@ function AudiobookshelfSection({ s, upd, ist, creds, onCredSaved }: {
     )}
 
     <SF
+      label="Audiobook Sink Path"
+      desc="Container-local path where Seshat drops new audiobook files. Must match the folder ABS watches for its sink-target library (see Use-as-sink above)."
+      example="e.g. /audiobooks (with a docker volume mount to /mnt/user/my-content/audiobooks on the host)"
+    >
+      <input
+        value={(s.audiobookshelf_library_path as string) || ""}
+        onChange={e => upd("audiobookshelf_library_path", e.target.value.trim())}
+        placeholder="/audiobooks"
+        style={{ ...ist, width: 280 }}
+      />
+    </SF>
+
+    <SF
       label="Sink Library ID"
       desc="Which ABS library the audiobook sink delivers into. Click 'Use as sink' above after testing, or paste a library UUID."
     >

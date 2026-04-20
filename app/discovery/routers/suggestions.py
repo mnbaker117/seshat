@@ -23,6 +23,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from app.discovery.database import get_db, HF
+from app.discovery.cross_library import run_across_libraries
 
 logger = logging.getLogger("seshat.discovery")
 
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/api/discovery", tags=["suggestions"])
 
 
 @router.get("/series-suggestions")
-async def list_series_suggestions(status: str = "pending"):
+async def list_series_suggestions(status: str = "pending", content_type: str = None):
     """List series suggestions filtered by status (default: pending).
 
     Joins to books/authors/series so the UI can render a complete row
@@ -43,24 +44,24 @@ async def list_series_suggestions(status: str = "pending"):
     if status not in ("pending", "applied", "ignored", "all"):
         raise HTTPException(400, "status must be one of: pending, applied, ignored, all")
 
-    db = await get_db()
-    try:
+    # Shared query shape used by both the active-library path and the
+    # per-library pass inside the cross-library aggregator.
+    def _build_sql() -> tuple[str, list]:
         where_clauses = [HF]
-        params = []
+        params: list = []
         if status != "all":
             where_clauses.append("sug.status = ?")
             params.append(status)
         where = " AND ".join(where_clauses)
-
-        rows = await (await db.execute(
-            f"""
+        sql = f"""
             SELECT
                 sug.id, sug.book_id, sug.suggested_series_name,
                 sug.suggested_series_index, sug.sources_agreeing,
                 sug.current_series_name AS snapshot_series_name,
                 sug.current_series_index AS snapshot_series_index,
                 sug.status, sug.created_at, sug.updated_at,
-                b.title AS book_title, b.author_id, b.owned, b.series_index AS live_series_index,
+                b.title AS book_title, b.author_id, b.owned,
+                b.series_index AS live_series_index,
                 a.name AS author_name,
                 s.name AS live_series_name
             FROM book_series_suggestions sug
@@ -69,28 +70,49 @@ async def list_series_suggestions(status: str = "pending"):
             LEFT JOIN series s ON s.id = b.series_id
             WHERE {where}
             ORDER BY sug.updated_at DESC NULLS LAST, sug.created_at DESC
-            """,
-            params,
-        )).fetchall()
+        """
+        return sql, params
 
-        result = []
-        for r in rows:
-            d = dict(r)
-            # Decode the JSON sources_agreeing array for clean frontend consumption.
-            try:
-                d["sources_agreeing"] = json.loads(d["sources_agreeing"] or "[]")
-            except (json.JSONDecodeError, TypeError):
-                d["sources_agreeing"] = []
-            # Drift indicator: True if the book's live series state has
-            # moved away from the snapshot recorded when the suggestion
-            # was created. The frontend can warn that the diff may be
-            # stale and a fresh scan would clarify.
-            snapshot_name = (d["snapshot_series_name"] or "")
-            snapshot_idx = d["snapshot_series_index"]
-            live_name = (d["live_series_name"] or "")
-            live_idx = d["live_series_index"]
-            d["drifted"] = (snapshot_name != live_name or snapshot_idx != live_idx)
-            result.append(d)
+    def _finalize(row: dict) -> dict:
+        try:
+            row["sources_agreeing"] = json.loads(row["sources_agreeing"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            row["sources_agreeing"] = []
+        snapshot_name = (row["snapshot_series_name"] or "")
+        snapshot_idx = row["snapshot_series_index"]
+        live_name = (row["live_series_name"] or "")
+        live_idx = row["live_series_index"]
+        row["drifted"] = (snapshot_name != live_name or snapshot_idx != live_idx)
+        return row
+
+    # Cross-library path — aggregate suggestions from every library of
+    # the requested content_type. The suggestion table lives in each
+    # per-library discovery DB, so we iterate.
+    if content_type:
+        sql, params = _build_sql()
+
+        async def q(db):
+            rs = await (await db.execute(sql, params)).fetchall()
+            return [dict(r) for r in rs]
+
+        rows = await run_across_libraries(content_type, q)
+        # Sort by (updated_at DESC NULLS LAST, created_at DESC) —
+        # Python stable sort, descending. None → -inf via a tuple key.
+        rows.sort(
+            key=lambda r: (
+                -(r.get("updated_at") or 0.0),
+                -(r.get("created_at") or 0.0),
+            ),
+        )
+        result = [_finalize(r) for r in rows]
+        return {"suggestions": result, "count": len(result)}
+
+    # Active-library path (legacy).
+    db = await get_db()
+    try:
+        sql, params = _build_sql()
+        rows = await (await db.execute(sql, params)).fetchall()
+        result = [_finalize(dict(r)) for r in rows]
         return {"suggestions": result, "count": len(result)}
     finally:
         await db.close()

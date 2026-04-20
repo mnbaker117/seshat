@@ -111,7 +111,7 @@ function renderPage(
     case "disc-author-detail": return <DiscAuthorDetailPage authorId={pageArg as number} onNav={nav} />;
     case "disc-mam":           return <DiscMAMPage onNav={nav} />;
     case "disc-suggestions":   return <DiscSuggestionsPage onNav={nav} />;
-    case "disc-hidden":        return <DiscBooksPage title="Hidden Books" apiPath="/discovery/books/hidden" showFormatTabs={false} />;
+    case "disc-hidden":        return <DiscBooksPage title="Hidden Books" apiPath="/discovery/books/hidden" />;
     case "disc-importexport":  return <DiscImportExportPage />;
     case "disc-works":         return <WorksPage />;
 
