@@ -645,13 +645,23 @@ def discover_libraries(settings=None) -> list[dict]:
 
     Priority:
     1. User-configured library_sources in settings
-    2. Registered library apps (each checks its own env var)
+    2. Registered library apps whose `app_type` did NOT contribute to
+       Priority 1 (each checks its own env var / settings fallback)
     3. CALIBRE_DB_PATH env var (legacy single-library fallback)
+
+    Pre-v1.3 bug: Priority 1 returned early when it found anything,
+    which blocked the API-based AudiobookshelfApp (no library_sources
+    entry, discovers via `abs_url` setting) from ever running when a
+    user had Calibre configured via library_sources. Fix: compose
+    Priority 1 + 2 instead of branching. Each app_type still only
+    contributes once — Priority 2 skips any app_type that Priority 1
+    already covered.
     """
     from app.library_apps import get_all_apps
 
     libraries: list[dict] = []
     seen_slugs: set[str] = set()
+    covered_app_types: set[str] = set()
 
     def _add_library(lib_dict):
         slug = lib_dict["slug"]
@@ -676,6 +686,7 @@ def discover_libraries(settings=None) -> list[dict]:
             if not app:
                 _log.warning(f"Unknown app type '{src_app}' in library_sources, skipping")
                 continue
+            before_count = len(libraries)
             if src_type == "root":
                 for lib in app.discover(src_path):
                     _add_library(lib)
@@ -698,11 +709,19 @@ def discover_libraries(settings=None) -> list[dict]:
                     })
                 else:
                     _log.warning(f"Direct library path not found or invalid: {src_path}")
-        if libraries:
-            return libraries
+            # Only mark as covered if the entry actually produced a
+            # library — lets Priority 2 retry via env var for an entry
+            # whose configured path was invalid.
+            if len(libraries) > before_count:
+                covered_app_types.add(src_app)
 
-    # Priority 2: Registered library apps (each checks its env var)
+    # Priority 2: Registered library apps not covered by Priority 1.
+    # API-based apps (ABS) never appear in library_sources so they
+    # always land here; file-based apps that Priority 1 already
+    # handled are skipped.
     for _app_type, app in get_all_apps().items():
+        if _app_type in covered_app_types:
+            continue
         root_path = app.get_root_path()
         if root_path:
             found = app.discover(root_path)
