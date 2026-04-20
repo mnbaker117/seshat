@@ -108,9 +108,20 @@ _review_timeout_task: Optional[asyncio.Task] = None
 
 
 # ─── APScheduler ────────────────────────────────────────────
-# AsyncIOScheduler instance running the daily + weekly digest jobs.
-# Set by main.py's lifespan and torn down during shutdown.
+# AsyncIOScheduler instance running the daily + weekly digest jobs
+# plus the discovery-domain library-sync and scheduled-lookup interval
+# jobs. Set by main.py's lifespan and torn down during shutdown.
 scheduler: Optional[Any] = None
+
+
+# ─── Discovery scheduler task handles ───────────────────────
+# Supervised-task wrappers around the two discovery-side loops that
+# aren't APScheduler jobs: the MAM batch-scan scheduler (needs to
+# re-read its interval setting on every 60s tick) and the discovery
+# digest flush loop (fires at calendar times, cancelled on shutdown
+# to trigger a final queue drain).
+_mam_scheduler_task: Optional[asyncio.Task] = None
+_digest_scheduler_task: Optional[asyncio.Task] = None
 
 
 # ─── qBit poller state ──────────────────────────────────────

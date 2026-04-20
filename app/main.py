@@ -54,8 +54,9 @@ from app.orchestrator.cookie_keepalive import run_loop as cookie_keepalive_loop
 from app.orchestrator.cookie_retry import run_loop as cookie_retry_loop
 from app.orchestrator.dispatch import DispatcherDeps, handle_announce
 from app.orchestrator.review_timeout import run_loop as review_timeout_loop
-from app.orchestrator.scheduler import build_scheduler
+from app.orchestrator.scheduler import register_digest_jobs
 from app.notify.digests import DigestContext
+from app.notify.ntfy import aclose as ntfy_aclose
 from app.auth_db import init_auth_db
 from app.auth_sessions import SESSION_COOKIE_NAME, verify_session_token
 from app.routers.athenascout import router as athenascout_router
@@ -330,21 +331,27 @@ _rotation_persist_task: Optional[asyncio.Task] = None
 
 
 async def _rotation_callback(new_token: str) -> None:
-    """Persist the rotated cookie to settings.json, debounced.
+    """Persist the rotated cookie to the encrypted secret store, debounced.
 
     Called by `app.mam.cookie._handle_response_cookie` on every
     successful rotation. We stash the new token and (re)schedule a
-    background task to flush it to disk after the debounce window.
-    Multiple rotations within the window collapse into a single
-    disk write of whichever token was seen last.
+    background task to flush it after the debounce window. Multiple
+    rotations within the window collapse into a single persistence
+    write of whichever token was seen last.
+
+    Target is `app.secrets.set_secret`, not `settings.json` — the
+    encrypted store is the canonical location (startup reads from it
+    first, settings.json is legacy fallback that `migrate_from_settings`
+    blanks at boot). Writing to settings.json on rotation would leave
+    the encrypted copy stale and defeat the migration.
     """
     global _rotation_pending_token, _rotation_persist_task
     _rotation_pending_token = new_token
 
     # Cancel any existing pending flush so the debounce timer
     # resets — the most recent rotation wins, and we don't want a
-    # stale token hitting disk while a fresher one is already in
-    # memory.
+    # stale token hitting the secret store while a fresher one is
+    # already in memory.
     if _rotation_persist_task is not None and not _rotation_persist_task.done():
         _rotation_persist_task.cancel()
 
@@ -365,15 +372,13 @@ async def _debounced_persist_rotation() -> None:
         return
 
     try:
-        settings = load_settings()
-        if settings.get("mam_session_id") == token:
-            return  # already on disk (someone else wrote it)
-        settings = dict(settings)
-        settings["mam_session_id"] = token
-        save_settings(settings)
-        _log.info("MAM session cookie persisted to settings.json")
+        from app.secrets import get_secret, set_secret
+        if await get_secret("mam_session_id") == token:
+            return  # already persisted (someone else wrote it)
+        await set_secret("mam_session_id", token)
+        _log.info(f"MAM session cookie persisted to encrypted store ({token[:8]}...)")
     except Exception:
-        _log.exception("failed to persist rotated MAM cookie to settings.json")
+        _log.exception("failed to persist rotated MAM cookie to encrypted store")
 
 
 def _build_irc_config(settings: dict, resolved_secrets: dict = None) -> IrcConfig:
@@ -559,10 +564,12 @@ async def lifespan(app: FastAPI):
     else:
         _log.info("Review-timeout loop disabled (review_queue_enabled=false)")
 
-    # APScheduler: daily + weekly digest jobs. Only starts if an
-    # ntfy URL is configured — no point running the scheduler just
-    # to send notifications into the void. The jobs do read even
-    # when ntfy is empty, but they skip the send.
+    # APScheduler: always construct so discovery-domain interval jobs
+    # (library sync + scheduled author lookup) have somewhere to land.
+    # Digest jobs only register when daily_digest_enabled + ntfy_url are
+    # both set — no point cron-ing notifications into the void.
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    scheduler = AsyncIOScheduler()
     if settings.get("daily_digest_enabled", True) and settings.get("ntfy_url"):
         digest_ctx = DigestContext(
             ntfy_url=settings.get("ntfy_url", ""),
@@ -570,26 +577,25 @@ async def lifespan(app: FastAPI):
             weekly_auto_promote_days=7,
             calibre_library_path=settings.get("calibre_library_path", ""),
         )
-        scheduler = build_scheduler(
+        register_digest_jobs(
+            scheduler,
             daily_digest_hour=int(settings.get("daily_digest_hour", 9)),
             ctx=digest_ctx,
         )
-        scheduler.start()
-        state.scheduler = scheduler
         _log.info(
-            f"APScheduler started (daily digest hour="
+            f"Digest jobs registered (daily hour="
             f"{settings.get('daily_digest_hour', 9)}, weekly=Sun 23:30)"
         )
     else:
         _log.info(
-            "APScheduler disabled (daily_digest_enabled=false or ntfy_url empty)"
+            "Digest jobs skipped (daily_digest_enabled=false or ntfy_url empty)"
         )
 
     # ── Discovery domain startup ─────────────────────────────
     # Library discovery, per-library DB init, initial Calibre sync.
     # This runs AFTER the pipeline startup so both domains are live
     # when the app starts serving requests.
-    from app.config import discover_libraries, SYNC_INTERVAL_MINUTES
+    from app.config import discover_libraries
     from app.discovery.database import (
         init_db as init_discovery_db,
         set_active_library,
@@ -654,7 +660,44 @@ async def lifespan(app: FastAPI):
         state._last_library_sync_check["at"] = _time.time()
         state._last_library_sync_check["synced"] = True
 
+    # Per-source rate limits and the Hardcover API key are read once
+    # into module-level source instances at import time. Refresh them
+    # now so the initial sync above, the IRC-triggered author scans,
+    # and any dashboard source checks all see user-configured values
+    # before the first scheduled lookup fires. run_full_lookup also
+    # self-heals via its own reload_sources() call, but that leaves a
+    # gap between startup and first scan.
+    try:
+        from app.discovery.lookup import reload_sources as _reload_sources
+        _reload_sources()
+    except Exception:
+        _log.exception("reload_sources() failed at startup")
+
     _log.info("Discovery domain initialized")
+
+    # ── Scheduler start + MAM/digest supervised tasks ────────
+    # Register discovery interval jobs (library sync, scheduled author
+    # lookup) onto the same scheduler used for digests, now that
+    # state._discovered_libraries is populated. The MAM scheduler and
+    # the discovery-side digest flush loop are supervised_task coroutines
+    # rather than APScheduler jobs because their cadence is settings-
+    # driven and they need to re-read settings on every tick.
+    from app.discovery.scheduled_jobs import (
+        add_discovery_jobs,
+        mam_scheduler_loop,
+    )
+    from app.discovery.digest import run_digest_scheduler
+    add_discovery_jobs(scheduler, settings)
+    scheduler.start()
+    state.scheduler = scheduler
+
+    state._mam_scheduler_task = state.supervised_task(
+        mam_scheduler_loop, name="mam-scheduler"
+    )
+    state._digest_scheduler_task = state.supervised_task(
+        run_digest_scheduler, name="digest-scheduler"
+    )
+    _log.info("MAM scheduler + digest scheduler tasks started")
 
     try:
         yield
@@ -664,16 +707,15 @@ async def lifespan(app: FastAPI):
         # Stop accepting new rotation notifications. Any request
         # in flight right now might still try to fire the callback
         # between now and when its response lands, and we don't
-        # want that racing against the settings.json flush below
-        # or the disk teardown.
+        # want that racing against the secret-store flush below or
+        # the disk teardown.
         set_rotation_callback(None)
 
         # If there's a pending debounced rotation waiting to write,
-        # either flush it immediately or cancel the timer — we do
-        # both: cancel the timer so it doesn't sleep for 60s during
-        # an otherwise-fast shutdown, then write the pending token
-        # synchronously. This guarantees we never lose the most
-        # recent cookie to a shutdown.
+        # cancel the timer so it doesn't sleep for 60s during an
+        # otherwise-fast shutdown, then write the pending token to
+        # the encrypted store synchronously. This guarantees we never
+        # lose the most recent cookie to a shutdown.
         global _rotation_persist_task
         if _rotation_persist_task is not None and not _rotation_persist_task.done():
             _rotation_persist_task.cancel()
@@ -684,11 +726,9 @@ async def lifespan(app: FastAPI):
             _rotation_persist_task = None
         if _rotation_pending_token:
             try:
-                current = load_settings()
-                if current.get("mam_session_id") != _rotation_pending_token:
-                    merged = dict(current)
-                    merged["mam_session_id"] = _rotation_pending_token
-                    save_settings(merged)
+                from app.secrets import get_secret, set_secret
+                if await get_secret("mam_session_id") != _rotation_pending_token:
+                    await set_secret("mam_session_id", _rotation_pending_token)
                     _log.info(
                         "Flushed pending MAM cookie rotation during shutdown"
                     )
@@ -717,13 +757,19 @@ async def lifespan(app: FastAPI):
         # Cancel the supervised tasks. supervised_task wraps the
         # coroutines with restart-on-crash logic, so we need to
         # cancel the wrapper task itself — the inner coroutine sees
-        # CancelledError and unwinds cleanly.
+        # CancelledError and unwinds cleanly. The digest scheduler
+        # relies on CancelledError to trigger its final flush — it
+        # catches the cancel, drains pending digest events with
+        # force=True, and then re-raises — so cancelling it is a
+        # feature, not just teardown.
         for task_attr in (
             "_irc_task",
             "_budget_watcher_task",
             "_cookie_keepalive_task",
             "_cookie_retry_task",
             "_review_timeout_task",
+            "_mam_scheduler_task",
+            "_digest_scheduler_task",
         ):
             task = getattr(state, task_attr, None)
             if task is not None and not task.done():
@@ -753,6 +799,29 @@ async def lifespan(app: FastAPI):
             await aclose_session()
         except Exception:
             _log.exception("error closing MAM cookie session during shutdown")
+        # The discovery domain holds its own long-lived httpx.AsyncClient
+        # for MAM metadata calls — separate from the cookie-module one
+        # that aclose_session() above closes. Close it explicitly so we
+        # don't leak the transport.
+        try:
+            from app.discovery.sources.mam import aclose_session as disc_mam_aclose
+            await disc_mam_aclose()
+        except Exception:
+            _log.exception("error closing discovery MAM session during shutdown")
+        # Best-effort final flush of any pending discovery digest events
+        # so a restart doesn't lose notifications queued during the day.
+        # No-op when ntfy_digest_enabled=false (force=True still drains
+        # but the queue is empty in that case).
+        try:
+            from app.discovery.digest import flush_digest
+            await flush_digest(force=True)
+        except Exception:
+            _log.exception("error flushing discovery digest during shutdown")
+        # Close the ntfy notifier's httpx client.
+        try:
+            await ntfy_aclose()
+        except Exception:
+            _log.exception("error closing ntfy client during shutdown")
         state.dispatcher = None
         state.irc_client = None
 
