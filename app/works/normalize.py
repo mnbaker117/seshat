@@ -38,17 +38,16 @@ import unicodedata
 
 _ARTICLE_RX = re.compile(r"^\s*(the|a|an)\s+", re.IGNORECASE)
 _PARENS_RX = re.compile(r"[\(\[\{].*?[\)\]\}]")
-# Trailing series marker — comma-only on purpose. Using `-`/`:`/`;` as
-# separators caused distinct volumes of the same series to collapse
-# ("The Hero-Killing Bride: Volume 1/2/3" all normalizing to
-# "hero killing bride"). In practice, titles that append their volume
-# number via `, Book N` are the accidentally-decorated ones Seshat
-# needs to clean up; titles that carry the volume as part of the name
-# use `:` or `-` and should stay distinct.
-_TRAILING_SERIES_RX = re.compile(
-    r",\s*(book|vol(?:ume)?|part|chapter|no)\s*[.:]?\s*\d+(?:\s*of\s*\d+)?\s*$",
-    re.IGNORECASE,
-)
+# Trailing volume-marker stripping was attempted twice (dash/colon/semi
+# separators → comma-only) and both caused false-positive merges for
+# distinct volumes of manga/light-novel series ("Spice & Wolf, Vol. 21"
+# through Vol. 1 all collapsed to "spice wolf"). There's no way to tell
+# apart decorative metadata from actual title content without external
+# knowledge, so the regex is removed entirely. Rely on:
+#   1. Exact strict match (primary path)
+#   2. " - Subtitle" loose variant in match_keys (covers the
+#      Halo: Evolutions publisher-subtitle drift case)
+#   3. Manual linking via the Works UI for anything else
 _TRAILING_HASH_RX = re.compile(r",?\s*#\d+(?:\.\d+)?\s*$")
 # Apostrophes get dropped (not replaced with space) so "Don't" and
 # "Dont" normalize identically. Other punctuation becomes a space so
@@ -111,10 +110,9 @@ def normalize_title(title: str) -> str:
     # carry format hints ("Unabridged", "Audiobook") that would
     # otherwise leak into the comparison key.
     s = _PARENS_RX.sub(" ", s)
-    # Drop leading article before trailing-series strip so "The Way of
-    # Kings, Book 1" → "way of kings" rather than "kings".
+    # Drop leading article (The/A/An) so "The Way of Kings" matches
+    # "Way of Kings".
     s = _ARTICLE_RX.sub("", s)
-    s = _TRAILING_SERIES_RX.sub("", s)
     s = _TRAILING_HASH_RX.sub("", s)
     s = _APOSTROPHE_RX.sub("", s)
     s = _PUNCT_RX.sub(" ", s.lower())
