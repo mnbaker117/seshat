@@ -21,8 +21,18 @@ router = APIRouter(prefix="/api/discovery", tags=["series"])
 
 
 @router.get("/series/{sid}")
-async def get_series(sid: int):
-    db = await get_db()
+async def get_series(sid: int, slug: str | None = None):
+    """Return a series detail with its ordered book list.
+
+    `slug=X` overrides which library's DB holds this series. Without
+    it we use the active library. Needed for the cross-library author
+    detail page: series ids from ABS don't mean anything in Calibre,
+    so fetching books for an ABS-sourced series must go straight to
+    the ABS DB. Same failure mode as the authors endpoint before the
+    slug fix — ABS series 2 could be a totally different series in
+    Calibre with the same id.
+    """
+    db = await get_db(slug)
     try:
         r = await (await db.execute("SELECT s.*, a.name as author_name FROM series s LEFT JOIN authors a ON s.author_id=a.id WHERE s.id=?", (sid,))).fetchone()
         if not r:

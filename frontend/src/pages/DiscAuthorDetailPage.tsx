@@ -35,8 +35,13 @@ interface ISProps extends SectionSharedProps {
   // whatever the router gave it (number on the canonical nav path,
   // string via URL params).
   authorId: number | string;
+  // Library slug this series belongs to, for cross-library author
+  // detail. Omitted → falls back to active library (single-lib case).
+  // An ABS series id lookup against the Calibre DB returns a totally
+  // different series, so we MUST scope the fetch per-library here.
+  librarySlug?: string | null;
 }
-function IS({series,vm,onAction,onBookClick,collapsed,authorId}:ISProps){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState<Book[]|null>(null);const load=()=>{if(bks)return;setLd(true);api.get<{books?:Book[]}>(`/discovery/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
+function IS({series,vm,onAction,onBookClick,collapsed,authorId,librarySlug}:ISProps){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState<Book[]|null>(null);const load=()=>{if(bks)return;setLd(true);const qs=librarySlug?`?slug=${encodeURIComponent(librarySlug)}`:"";api.get<{books?:Book[]}>(`/discovery/series/${series.id}${qs}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
 const isMulti=!!series.multi_author;
 const header=isMulti?<span>{series.name} <span style={{fontSize:11,color:useTheme().cyant,fontWeight:600,textTransform:"none",background:useTheme().cyan+"22",padding:"2px 8px",borderRadius:4,marginLeft:4}}>shared series</span></span>:series.name;
 // Separate regular books from omnibus entries for display
@@ -213,7 +218,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
             <div style={{ flex: 1, height: 1, background: t.borderL }} />
           </div>
         )}
-        {series.map((s:any)=><IS key={`${block.slug}_${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={block.data?.id ?? authorIdNum}/>)}
+        {series.map((s:any)=><IS key={`${block.slug}_${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={block.data?.id ?? authorIdNum} librarySlug={block.slug}/>)}
         {standalone.length>0 && <SA books={standalone} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol}/>}
         {series.length === 0 && standalone.length === 0 && (
           <div style={{ fontSize: 13, color: t.tf, fontStyle: "italic", padding: "20px 0" }}>
