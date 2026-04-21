@@ -147,8 +147,22 @@ async def platform_info():
 
 
 @router.get("/stats")
-async def get_stats():
-    db = await get_db()
+async def get_stats(slug: str | None = None):
+    """Return per-library stats used by the Dashboard.
+
+    `slug` targets a specific discovered library; omitted falls back
+    to the active library (back-compat with callers that assume a
+    single active DB). The Dashboard calls this once per discovered
+    library so the Athena widget can show Calibre + ABS rows with
+    independent owned/MAM/audiobook counts side-by-side.
+
+    When the queried library is an audiobook backend, the response
+    also includes `narrator_count`, `total_duration_sec`,
+    `abridged_count`, and `unabridged_count` — null-safe columns that
+    are populated by ABS sync and left null by Calibre sync.
+    """
+    target_slug = slug or get_active_library()
+    db = await get_db(target_slug)
     try:
         g = lambda sql: db.execute(sql)
         # Match the Authors page browse view (routers/authors.py:get_authors)
@@ -182,8 +196,70 @@ async def get_stats():
         mam_stats = None
         if s.get("mam_enabled") and s.get("mam_session_id"):
             mam_stats = await get_mam_stats(db)
-        active_lib = get_active_library()
-        lib_info = next((l for l in state._discovered_libraries if l["slug"] == active_lib), None)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_library_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(state._discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_library_sync_check": state._last_library_sync_check}
+        lib_info = next((l for l in state._discovered_libraries if l["slug"] == target_slug), None)
+        content_type = lib_info.get("content_type", "ebook") if lib_info else "ebook"
+        app_type = lib_info.get("app_type", "calibre") if lib_info else "calibre"
+
+        # Audiobook-specific aggregates. Columns `narrator`,
+        # `duration_sec`, `abridged` are only populated for books
+        # sourced from an audiobook backend (ABS sync). For ebook
+        # libraries these return zeros naturally, so we skip the
+        # queries entirely rather than returning misleading zeros.
+        narrator_count = None
+        total_duration_sec = None
+        abridged_count = None
+        unabridged_count = None
+        if content_type == "audiobook":
+            row = await (await g(
+                "SELECT COUNT(DISTINCT narrator) c FROM books "
+                "WHERE narrator IS NOT NULL AND narrator != '' AND owned=1 AND hidden=0"
+            )).fetchone()
+            narrator_count = row["c"] if row else 0
+            row = await (await g(
+                "SELECT COALESCE(SUM(duration_sec),0) s FROM books "
+                "WHERE owned=1 AND hidden=0"
+            )).fetchone()
+            total_duration_sec = row["s"] if row else 0
+            row = await (await g(
+                "SELECT COUNT(*) c FROM books WHERE abridged=1 AND owned=1 AND hidden=0"
+            )).fetchone()
+            abridged_count = row["c"] if row else 0
+            row = await (await g(
+                "SELECT COUNT(*) c FROM books WHERE abridged=0 AND owned=1 AND hidden=0"
+            )).fetchone()
+            unabridged_count = row["c"] if row else 0
+
+        return {
+            "authors": authors, "total_books": total, "owned_books": owned,
+            "missing_books": missing, "new_books": new, "upcoming_books": upcoming,
+            "total_series": series, "hidden_books": hidden,
+            "last_library_sync": dict(ls) if ls else None,
+            "last_lookup": dict(ll) if ll else None,
+            "calibre_web_url": s.get("calibre_web_url", ""),
+            "calibre_url": s.get("calibre_url", ""),
+            "abs_web_url": s.get("abs_web_url", ""),
+            "mam": mam_stats,
+            "mam_enabled": s.get("mam_enabled", False),
+            "mam_scanning_enabled": s.get("mam_scanning_enabled", True),
+            "author_scanning_enabled": s.get("author_scanning_enabled", True),
+            "library_slug": target_slug,
+            "library_name": lib_info["name"] if lib_info else target_slug,
+            "library_display_name": (lib_info or {}).get("display_name") or (lib_info or {}).get("name") or target_slug,
+            "content_type": content_type,
+            "app_type": app_type,
+            # Back-compat aliases — callers that predate the multi-library
+            # refactor still read the `active_*` fields. Kept until Phase 8
+            # cleanup retires the old consumers.
+            "active_library": target_slug,
+            "active_library_name": lib_info["name"] if lib_info else target_slug,
+            "active_content_type": content_type,
+            "active_app_type": app_type,
+            "library_count": len(state._discovered_libraries),
+            "narrator_count": narrator_count,
+            "total_duration_sec": total_duration_sec,
+            "abridged_count": abridged_count,
+            "unabridged_count": unabridged_count,
+            "last_library_sync_check": state._last_library_sync_check,
+        }
     finally:
         await db.close()

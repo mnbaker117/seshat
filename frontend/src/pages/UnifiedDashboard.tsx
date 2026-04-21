@@ -31,6 +31,14 @@ export default function UnifiedDashboard({ onNav }: Props) {
   const [scanning, setScanning] = useState(false);
   const [mamScanning, setMamScanning] = useState(false);
 
+  // Per-library stats map keyed by slug. Populated after the first
+  // refresh tick so the Athena widget and Seshat Stats row can show
+  // Calibre AND Audiobookshelf numbers simultaneously instead of only
+  // the active library. `d` (the active-library stats) is kept for
+  // back-compat with the existing Hermes/Pipeline consumers that
+  // don't care which library is active.
+  const [statsBySlug, setStatsBySlug] = useState<Record<string, any>>({});
+
   const refresh = useCallback(async () => {
     const r = await Promise.all([
       api.get("/discovery/stats").catch(() => null),
@@ -49,6 +57,24 @@ export default function UnifiedDashboard({ onNav }: Props) {
     setTentativeCount(r[5]?.items?.length ?? 0);
     setCounts(r[6]); setGrabs(r[7]?.grabs ?? []); setSettings(r[8]);
     if (r[9]) setScanStatus(r[9]);
+    // Second pass: fan out one /stats call per discovered library so
+    // Calibre + ABS widgets render with their own numbers. Bounded by
+    // the number of libraries (2 in practice); the parallel fetch adds
+    // one network round-trip to the 30s poll loop.
+    const libs = ((r[9] as any)?.scans || []).filter((s: any) => s.kind === "library");
+    if (libs.length > 0) {
+      const byPair = await Promise.all(
+        libs.map(async (ls: any) => {
+          const s = await api.get(`/discovery/stats?slug=${encodeURIComponent(ls.slug)}`).catch(() => null);
+          return [ls.slug, s] as const;
+        })
+      );
+      const map: Record<string, any> = {};
+      for (const [slug, stats] of byPair) {
+        if (stats) map[slug] = stats;
+      }
+      setStatsBySlug(map);
+    }
     setCd(POLL);
   }, []);
 
@@ -56,20 +82,33 @@ export default function UnifiedDashboard({ onNav }: Props) {
 
   const ds = d || {};
   const b = budget || {};
-  const owned = ds.owned_books ?? 0, total = ds.total_books ?? 0;
-  const missing = ds.missing_books ?? 0, upcoming = ds.upcoming_books ?? 0;
-  const authors = ds.authors ?? 0, series = ds.total_series ?? 0;
-  const newBooks = ds.new_books ?? 0;
-  const mamStats = ds.mam || {};
-  const mamFound = mamStats.found ?? 0;
-  const mamPossible = mamStats.possible ?? 0, mamNotFound = mamStats.not_found ?? 0;
-  const comp = total > 0 ? pct(owned, total) : 0;
   const allowed = counts?.authors_allowed ?? 0;
   const ignored = counts?.authors_ignored ?? 0;
   const totalGrabs = counts?.grabs ?? 0;
   const calibreAdds = counts?.calibre_additions ?? 0;
   const cwaUrl = settings?.cwa_web_url || "";
   const calibreUrl = settings?.calibre_web_url || "";
+  const absWebUrl = settings?.abs_web_url || "";
+
+  // Per-library stats split. Each content type picks the first library
+  // of that kind from statsBySlug — matches the current 1-ebook +
+  // 1-audiobook setup. Multi-library-per-kind users fall back to the
+  // first discovered; a proper per-library tab can come later.
+  const statsEntries = Object.values(statsBySlug);
+  const ebookStats = statsEntries.find((s: any) => s?.content_type === "ebook") || ds;
+  const audiobookStats = statsEntries.find((s: any) => s?.content_type === "audiobook");
+  const authors = ebookStats?.authors ?? 0;
+  const series = ebookStats?.total_series ?? 0;
+  const newBooks = ebookStats?.new_books ?? 0;
+  // Seshat Stats row tiles summarize the ebook library (historical
+  // behavior before ABS existed). Audiobook-specific tiles are added
+  // separately from `audiobookStats`.
+  const owned = ebookStats?.owned_books ?? 0;
+  const total = ebookStats?.total_books ?? 0;
+  const missing = ebookStats?.missing_books ?? 0;
+  const upcoming = ebookStats?.upcoming_books ?? 0;
+  const mamStats = ebookStats?.mam || {};
+  const mamFound = mamStats.available_to_download ?? 0;
 
   // Scan progress — API returns {scans: [...{kind: "lookup"}, {kind: "mam"}, {kind: "library", slug}...]}
   // Libraries are now keyed per-slug: Calibre and Audiobookshelf each
@@ -100,7 +139,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
   useVisibleInterval(refresh, pollMs);
   useVisibleInterval(() => setCd(c => Math.max(0, c - 1)), 1000);
 
-  const hdr = (color?) => ({ fontSize: 13, fontWeight: 700, color: color || t.accent, textTransform: "uppercase" as const, letterSpacing: "0.05em" });
+  const hdr = (color?) => ({ fontSize: 15, fontWeight: 700, color: color || t.accent, textTransform: "uppercase" as const, letterSpacing: "0.05em" });
   const vsep = { borderLeft: `1px solid ${t.border}`, paddingLeft: 20, marginLeft: 4 };
 
   return (
@@ -109,61 +148,69 @@ export default function UnifiedDashboard({ onNav }: Props) {
       {/* ══════ ROW 1: Athena | Hermes ══════ */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
 
-        {/* ATHENA */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 18px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <div>
-              <div style={hdr()}><Dot color={t.accent} /> Athena</div>
-              <div style={{ fontSize: 13, color: t.td, marginTop: 2 }}>{fmtNum(owned)} of {fmtNum(total)} books owned</div>
-            </div>
-            <div style={{ fontSize: 28, fontWeight: 800, color: t.accent }}>{comp}%</div>
-          </div>
-          <div style={{ height: 5, background: t.bg4, borderRadius: 3, overflow: "hidden", marginBottom: 12 }}>
-            <div style={{ height: "100%", width: `${Math.min(comp, 100)}%`, background: `linear-gradient(90deg, ${t.jade}, ${t.accent})`, borderRadius: 3 }} />
-          </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, flex: 1 }}>
-              <MiniBox value={fmtNum(mamFound)} label="Available on MAM" color={t.jade} onClick={() => onNav("disc-mam")} />
-              <MiniBox value={fmtNum(mamPossible)} label="Upload Candidates" color={t.ylw} onClick={() => onNav("disc-mam")} />
-              <MiniBox value={fmtNum(mamNotFound)} label="Missing Everywhere" color={t.red} />
-            </div>
-            <div style={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 10, display: "flex", flexDirection: "column", gap: 6, justifyContent: "center" }}>
-              {cwaUrl && <TBtn icon={<Bar color={t.ylw} />} label="CWA" onClick={() => window.open(cwaUrl, "_blank")} />}
-              {calibreUrl && <TBtn icon={<Bar color={t.jade} />} label="Calibre" onClick={() => window.open(calibreUrl, "_blank")} />}
-              {!cwaUrl && !calibreUrl && <span style={{ fontSize: 11, color: t.tf }}>No links</span>}
-            </div>
-          </div>
+        {/* ATHENA — ebook and audiobook sections stacked. Each has
+            its own ownership percentage, progress bar, MAM metrics,
+            and external-link column so the user can see both libraries'
+            state simultaneously. */}
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
+          <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> Athena</div>
+          <LibrarySection
+            stats={ebookStats}
+            color={t.jade}
+            accent={t.accent}
+            links={[
+              cwaUrl ? { label: "CWA", color: t.ylw, href: cwaUrl } : null,
+              calibreUrl ? { label: "Calibre", color: t.jade, href: calibreUrl } : null,
+            ].filter(Boolean) as any}
+            onNavMam={() => onNav("disc-mam")}
+            t={t}
+          />
+          {audiobookStats && (
+            <>
+              <div style={{ height: 1, background: t.borderL, margin: "14px 0" }} />
+              <LibrarySection
+                stats={audiobookStats}
+                color={t.pur}
+                accent={t.accent}
+                links={[
+                  absWebUrl ? { label: "Audiobookshelf", color: t.pur, href: absWebUrl } : null,
+                ].filter(Boolean) as any}
+                onNavMam={() => onNav("disc-mam")}
+                t={t}
+              />
+            </>
+          )}
         </div>
 
         {/* HERMES */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 18px" }}>
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
             <div style={{ flex: 1 }}>
               <div style={hdr(t.jade)}><Dot color={t.jade} /> Hermes</div>
-              <div style={{ fontSize: 13, color: t.td, marginTop: 2 }}>
+              <div style={{ fontSize: 14, color: t.td, marginTop: 3 }}>
                 {health?.dispatcher_ready ? `${fmtNum(totalGrabs)} grabs · ${fmtNum(calibreAdds)} to Calibre` : "Starting…"}
               </div>
-              <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
                 <Pill label="Dispatcher" ok={health?.dispatcher_ready} />
                 <Pill label="IRC" ok={health?.dispatcher_ready} />
                 <Pill label="Cookie" ok={mam?.validation_ok} warn={mam?.cookie_configured && !mam?.validation_ok} />
                 <Pill label="Watcher" ok={health?.dispatcher_ready} />
-                <div style={{ background: t.bg3, borderRadius: 8, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ background: t.bg3, borderRadius: 8, padding: "8px 16px", display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 12, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>Poll</span>
-                  <span style={{ fontSize: 18, fontWeight: 700, color: cd <= 5 ? t.accent : t.text2 }}>{cd}s</span>
+                  <span style={{ fontSize: 20, fontWeight: 700, color: cd <= 5 ? t.accent : t.text2 }}>{cd}s</span>
                 </div>
               </div>
             </div>
             {mam?.username && (
-              <div style={{ background: t.bg3, borderRadius: 10, padding: "12px 16px", textAlign: "right", minWidth: 170 }}>
-                <div style={{ fontSize: 12, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>{mam.username}</div>
-                {mam.classname && <div style={{ fontSize: 11, color: t.tf }}>{mam.classname}</div>}
-                <div style={{ display: "flex", gap: 14, justifyContent: "flex-end", marginTop: 6 }}>
-                  {mam.ratio != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: mam.ratio >= 1 ? t.ok : t.warn }}>{fmtRatio(mam.ratio)}</div><div style={{ fontSize: 11, color: t.td }}>Ratio</div></div>}
-                  {mam.wedges != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: t.accent }}>{fmtNum(mam.wedges)}</div><div style={{ fontSize: 11, color: t.td }}>Wedges</div></div>}
+              <div style={{ background: t.bg3, borderRadius: 10, padding: "14px 18px", textAlign: "right", minWidth: 190 }}>
+                <div style={{ fontSize: 13, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>{mam.username}</div>
+                {mam.classname && <div style={{ fontSize: 12, color: t.tf }}>{mam.classname}</div>}
+                <div style={{ display: "flex", gap: 18, justifyContent: "flex-end", marginTop: 8 }}>
+                  {mam.ratio != null && <div><div style={{ fontSize: 26, fontWeight: 700, color: mam.ratio >= 1 ? t.ok : t.warn }}>{fmtRatio(mam.ratio)}</div><div style={{ fontSize: 12, color: t.td }}>Ratio</div></div>}
+                  {mam.wedges != null && <div><div style={{ fontSize: 26, fontWeight: 700, color: t.accent }}>{fmtNum(mam.wedges)}</div><div style={{ fontSize: 12, color: t.td }}>Wedges</div></div>}
                 </div>
                 {(mam.uploaded_bytes || mam.downloaded_bytes) && (
-                  <div style={{ fontSize: 11, color: t.tf, marginTop: 4 }}>↑ {fmtBytes(mam.uploaded_bytes)} · ↓ {fmtBytes(mam.downloaded_bytes)}</div>
+                  <div style={{ fontSize: 12, color: t.tf, marginTop: 6 }}>↑ {fmtBytes(mam.uploaded_bytes)} · ↓ {fmtBytes(mam.downloaded_bytes)}</div>
                 )}
               </div>
             )}
@@ -172,52 +219,52 @@ export default function UnifiedDashboard({ onNav }: Props) {
       </div>
 
       {/* ══════ ROW 2: MAM Activity ══════ */}
-      <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 18px" }}>
-        <div style={{ ...hdr(), marginBottom: 8 }}><Dot color={t.accent} /> MAM Activity</div>
-        <div style={{ display: "grid", gridTemplateColumns: "200px 1fr 1fr", gap: 0 }}>
+      <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 20px" }}>
+        <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> MAM Activity</div>
+        <div style={{ display: "grid", gridTemplateColumns: "220px 1fr 1fr", gap: 0 }}>
           {/* Snatch Budget */}
           <div style={{ paddingRight: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Snatch Budget</div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
-              <span style={{ fontSize: 22, fontWeight: 700, color: (b.budget_used ?? 0) >= (b.budget_cap ?? 1) ? t.warn : t.accent }}>{b.budget_used ?? 0}</span>
-              <span style={{ fontSize: 12, color: t.td }}>/ {b.budget_cap ?? 0}</span>
+            <div style={{ fontSize: 13, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 6 }}>Snatch Budget</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 28, fontWeight: 700, color: (b.budget_used ?? 0) >= (b.budget_cap ?? 1) ? t.warn : t.accent }}>{b.budget_used ?? 0}</span>
+              <span style={{ fontSize: 14, color: t.td }}>/ {b.budget_cap ?? 0}</span>
             </div>
-            <div style={{ fontSize: 11, color: t.td, marginTop: 1 }}>
+            <div style={{ fontSize: 12, color: t.td, marginTop: 3 }}>
               {b.ledger_active ?? 0} active + {b.qbit_extras ?? 0} manual
               {(b.queue_size ?? 0) > 0 && <span style={{ color: t.warn }}> · {b.queue_size} queued</span>}
             </div>
-            {b.next_release_seconds > 0 && <div style={{ fontSize: 11, color: t.accent, marginTop: 2 }}>Next: {fmtDuration(b.next_release_seconds)}</div>}
+            {b.next_release_seconds > 0 && <div style={{ fontSize: 12, color: t.accent, marginTop: 4 }}>Next: {fmtDuration(b.next_release_seconds)}</div>}
           </div>
           {/* Recent Activity */}
           <div style={{ ...vsep, paddingRight: 16, overflow: "hidden" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Recent Activity</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 6 }}>Recent Activity</div>
             {grabs.length > 0 ? grabs.slice(0, 5).map((g, i) => (
-              <div key={i} style={{ display: "flex", fontSize: 12, padding: "2px 0", borderBottom: i < 4 ? `1px solid ${t.borderL}` : "none", overflow: "hidden" }}>
+              <div key={i} style={{ display: "flex", fontSize: 13, padding: "3px 0", borderBottom: i < 4 ? `1px solid ${t.borderL}` : "none", overflow: "hidden" }}>
                 <span style={{ color: t.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{g.torrent_name}</span>
-                <span style={{ color: t.tf, marginLeft: 8, flexShrink: 0, fontSize: 10 }}>{g.grabbed_at ? new Date(g.grabbed_at + "Z").toLocaleDateString() : ""}</span>
+                <span style={{ color: t.tf, marginLeft: 8, flexShrink: 0, fontSize: 11 }}>{g.grabbed_at ? new Date(g.grabbed_at + "Z").toLocaleDateString() : ""}</span>
               </div>
-            )) : <div style={{ fontSize: 12, color: t.tf, fontStyle: "italic" }}>No recent grabs</div>}
+            )) : <div style={{ fontSize: 13, color: t.tf, fontStyle: "italic" }}>No recent grabs</div>}
           </div>
           {/* Seeding Progress */}
           <div style={vsep}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 4 }}>Seeding Progress</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 6 }}>Seeding Progress</div>
             {b.entries?.length > 0 ? (
-              <div style={{ maxHeight: 100, overflowY: "auto" }}>
+              <div style={{ maxHeight: 120, overflowY: "auto" }}>
                 {b.entries.map((e, i) => {
                   const sp = Math.min(100, (e.seeding_seconds / (b.seed_seconds_required || 1)) * 100);
                   return (
-                    <div key={e.grab_id ?? i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 0", borderBottom: `1px solid ${t.borderL}`, fontSize: 11 }}>
-                      {e.source === "external" && <span style={{ fontSize: 8, padding: "0 3px", borderRadius: 3, background: t.td + "22", color: t.td, fontWeight: 600 }}>EXT</span>}
+                    <div key={e.grab_id ?? i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", borderBottom: `1px solid ${t.borderL}`, fontSize: 12 }}>
+                      {e.source === "external" && <span style={{ fontSize: 9, padding: "1px 4px", borderRadius: 3, background: t.td + "22", color: t.td, fontWeight: 600 }}>EXT</span>}
                       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: t.text2, minWidth: 0 }}>{e.torrent_name}</span>
-                      <div style={{ width: 60, height: 3, borderRadius: 2, background: t.bg4, flexShrink: 0 }}>
+                      <div style={{ width: 70, height: 4, borderRadius: 2, background: t.bg4, flexShrink: 0 }}>
                         <div style={{ width: `${sp}%`, height: "100%", borderRadius: 2, background: sp >= 100 ? t.ok : t.accent }} />
                       </div>
-                      <span style={{ width: 45, textAlign: "right", color: t.tf, fontSize: 10, flexShrink: 0 }}>{e.remaining_seconds > 0 ? fmtDuration(e.remaining_seconds) : "done"}</span>
+                      <span style={{ width: 50, textAlign: "right", color: t.tf, fontSize: 11, flexShrink: 0 }}>{e.remaining_seconds > 0 ? fmtDuration(e.remaining_seconds) : "done"}</span>
                     </div>
                   );
                 })}
               </div>
-            ) : <div style={{ fontSize: 12, color: t.tf, fontStyle: "italic" }}>No active seeds</div>}
+            ) : <div style={{ fontSize: 13, color: t.tf, fontStyle: "italic" }}>No active seeds</div>}
           </div>
         </div>
       </div>
@@ -226,11 +273,11 @@ export default function UnifiedDashboard({ onNav }: Props) {
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
 
         {/* Command Center */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 18px" }}>
-          <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> Command Center</div>
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
+          <div style={{ ...hdr(), marginBottom: 12 }}><Dot color={t.accent} /> Command Center</div>
           <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 0, alignItems: "stretch" }}>
             {/* Trigger buttons */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingRight: 16 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingRight: 18 }}>
               {libScans.map(ls => {
                 const color = ls.content_type === "audiobook" ? t.pur : t.jade;
                 const shortLabel = ls.label?.replace(/\s*Sync$/, "") || ls.slug;
@@ -245,14 +292,14 @@ export default function UnifiedDashboard({ onNav }: Props) {
               })}
               <CmdBtn label={<><Dot color={t.cyan} /> Scan Sources</>} busy={scanning || srcScan.running} onClick={triggerSources} />
               <CmdBtn label={<><Dot color={t.ylw} /> MAM Scan</>} busy={mamScanning || mamScan.running} onClick={triggerMam} />
-              <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 6, marginTop: 4, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 8, marginTop: 4, display: "flex", flexDirection: "column", gap: 8 }}>
                 <CmdBtn label={`Review ${reviewCount ? `(${reviewCount})` : ""}`} highlight onClick={() => onNav("pipe-review")} />
                 <CmdBtn label={`New Authors ${tentativeCount ? `(${tentativeCount})` : ""}`} onClick={() => onNav("pipe-tentative")} />
               </div>
             </div>
             {/* Progress display */}
             <div style={{ ...vsep, paddingRight: 40 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Progress</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 10 }}>Progress</div>
               {libScans.map(ls => (
                 <ProgressRow key={ls.slug} label={ls.label || "Library Sync"} scan={ls} t={t} />
               ))}
@@ -260,32 +307,32 @@ export default function UnifiedDashboard({ onNav }: Props) {
               <ProgressRow label="MAM Scan" scan={mamScan} t={t} onCancel={mamScan.running ? cancelMam : undefined} />
             </div>
             {/* Scan stats summary */}
-            <div style={{ ...vsep, minWidth: 200 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Last Scan</div>
+            <div style={{ ...vsep, minWidth: 220 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 10 }}>Last Scan</div>
               {srcScan.status === "complete" && srcScan.extra?.source_timeouts && Object.keys(srcScan.extra.source_timeouts).length > 0 ? (
-                <div style={{ fontSize: 12, color: t.warn }}>
+                <div style={{ fontSize: 13, color: t.warn }}>
                   {Object.entries(srcScan.extra.source_timeouts).map(([src, sec]) => (
                     <div key={src}>{src}: timed out ({sec}s)</div>
                   ))}
                 </div>
               ) : srcScan.extra?.new_books != null ? (
-                <div style={{ fontSize: 14, color: t.text2 }}>
+                <div style={{ fontSize: 15, color: t.text2 }}>
                   <div>{srcScan.current ?? 0} authors checked</div>
-                  <div style={{ color: t.jade, fontSize: 16, fontWeight: 600, marginTop: 4 }}>{srcScan.extra.new_books ?? 0} new books</div>
+                  <div style={{ color: t.jade, fontSize: 18, fontWeight: 600, marginTop: 5 }}>{srcScan.extra.new_books ?? 0} new books</div>
                 </div>
               ) : (
-                <div style={{ fontSize: 12, color: t.tf, fontStyle: "italic" }}>No recent scan</div>
+                <div style={{ fontSize: 13, color: t.tf, fontStyle: "italic" }}>No recent scan</div>
               )}
             </div>
           </div>
         </div>
 
         {/* Quick Actions + Tools */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "10px 16px", display: "flex", flexDirection: "column" }}>
-          <div style={{ ...hdr(), marginBottom: 6 }}><Dot color={t.accent} /> Quick Actions</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, flex: 1 }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 1 }}>Discovery</div>
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 18px", display: "flex", flexDirection: "column" }}>
+          <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> Quick Actions</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, flex: 1 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 2 }}>Discovery</div>
               <QBtn label=<><Dot color={t.accent} /> Library</> onClick={() => onNav("disc-library")} />
               <QBtn label=<><Dot color={t.accent} /> Authors</> onClick={() => onNav("disc-authors")} />
               <QBtn label=<><Dot color={t.ylw} /> Missing</> onClick={() => onNav("disc-missing")} />
@@ -293,8 +340,8 @@ export default function UnifiedDashboard({ onNav }: Props) {
               <QBtn label=<><Dot color={t.jade} /> MAM Search</> onClick={() => onNav("disc-mam")} />
               <QBtn label=<><Dot color={t.pur} /> Suggestions</> onClick={() => onNav("disc-suggestions")} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 1 }}>Pipeline</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: t.tf, textTransform: "uppercase", marginBottom: 2 }}>Pipeline</div>
               <QBtn label={`Review ${reviewCount ? `(${reviewCount})` : ""}`} primary onClick={() => onNav("pipe-review")} />
               <QBtn label=<><Dot color={t.warn} /> New Authors</> onClick={() => onNav("pipe-tentative")} />
               <QBtn label=<><Dot color={t.td} /> Weekly Ignored</> onClick={() => onNav("pipe-ignored")} />
@@ -303,9 +350,9 @@ export default function UnifiedDashboard({ onNav }: Props) {
               <QBtn label=<><Dot color={t.td} /> Delayed</> onClick={() => onNav("pipe-delayed")} />
             </div>
           </div>
-          <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 6, marginTop: 6 }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 5, textAlign: "center" }}>Tools</div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+          <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 10, marginTop: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8, textAlign: "center" }}>Tools</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
               <TBtn icon={<Bar color={t.ylw} />} label="Migration" onClick={() => onNav("pipe-migration")} />
               <TBtn icon={<Bar color={t.cyan} />} label="MAM" onClick={() => onNav("pipe-mam")} />
               <TBtn icon={<Bar color={t.tf} />} label="Logs" onClick={() => onNav("logs")} />
@@ -316,17 +363,24 @@ export default function UnifiedDashboard({ onNav }: Props) {
       </div>
 
       {/* ══════ ROW 4: Seshat Stats (full width) ══════ */}
-      <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 18px" }}>
-        <div style={{ ...hdr(), marginBottom: 8 }}><Dot color={t.accent} /> Seshat Stats</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 8 }}>
-          <Tile label="Owned Books" value={fmtNum(owned)} color={t.accent} sub="Discovery" onClick={() => onNav("disc-library")} />
-          <Tile label="Missing Books" value={fmtNum(missing)} color={t.ylw} sub="Discovery" onClick={() => onNav("disc-missing")} />
-          <Tile label="New Books" value={fmtNum(newBooks)} color={t.jade} sub="Discovery" />
-          <Tile label="Upcoming" value={fmtNum(upcoming)} color={t.cyan} sub="Discovery" onClick={() => onNav("disc-upcoming")} />
-          <Tile label="Library Authors" value={fmtNum(authors)} sub="Discovery" onClick={() => onNav("disc-authors")} />
-          <Tile label="Series" value={fmtNum(series)} sub="Discovery" />
-          <Tile label="Suggestions" value={fmtNum(ds.suggestions ?? 0)} color={t.pur} sub="Discovery" onClick={() => onNav("disc-suggestions")} />
-          <Tile label="MAM Found" value={fmtNum(mamFound)} color={t.jade} sub="Discovery" onClick={() => onNav("disc-mam")} />
+      <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 20px" }}>
+        <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> Seshat Stats</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 10 }}>
+          <Tile label="Ebooks Owned" value={fmtNum(owned)} color={t.accent} sub="Ebook" onClick={() => onNav("disc-library")} />
+          <Tile label="Missing Ebooks" value={fmtNum(missing)} color={t.ylw} sub="Ebook" onClick={() => onNav("disc-missing")} />
+          <Tile label="New Ebooks" value={fmtNum(newBooks)} color={t.jade} sub="Ebook" />
+          <Tile label="Upcoming" value={fmtNum(upcoming)} color={t.cyan} sub="Ebook" onClick={() => onNav("disc-upcoming")} />
+          <Tile label="Library Authors" value={fmtNum(authors)} sub="Ebook" onClick={() => onNav("disc-authors")} />
+          <Tile label="Series" value={fmtNum(series)} sub="Ebook" />
+          <Tile label="Suggestions" value={fmtNum(ds.suggestions ?? 0)} color={t.pur} sub="Ebook" onClick={() => onNav("disc-suggestions")} />
+          {audiobookStats && (
+            <>
+              <Tile label="Audiobooks Owned" value={fmtNum(audiobookStats.owned_books ?? 0)} color={t.pur} sub="Audiobook" onClick={() => onNav("disc-library")} />
+              <Tile label="Listening Hours" value={fmtNum(Math.round((audiobookStats.total_duration_sec ?? 0) / 3600))} color={t.pur} sub="Audiobook" />
+              <Tile label="Narrators" value={fmtNum(audiobookStats.narrator_count ?? 0)} color={t.pur} sub="Audiobook" />
+              <Tile label="Unabridged" value={fmtNum(audiobookStats.unabridged_count ?? 0)} color={t.jade} sub="Audiobook" />
+            </>
+          )}
           <Tile label="To Review" value={reviewCount} color={(reviewCount ?? 0) > 0 ? t.accent : t.td} sub="Pipeline" onClick={() => onNav("pipe-review")} />
           <Tile label="New Authors" value={tentativeCount} color={(tentativeCount ?? 0) > 0 ? t.warn : t.td} sub="Pipeline" onClick={() => onNav("pipe-tentative")} />
           <Tile label="Allowed Authors" value={fmtNum(allowed)} color={t.ok} sub="Pipeline" onClick={() => onNav("pipe-authors")} />
@@ -341,16 +395,61 @@ export default function UnifiedDashboard({ onNav }: Props) {
 
 // ── Sub-components ───────────────────────────────────────────
 
+function LibrarySection({ stats, color, accent, links, onNavMam, t }: any) {
+  // Renders one library's ownership summary inside the Athena widget.
+  // Owned/total + percentage + progress bar on top, then MAM 3-box
+  // + external-link column below so ebook + audiobook sections have
+  // visual parity.
+  const owned = stats?.owned_books ?? 0;
+  const total = stats?.total_books ?? 0;
+  const comp = total > 0 ? pct(owned, total) : 0;
+  const mam = stats?.mam || {};
+  const available = mam.available_to_download ?? 0;
+  const upload = mam.upload_candidates ?? 0;
+  const missing = mam.missing_everywhere ?? 0;
+  const name = stats?.library_display_name || stats?.library_name || "Library";
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: t.text2 }}>
+            <Dot color={color} /> {name}
+          </div>
+          <div style={{ fontSize: 14, color: t.td, marginTop: 3 }}>
+            {fmtNum(owned)} of {fmtNum(total)} {stats?.content_type === "audiobook" ? "audiobooks" : "books"} owned
+          </div>
+        </div>
+        <div style={{ fontSize: 34, fontWeight: 800, color: accent, lineHeight: 1 }}>{comp}%</div>
+      </div>
+      <div style={{ height: 6, background: t.bg4, borderRadius: 3, overflow: "hidden", marginBottom: 12 }}>
+        <div style={{ height: "100%", width: `${Math.min(comp, 100)}%`, background: `linear-gradient(90deg, ${color}, ${accent})`, borderRadius: 3 }} />
+      </div>
+      <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, flex: 1 }}>
+          <MiniBox value={fmtNum(available)} label="Available on MAM" color={color} onClick={onNavMam} />
+          <MiniBox value={fmtNum(upload)} label="Upload Candidates" color={t.ylw} onClick={onNavMam} />
+          <MiniBox value={fmtNum(missing)} label="Missing Everywhere" color={t.red} />
+        </div>
+        <div style={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 12, display: "flex", flexDirection: "column", gap: 6, justifyContent: "center", minWidth: 130 }}>
+          {links.length > 0 ? links.map((l: any) => (
+            <TBtn key={l.label} icon={<Bar color={l.color} />} label={l.label} onClick={() => window.open(l.href, "_blank")} />
+          )) : <span style={{ fontSize: 12, color: t.tf }}>No links</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MiniBox({ value, label, color, onClick }) {
   const t = useTheme();
   return (
     <div onClick={onClick} style={{
-      background: t.bg3, borderRadius: 8, padding: "12px 10px",
+      background: t.bg3, borderRadius: 8, padding: "14px 10px",
       cursor: onClick ? "pointer" : "default", textAlign: "center",
       display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
     }}>
-      <div style={{ fontSize: 22, fontWeight: 700, color: color || t.text }}>{value}</div>
-      <div style={{ fontSize: 11, color: t.td, marginTop: 3 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 700, color: color || t.text, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 12, color: t.td, marginTop: 5 }}>{label}</div>
     </div>
   );
 }
@@ -373,10 +472,10 @@ function Pill({ label, ok, warn }) {
 function Tile({ label, value, color, sub, onClick }) {
   const t = useTheme();
   return (
-    <div onClick={onClick} style={{ background: t.bg3, borderRadius: 8, padding: "10px 12px", cursor: onClick ? "pointer" : "default" }}>
-      <div style={{ fontSize: 20, fontWeight: 700, color: color || t.text }}>{value === null ? <Spin size={14} /> : value}</div>
-      <div style={{ fontSize: 12, color: t.td, marginTop: 2 }}>{label}</div>
-      {sub && <div style={{ fontSize: 9, color: t.tf, marginTop: 1, textTransform: "uppercase", letterSpacing: "0.04em" }}>{sub}</div>}
+    <div onClick={onClick} style={{ background: t.bg3, borderRadius: 8, padding: "12px 14px", cursor: onClick ? "pointer" : "default" }}>
+      <div style={{ fontSize: 24, fontWeight: 700, color: color || t.text, lineHeight: 1.1 }}>{value === null ? <Spin size={16} /> : value}</div>
+      <div style={{ fontSize: 13, color: t.td, marginTop: 4 }}>{label}</div>
+      {sub && <div style={{ fontSize: 10, color: t.tf, marginTop: 2, textTransform: "uppercase", letterSpacing: "0.04em" }}>{sub}</div>}
     </div>
   );
 }
@@ -409,11 +508,11 @@ function ProgressRow({ label, scan, t, onCancel }) {
   const kind = label.split(" ").pop();
   const statusText = status === "complete" ? "Done" : status === "cancelled" ? "Cancelled" : "Idle";
   return (
-    <div style={{ padding: "6px 0", borderBottom: `1px solid ${t.borderL}` }}>
+    <div style={{ padding: "8px 0", borderBottom: `1px solid ${t.borderL}` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: running ? t.accent : t.td }}>{label}</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 13, color: running ? t.text2 : t.tf }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: running ? t.accent : t.td }}>{label}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 14, color: running ? t.text2 : t.tf }}>
             {running ? `${checked}/${total} (${pctDone}%)` : (
               <>
                 {ago && <span style={{ fontStyle: "italic" }}>(Last {kind}: {ago}) </span>}
@@ -423,7 +522,7 @@ function ProgressRow({ label, scan, t, onCancel }) {
           </span>
           {running && onCancel && (
             <button onClick={onCancel} style={{
-              padding: "2px 8px", fontSize: 10, fontWeight: 600, borderRadius: 4,
+              padding: "3px 10px", fontSize: 11, fontWeight: 600, borderRadius: 4,
               background: t.red + "22", color: t.red, border: `1px solid ${t.red}44`,
               cursor: "pointer",
             }}>Stop</button>
@@ -432,11 +531,11 @@ function ProgressRow({ label, scan, t, onCancel }) {
       </div>
       {running && (
         <>
-          <div style={{ height: 4, background: t.bg4, borderRadius: 2, marginTop: 4, overflow: "hidden" }}>
+          <div style={{ height: 5, background: t.bg4, borderRadius: 2, marginTop: 5, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${pctDone}%`, background: t.accent, borderRadius: 2, transition: "width 0.3s" }} />
           </div>
           {(authorName || bookName) && (
-            <div style={{ fontSize: 12, color: t.td, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div style={{ fontSize: 13, color: t.td, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {authorName && <span style={{ fontWeight: 600 }}>{authorName}</span>}
               {authorName && bookName && <span style={{ color: t.tf }}> — </span>}
               {bookName && <span style={{ color: t.tf }}>{bookName}</span>}
@@ -452,12 +551,12 @@ function CmdBtn({ label, busy, highlight, onClick }) {
   const t = useTheme();
   return (
     <button onClick={onClick} disabled={busy} style={{
-      padding: "6px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+      padding: "9px 14px", borderRadius: 6, fontSize: 13, fontWeight: 600,
       background: highlight ? t.accent : t.bg4, color: highlight ? t.bg : t.text2,
       border: `1px solid ${highlight ? t.accent : t.border}`, cursor: busy ? "wait" : "pointer",
-      opacity: busy ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+      opacity: busy ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
       whiteSpace: "nowrap",
-    }}>{busy ? <Spin size={12} /> : null}{label}</button>
+    }}>{busy ? <Spin size={14} /> : null}{label}</button>
   );
 }
 
@@ -465,10 +564,10 @@ function QBtn({ label, primary, onClick }) {
   const t = useTheme();
   return (
     <button onClick={onClick} style={{
-      padding: "5px 8px", borderRadius: 5, fontSize: 11, fontWeight: 500,
+      padding: "7px 10px", borderRadius: 5, fontSize: 13, fontWeight: 500,
       background: primary ? t.accent : t.bg4, color: primary ? t.bg : t.text2,
       border: `1px solid ${primary ? t.accent : t.border}`, cursor: "pointer",
-      textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+      textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
     }}>{label}</button>
   );
 }
@@ -477,17 +576,17 @@ function TBtn({ icon, label, onClick }) {
   const t = useTheme();
   return (
     <button onClick={onClick} style={{
-      display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-      padding: "8px 18px", background: t.bg4, border: `1px solid ${t.border}`,
-      borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 500, color: t.text2,
+      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+      padding: "9px 18px", background: t.bg4, border: `1px solid ${t.border}`,
+      borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 500, color: t.text2,
     }}>{icon} {label}</button>
   );
 }
 
 function Dot({ color }) {
   return <span style={{
-    display: "inline-block", width: 8, height: 8, borderRadius: "50%",
-    background: color, marginRight: 4, verticalAlign: "middle",
+    display: "inline-block", width: 9, height: 9, borderRadius: "50%",
+    background: color, marginRight: 5, verticalAlign: "middle",
     boxShadow: `0 0 4px ${color}44`,
   }} />;
 }
