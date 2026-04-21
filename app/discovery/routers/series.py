@@ -31,7 +31,17 @@ async def get_series(sid: int, slug: str | None = None):
     the ABS DB. Same failure mode as the authors endpoint before the
     slug fix — ABS series 2 could be a totally different series in
     Calibre with the same id.
+
+    Every returned book row is stamped with `library_slug` so the
+    frontend's `coverSrcFor` picks the per-library cover URL. Without
+    it the Calibre cover endpoint was serving a completely unrelated
+    book's cover for each ABS book id.
     """
+    # Active library fallback resolved explicitly so we can stamp
+    # library_slug on every book row even when the caller didn't pass
+    # one (single-library installs still benefit from correct metadata).
+    from app.discovery.database import get_active_library as _get_active
+    effective_slug = slug or _get_active() or ""
     db = await get_db(slug)
     try:
         r = await (await db.execute("SELECT s.*, a.name as author_name FROM series s LEFT JOIN authors a ON s.author_id=a.id WHERE s.id=?", (sid,))).fetchone()
@@ -43,27 +53,39 @@ async def get_series(sid: int, slug: str | None = None):
         # row. For this endpoint all returned rows share the same
         # series_id (the query is WHERE b.series_id=?), so every row's
         # series_total is identical — the old code computed it N times.
-        s["books"] = [dict(b) for b in await (await db.execute(f"""
-            SELECT b.*, a.name as author_name, sr.name as series_name,
-                COALESCE(st.series_total, 0) as series_total,
-                COALESCE(st.mainline_total, 0) as mainline_total
-            FROM books b
-            JOIN authors a ON b.author_id=a.id
-            LEFT JOIN series sr ON b.series_id=sr.id
-            LEFT JOIN (
-                SELECT series_id,
-                       COUNT(*) AS series_total,
-                       SUM(CASE WHEN series_index IS NOT NULL
-                                 AND series_index >= 1
-                                 AND series_index = CAST(series_index AS INTEGER)
-                                THEN 1 ELSE 0 END) AS mainline_total
-                FROM books
-                WHERE hidden=0 AND series_id IS NOT NULL
-                GROUP BY series_id
-            ) st ON st.series_id = b.series_id
-            WHERE b.series_id=? AND {HF}
-            ORDER BY COALESCE(b.series_index,999), b.pub_date ASC
-        """, (sid,))).fetchall()]
+        # Content type looked up once from the library config — used
+        # to stamp each row alongside library_slug so the frontend can
+        # render audiobook badges and route cover requests properly.
+        from app import state
+        content_type = next(
+            (l.get("content_type", "ebook") for l in state._discovered_libraries
+             if l.get("slug") == effective_slug),
+            "ebook",
+        )
+        s["books"] = [
+            {**dict(b), "library_slug": effective_slug, "content_type": content_type}
+            for b in await (await db.execute(f"""
+                SELECT b.*, a.name as author_name, sr.name as series_name,
+                    COALESCE(st.series_total, 0) as series_total,
+                    COALESCE(st.mainline_total, 0) as mainline_total
+                FROM books b
+                JOIN authors a ON b.author_id=a.id
+                LEFT JOIN series sr ON b.series_id=sr.id
+                LEFT JOIN (
+                    SELECT series_id,
+                           COUNT(*) AS series_total,
+                           SUM(CASE WHEN series_index IS NOT NULL
+                                     AND series_index >= 1
+                                     AND series_index = CAST(series_index AS INTEGER)
+                                    THEN 1 ELSE 0 END) AS mainline_total
+                    FROM books
+                    WHERE hidden=0 AND series_id IS NOT NULL
+                    GROUP BY series_id
+                ) st ON st.series_id = b.series_id
+                WHERE b.series_id=? AND {HF}
+                ORDER BY COALESCE(b.series_index,999), b.pub_date ASC
+            """, (sid,))).fetchall()
+        ]
         return s
     finally:
         await db.close()

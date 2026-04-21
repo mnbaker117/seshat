@@ -149,7 +149,18 @@ async def _author_detail_for_slug(slug: str, aid: int) -> Optional[dict]:
     Returns None when the author id isn't in that library. Used by the
     cross-library fan-out below so the detail page can show both
     ebook and audiobook sections of a merged author.
+
+    Books returned under `standalone_books` are stamped with
+    `library_slug` + `content_type` so the frontend's
+    `coverSrcFor` picks the per-library cover endpoint. Without this
+    the cover-src fell back to the active-library path and served
+    unrelated books' covers.
     """
+    content_type = next(
+        (l.get("content_type", "ebook") for l in state._discovered_libraries
+         if l.get("slug") == slug),
+        "ebook",
+    )
     db = await get_db(slug)
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
@@ -169,11 +180,14 @@ async def _author_detail_for_slug(slug: str, aid: int) -> Optional[dict]:
             GROUP BY s.id ORDER BY s.name""",
             (aid, aid, aid, aid)
         )).fetchall()]
-        a["standalone_books"] = [dict(b) for b in await (await db.execute(
-            f"SELECT b.*, a2.name as author_name FROM books b JOIN authors a2 ON b.author_id=a2.id "
-            f"WHERE b.author_id=? AND b.series_id IS NULL AND {HF} ORDER BY b.pub_date ASC, b.title ASC",
-            (aid,)
-        )).fetchall()]
+        a["standalone_books"] = [
+            {**dict(b), "library_slug": slug, "content_type": content_type}
+            for b in await (await db.execute(
+                f"SELECT b.*, a2.name as author_name FROM books b JOIN authors a2 ON b.author_id=a2.id "
+                f"WHERE b.author_id=? AND b.series_id IS NULL AND {HF} ORDER BY b.pub_date ASC, b.title ASC",
+                (aid,)
+            )).fetchall()
+        ]
         return a
     finally:
         await db.close()
