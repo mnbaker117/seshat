@@ -82,6 +82,20 @@ function loadSavedPage(): string {
   catch { return "dashboard"; }
 }
 
+function loadSavedPageArg(): string | number | null {
+  // Persist the page arg alongside `seshat_page` so F5 on a detail
+  // page (e.g. disc-author-detail) rehydrates with the right id or
+  // "slug:id" compound string. Without this the detail page boots
+  // with authorId=null and spins forever on the initial fetch.
+  // We store as string + a flag so numeric IDs round-trip cleanly.
+  try {
+    const raw = localStorage.getItem("seshat_page_arg");
+    if (raw === null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && String(n) === raw ? n : raw;
+  } catch { return null; }
+}
+
 function loadSavedSection(): Section {
   try {
     const s = localStorage.getItem("seshat_section");
@@ -142,13 +156,21 @@ function SeshatApp() {
 
   const [auth, setAuth] = useState<AuthState>({ loading: true, authenticated: false, firstRun: false });
   const [page, setPage] = useState(loadSavedPage);
-  const [pageArg, setPageArg] = useState<string | number | null>(null);
+  const [pageArg, setPageArg] = useState<string | number | null>(loadSavedPageArg);
   const [section, setSection] = useState<Section>(loadSavedSection);
 
   const nav = (p: string, arg?: string | number | null) => {
     setPage(p);
-    setPageArg(arg ?? null);
-    try { localStorage.setItem("seshat_page", p); } catch { /* */ }
+    const resolvedArg = arg ?? null;
+    setPageArg(resolvedArg);
+    try {
+      localStorage.setItem("seshat_page", p);
+      if (resolvedArg === null || resolvedArg === undefined) {
+        localStorage.removeItem("seshat_page_arg");
+      } else {
+        localStorage.setItem("seshat_page_arg", String(resolvedArg));
+      }
+    } catch { /* */ }
     window.scrollTo(0, 0);
   };
 
