@@ -223,15 +223,23 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
         )}
 
         {/* Author list/grid */}
-        {ld ? <Load /> : vm === "grid" ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10 }}>
-            {visible.map(a => <AuthorCard key={a.id} a={a} t={t} selMode={selMode} selected={sel.has(a.id)} onClick={() => selMode ? toggleSel(a.id) : onNav("disc-author-detail", a.id)} />)}
-          </div>
-        ) : (
-          <div style={{ columns: 2, columnGap: 6 }}>
-            {visible.map(a => <div key={a.id} style={{ breakInside: "avoid", marginBottom: 4 }}><AuthorRow a={a} t={t} selMode={selMode} selected={sel.has(a.id)} onClick={() => selMode ? toggleSel(a.id) : onNav("disc-author-detail", a.id)} /></div>)}
-          </div>
-        )}
+        {/* Nav arg — when the row came from cross-library aggregation
+            (a.library_slug is set from run_across_libraries), send
+            "slug:id" so the detail page resolves in the right library.
+            Without this, ABS's author id 5 (Troy Denning) gets looked
+            up in Calibre where id 5 is Jack Bryce. */}
+        {ld ? <Load /> : (() => {
+          const navArg = (a: any) => a.library_slug ? `${a.library_slug}:${a.id}` : a.id;
+          return vm === "grid" ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10 }}>
+              {visible.map(a => <AuthorCard key={a.id} a={a} t={t} selMode={selMode} selected={sel.has(a.id)} onClick={() => selMode ? toggleSel(a.id) : onNav("disc-author-detail", navArg(a))} />)}
+            </div>
+          ) : (
+            <div style={{ columns: 2, columnGap: 6 }}>
+              {visible.map(a => <div key={a.id} style={{ breakInside: "avoid", marginBottom: 4 }}><AuthorRow a={a} t={t} selMode={selMode} selected={sel.has(a.id)} onClick={() => selMode ? toggleSel(a.id) : onNav("disc-author-detail", navArg(a))} /></div>)}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

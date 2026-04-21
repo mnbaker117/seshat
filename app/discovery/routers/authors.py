@@ -20,11 +20,12 @@ Endpoints:
 """
 import asyncio
 import logging
+from typing import Any, Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app import state
 from app.config import load_settings
-from app.discovery.database import get_db, HF, cleanup_empty_series
+from app.discovery.database import get_db, get_active_library, HF, cleanup_empty_series
 from app.discovery.lookup import lookup_author
 from app.discovery.cross_library import (
     run_across_libraries,
@@ -142,15 +143,19 @@ async def get_authors(search: str = Query(None), sort: str = Query("name"), sort
         await db.close()
 
 
-@router.get("/authors/{aid}")
-async def get_author(aid: int):
-    db = await get_db()
+async def _author_detail_for_slug(slug: str, aid: int) -> Optional[dict]:
+    """Fetch the full author detail (author + series + standalone) from a specific library.
+
+    Returns None when the author id isn't in that library. Used by the
+    cross-library fan-out below so the detail page can show both
+    ebook and audiobook sections of a merged author.
+    """
+    db = await get_db(slug)
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
         if not r:
-            raise HTTPException(404)
+            return None
         a = dict(r)
-        # Find series through books (supports multi-author series)
         a["series"] = [dict(s) for s in await (await db.execute(
             f"""SELECT s.*,
                 COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as book_count,
@@ -164,10 +169,86 @@ async def get_author(aid: int):
             GROUP BY s.id ORDER BY s.name""",
             (aid, aid, aid, aid)
         )).fetchall()]
-        a["standalone_books"] = [dict(b) for b in await (await db.execute(f"SELECT b.*, a2.name as author_name FROM books b JOIN authors a2 ON b.author_id=a2.id WHERE b.author_id=? AND b.series_id IS NULL AND {HF} ORDER BY b.pub_date ASC, b.title ASC", (aid,))).fetchall()]
+        a["standalone_books"] = [dict(b) for b in await (await db.execute(
+            f"SELECT b.*, a2.name as author_name FROM books b JOIN authors a2 ON b.author_id=a2.id "
+            f"WHERE b.author_id=? AND b.series_id IS NULL AND {HF} ORDER BY b.pub_date ASC, b.title ASC",
+            (aid,)
+        )).fetchall()]
         return a
     finally:
         await db.close()
+
+
+@router.get("/authors/{aid}")
+async def get_author(aid: int, include_cross_library: bool = False, slug: Optional[str] = None):
+    """Return an author's detail (series + standalone + stats).
+
+    `slug=X` overrides which library the `aid` belongs to. Without it
+    we fall back to the active library. This matters when the user
+    clicks a merged author row whose `id` came from a non-active
+    library — e.g. Troy Denning's id 5 in ABS is Jack Bryce's id 5
+    in Calibre, so the frontend MUST pass the source slug or we
+    resolve the wrong person.
+
+    `include_cross_library=1` additionally looks up the author in every
+    OTHER discovered library by normalized name and returns those
+    library's detail under `cross_library` keyed by slug. The frontend
+    uses this to render Ebook / Audiobook tabs on the merged authors
+    detail view. Single-library installs or unmatched names return
+    an empty `cross_library` dict — callers should treat its presence
+    as the signal to show tabs, not absence.
+    """
+    primary_slug = slug or get_active_library()
+    a = await _author_detail_for_slug(primary_slug, aid)
+    if a is None:
+        raise HTTPException(404)
+
+    if include_cross_library:
+        from app.works.normalize import normalize_author
+        target_norm = normalize_author(a["name"])
+        cross: dict[str, Any] = {}
+        if target_norm:
+            for lib in state._discovered_libraries:
+                if lib["slug"] == primary_slug:
+                    continue
+                # Find an author in the other library whose normalized
+                # name matches. We pull every author row and compare
+                # in Python because SQLite lacks a portable
+                # equivalent to our Python-side normalize_author —
+                # author counts per library are small (low thousands)
+                # so this is fine.
+                other_db = await get_db(lib["slug"])
+                try:
+                    rows = await (await other_db.execute(
+                        "SELECT id, name FROM authors WHERE id IN "
+                        "(SELECT DISTINCT author_id FROM books)"
+                    )).fetchall()
+                finally:
+                    await other_db.close()
+                match_id = None
+                for row in rows:
+                    if normalize_author(row["name"]) == target_norm:
+                        match_id = row["id"]
+                        break
+                if match_id is None:
+                    continue
+                detail = await _author_detail_for_slug(lib["slug"], match_id)
+                if detail is None:
+                    continue
+                cross[lib["slug"]] = {
+                    "library_name": lib.get("display_name") or lib.get("name") or lib["slug"],
+                    "content_type": lib.get("content_type", "ebook"),
+                    "app_type": lib.get("app_type", ""),
+                    "author": detail,
+                }
+        a["cross_library"] = cross
+        a["active_library_slug"] = primary_slug
+        a["active_content_type"] = next(
+            (l.get("content_type", "ebook") for l in state._discovered_libraries
+             if l["slug"] == primary_slug),
+            "ebook",
+        )
+    return a
 
 
 def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:

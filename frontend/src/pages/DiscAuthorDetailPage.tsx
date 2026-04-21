@@ -64,16 +64,23 @@ interface AuthorDetailPageProps {
   onNav: NavFn;
 }
 
-export default function AuthorDetailPage({authorId,onNav}:AuthorDetailPageProps){const t=useTheme();const[a,setA]=useState<any>(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist<ViewMode>("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
+export default function AuthorDetailPage({authorId,onNav}:AuthorDetailPageProps){const t=useTheme();const[a,setA]=useState<any>(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist<ViewMode>("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);const[fmtTab,setFmtTab]=useState<string>("combined");
+// Nav arg may arrive as "slug:id" when the click came from a cross-
+// library merged row — the id alone is ambiguous because ABS's author
+// 5 and Calibre's author 5 are different people. Split here so the
+// detail fetch + pen-name links + scan triggers all use the right
+// per-library IDs.
+const parsed=(()=>{const s=String(authorId);if(s.includes(":")){const[slug,id]=s.split(":");return{slug,id:parseInt(id)||0}}return{slug:null,id:parseInt(s)||(typeof authorId==="number"?authorId:0)}})();
+const authorIdNum=parsed.id;const authorSlug=parsed.slug;
 const[penLinks,setPenLinks]=useState<PenNameLink[]>([]);const[penQ,setPenQ]=useState("");const[penResults,setPenResults]=useState<Author[]>([]);const[penBusy,setPenBusy]=useState(false);const[penType,setPenType]=usePersist<string>("adp_pen_type","pen_name");
-useEffect(()=>{if(!authorId)return;api.get<PenNamesResponse>(`/discovery/authors/${authorId}/pen-names`).then(r=>setPenLinks(r.links||[])).catch(()=>{})},[authorId]);
-useEffect(()=>{if(penQ.length<2){setPenResults([]);return}const tm=setTimeout(()=>{api.get<AuthorsResponse>(`/discovery/authors?search=${encodeURIComponent(penQ)}`).then(r=>setPenResults((r.authors||[]).filter(x=>x.id!==parseInt(String(authorId))))).catch(()=>{})},300);return()=>clearTimeout(tm)},[penQ,authorId]);
-const linkPen=async(aliasId:number)=>{setPenBusy(true);try{await api.post("/discovery/authors/link-pen-names",{canonical_author_id:parseInt(String(authorId)),alias_author_id:aliasId,link_type:penType});const r=await api.get<PenNamesResponse>(`/discovery/authors/${authorId}/pen-names`);setPenLinks(r.links||[]);setPenQ("");setPenResults([]);toast.success(penType==="co_author"?"Co-author linked":"Pen name linked")}catch(e:any){toast.error(e.message||"Link failed")}setPenBusy(false)};
+useEffect(()=>{if(!authorIdNum)return;api.get<PenNamesResponse>(`/discovery/authors/${authorIdNum}/pen-names`).then(r=>setPenLinks(r.links||[])).catch(()=>{})},[authorIdNum]);
+useEffect(()=>{if(penQ.length<2){setPenResults([]);return}const tm=setTimeout(()=>{api.get<AuthorsResponse>(`/discovery/authors?search=${encodeURIComponent(penQ)}`).then(r=>setPenResults((r.authors||[]).filter(x=>x.id!==authorIdNum))).catch(()=>{})},300);return()=>clearTimeout(tm)},[penQ,authorIdNum]);
+const linkPen=async(aliasId:number)=>{setPenBusy(true);try{await api.post("/discovery/authors/link-pen-names",{canonical_author_id:authorIdNum,alias_author_id:aliasId,link_type:penType});const r=await api.get<PenNamesResponse>(`/discovery/authors/${authorIdNum}/pen-names`);setPenLinks(r.links||[]);setPenQ("");setPenResults([]);toast.success(penType==="co_author"?"Co-author linked":"Pen name linked")}catch(e:any){toast.error(e.message||"Link failed")}setPenBusy(false)};
 const unlinkPen=async(linkId:number)=>{try{await api.del(`/discovery/authors/pen-name-link/${linkId}`);setPenLinks(penLinks.filter(l=>l.id!==linkId));toast.success("Author unlinked")}catch{}};
 useEffect(()=>{api.get<MamStatusResponse>("/discovery/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
-const loadA=useCallback((signal?:AbortSignal)=>{setLd(true);return api.get(`/discovery/authors/${authorId}`,signal).then(d=>{setA(d);setLd(false)}).catch(e=>{if(!api.isAbort(e))console.error(e)})},[authorId]);useEffect(()=>{const c=new AbortController();loadA(c.signal);return()=>c.abort()},[loadA]);
+const loadA=useCallback((signal?:AbortSignal)=>{setLd(true);const qs=authorSlug?`?include_cross_library=1&slug=${encodeURIComponent(authorSlug)}`:`?include_cross_library=1`;return api.get(`/discovery/authors/${authorIdNum}${qs}`,signal).then(d=>{setA(d);setLd(false)}).catch(e=>{if(!api.isAbort(e))console.error(e)})},[authorIdNum,authorSlug]);useEffect(()=>{const c=new AbortController();loadA(c.signal);return()=>c.abort()},[loadA]);
 // Author scans run as background tasks on the server. The flow:
 //   1. Dispatch `seshat:scan-started` so the Dashboard widget
 //      shows it immediately.
@@ -81,8 +88,8 @@ const loadA=useCallback((signal?:AbortSignal)=>{setLd(true);return api.get(`/dis
 //      `{status: "started"}`).
 //   3. Listen for `seshat:scan-completed` from App's unified
 //      poller and refresh the page data when it fires.
-const refresh=async(full=false)=>{if(ref)return;setRef(true);try{const r=await api.post(`/discovery/authors/${authorId}/${full?"full-rescan":"lookup"}`);toast.info(`${full?"Full re-scan":"Source scan"} started for ${r.author||"author"}`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}catch(e){toast.error(e.message||"Scan failed to start");setRef(false)}};
-const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/discovery/mam/scan-author/${authorId}`);if(r.status==="complete"){toast.info(r.message||"No un-scanned books for this author");setMamRef(false)}else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start");setMamRef(false)}};
+const refresh=async(full=false)=>{if(ref)return;setRef(true);try{const r=await api.post(`/discovery/authors/${authorIdNum}/${full?"full-rescan":"lookup"}`);toast.info(`${full?"Full re-scan":"Source scan"} started for ${r.author||"author"}`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}catch(e){toast.error(e.message||"Scan failed to start");setRef(false)}};
+const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/discovery/mam/scan-author/${authorIdNum}`);if(r.status==="complete"){toast.info(r.message||"No un-scanned books for this author");setMamRef(false)}else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start");setMamRef(false)}};
 // Listen for scan completion (broadcast by the unified poller in
 // App-level Dashboard) and refresh this page's author data + book grid.
 useEffect(()=>{const onDone=()=>{loadA();setRk(k=>k+1);setRef(false);setMamRef(false)};window.addEventListener("seshat:scan-completed",onDone);return()=>window.removeEventListener("seshat:scan-completed",onDone)},[loadA]);
@@ -101,7 +108,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 {/* Author-link chips inline with identity. The relationship label
     ("aka" for pen_name, "with" for co_author) is purely UX —
     backend dedup behavior is identical for both link types. */}
-<div style={{display:"flex",alignItems:"center",gap:6,marginTop:6,flexWrap:"wrap"}}>{penLinks.map(l=>{const other=l.canonical_author_id===parseInt(String(authorId))?{id:l.alias_author_id,name:l.alias_name}:{id:l.canonical_author_id,name:l.canonical_name};const isCo=l.link_type==="co_author";const tone=isCo?{bg:t.cyan?t.cyan+"22":t.bg4,fg:t.cyant||t.text2,br:(t.cyan||t.tf)+"33",label:"with"}:{bg:t.purb,fg:t.purt,br:t.pur+"33",label:"aka"};return<span key={l.id} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:4,fontSize:11,background:tone.bg,color:tone.fg,border:`1px solid ${tone.br}`}}><span style={{color:t.tg,fontSize:10}}>{tone.label}</span> <button onClick={()=>onNav("disc-author-detail",other.id)} style={{background:"none",border:"none",color:tone.fg,cursor:"pointer",padding:0,fontSize:11,fontWeight:500}}>{other.name}</button><button onClick={()=>unlinkPen(l.id)} style={{background:"none",border:"none",color:t.tg,cursor:"pointer",padding:0,fontSize:12}}>×</button></span>})}<button onClick={()=>setPenQ(penQ||" ")} style={{background:"none",color:t.td,cursor:"pointer",padding:"4px 10px",fontSize:12,borderRadius:5,border:`1.5px dashed ${t.tf}`}}>+ link author</button></div>
+<div style={{display:"flex",alignItems:"center",gap:6,marginTop:6,flexWrap:"wrap"}}>{penLinks.map(l=>{const other=l.canonical_author_id===authorIdNum?{id:l.alias_author_id,name:l.alias_name}:{id:l.canonical_author_id,name:l.canonical_name};const isCo=l.link_type==="co_author";const tone=isCo?{bg:t.cyan?t.cyan+"22":t.bg4,fg:t.cyant||t.text2,br:(t.cyan||t.tf)+"33",label:"with"}:{bg:t.purb,fg:t.purt,br:t.pur+"33",label:"aka"};return<span key={l.id} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:4,fontSize:11,background:tone.bg,color:tone.fg,border:`1px solid ${tone.br}`}}><span style={{color:t.tg,fontSize:10}}>{tone.label}</span> <button onClick={()=>onNav("disc-author-detail",other.id)} style={{background:"none",border:"none",color:tone.fg,cursor:"pointer",padding:0,fontSize:11,fontWeight:500}}>{other.name}</button><button onClick={()=>unlinkPen(l.id)} style={{background:"none",border:"none",color:t.tg,cursor:"pointer",padding:0,fontSize:12}}>×</button></span>})}<button onClick={()=>setPenQ(penQ||" ")} style={{background:"none",color:t.td,cursor:"pointer",padding:"4px 10px",fontSize:12,borderRadius:5,border:`1.5px dashed ${t.tf}`}}>+ link author</button></div>
 <div style={{marginTop:8}}><PB owned={oc} total={total}/></div></div>
 <div className="author-controls" style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
 <Btn size="sm" variant="ghost" onClick={()=>loadA()} title="Refresh" style={{height:38,width:34,padding:0,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>{Ic.refresh}</Btn>
@@ -122,7 +129,100 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 {penResults.length>0?<div style={{position:"absolute",top:"100%",left:0,right:0,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:"0 0 6px 6px",zIndex:10,boxShadow:"0 4px 12px rgba(0,0,0,0.3)",maxHeight:160,overflowY:"auto"}}>{penResults.map(r=><div key={r.id} onClick={()=>linkPen(r.id)} style={{padding:"8px 12px",cursor:"pointer",fontSize:12,color:t.text2,borderBottom:`1px solid ${t.borderL}`}}>{r.name} <span style={{color:t.tg}}>({r.total_books||0} books)</span></div>)}</div>:null}</div>
 <button onClick={()=>{setPenQ("");setPenResults([])}} style={{background:"none",border:"none",color:t.tg,cursor:"pointer",fontSize:14,padding:"0 4px"}}>×</button>
 </div>:null}
-{(a.series||[]).map(s=><IS key={`${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={authorId}/>)}
-{(a.standalone_books||[]).length>0?<SA books={a.standalone_books} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol}/>:null}
+{/* ── Format tabs (only shown when author exists in >1 library) ── */}
+{(() => {
+  const crossLib = a.cross_library || {};
+  const crossSlugs = Object.keys(crossLib);
+  // Tabs surface only when the author has content in another library
+  // alongside the active one. Single-library installs + authors that
+  // only exist on one side fall through to the flat Combined layout
+  // (no tab strip rendered).
+  if (crossSlugs.length === 0) return null;
+  // Each library contributes a tab. Active library's content_type
+  // labels the first tab; each cross-library slug contributes its own.
+  const tabs: Array<{key:string; label:string; content_type:string; slug:string|null}> = [
+    { key: "combined", label: "Combined", content_type: "combined", slug: null },
+    { key: a.active_library_slug, label: a.active_content_type === "audiobook" ? "Audiobook" : "Ebook", content_type: a.active_content_type || "ebook", slug: a.active_library_slug },
+    ...crossSlugs.map(slug => ({
+      key: slug,
+      label: crossLib[slug].content_type === "audiobook" ? "Audiobook" : "Ebook",
+      content_type: crossLib[slug].content_type,
+      slug,
+    })),
+  ];
+  return (
+    <div style={{ display: "flex", gap: 4, borderBottom: `1px solid ${t.border}`, paddingBottom: 0 }}>
+      {tabs.map(tab => {
+        const active = fmtTab === tab.key;
+        const color = tab.content_type === "audiobook" ? (t.pur || t.accent) : t.accent;
+        return (
+          <button
+            key={tab.key}
+            onClick={() => setFmtTab(tab.key)}
+            style={{
+              padding: "10px 18px", background: active ? color + "22" : "transparent",
+              color: active ? color : t.td, border: "none",
+              borderBottom: active ? `2px solid ${color}` : "2px solid transparent",
+              cursor: "pointer", fontSize: 14, fontWeight: active ? 600 : 500,
+              marginBottom: -1,
+            }}
+          >{tab.label}</button>
+        );
+      })}
+    </div>
+  );
+})()}
+{/* ── Per-tab content ── */}
+{(() => {
+  const crossLib = a.cross_library || {};
+  const crossSlugs = Object.keys(crossLib);
+  const hasTabs = crossSlugs.length > 0;
+  // Build a list of library-scoped section blocks to render. Each
+  // block carries its own author detail (series + standalone_books)
+  // plus a label so Combined mode can group visually.
+  type Block = { slug: string; label: string; content_type: string; data: any };
+  const activeBlock: Block = {
+    slug: a.active_library_slug || "active",
+    label: a.active_content_type === "audiobook" ? "Audiobook" : "Ebook",
+    content_type: a.active_content_type || "ebook",
+    data: a,
+  };
+  const crossBlocks: Block[] = crossSlugs.map(slug => ({
+    slug,
+    label: crossLib[slug].content_type === "audiobook" ? "Audiobook" : "Ebook",
+    content_type: crossLib[slug].content_type,
+    data: crossLib[slug].author,
+  }));
+  let blocksToRender: Block[];
+  if (!hasTabs || fmtTab === "combined") {
+    blocksToRender = [activeBlock, ...crossBlocks];
+  } else {
+    blocksToRender = [...crossBlocks, activeBlock].filter(b => b.slug === fmtTab);
+  }
+  return blocksToRender.map(block => {
+    const series = block.data?.series || [];
+    const standalone = block.data?.standalone_books || [];
+    const showHdr = hasTabs && fmtTab === "combined";
+    const color = block.content_type === "audiobook" ? (t.pur || t.accent) : t.accent;
+    return (
+      <div key={block.slug} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {showHdr && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+            <div style={{ width: 4, height: 18, background: color, borderRadius: 2 }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: color, textTransform: "uppercase", letterSpacing: "0.05em" }}>{block.label}</span>
+            <div style={{ flex: 1, height: 1, background: t.borderL }} />
+          </div>
+        )}
+        {series.map((s:any)=><IS key={`${block.slug}_${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={block.data?.id ?? authorIdNum}/>)}
+        {standalone.length>0 && <SA books={standalone} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol}/>}
+        {series.length === 0 && standalone.length === 0 && (
+          <div style={{ fontSize: 13, color: t.tf, fontStyle: "italic", padding: "20px 0" }}>
+            No {block.content_type === "audiobook" ? "audiobooks" : "ebooks"} in this library for this author.
+          </div>
+        )}
+      </div>
+    );
+  });
+})()}
 {sb?<BookSidebar book={sb} closing={sbClosing} onClose={closeSb} onAction={onAction} onEdit={loadA}/>:null}
 </div>}
