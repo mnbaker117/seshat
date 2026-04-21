@@ -23,6 +23,12 @@ import type { NavFn, Book, SendToHermeeceFn, MamStatusResponse } from "../types"
 export default function MAMPage({onNav}:{onNav:NavFn}){const t=useTheme();void onNav;
 // Tab + section data
 const[tab,setTab]=usePersist<string>("mam_tab","upload");
+// Per-library selector. `null` means use the active library (back-compat,
+// single-library installs). When multi-library is discovered we flip
+// to the discovered slugs — user can toggle between ebook + audiobook
+// MAM data. Persisted so returning to the page reopens the same view.
+const[libSlug,setLibSlug]=usePersist<string|null>("mam_slug",null);
+const[libs,setLibs]=useState<Array<{slug:string;content_type:string;label:string}>>([]);
 const[books,setBooks]=useState<Book[]>([]);const[total,setTotal]=useState(0);
 const[pg,setPg]=useState(1);const[q,setQ]=useState("");
 const[sort,setSort]=usePersist("mam_sort","title");
@@ -45,10 +51,18 @@ const selectAllVisible=()=>setSel(new Set(books.map(b=>b.id)));
 useEffect(()=>{
 api.get<MamStatusResponse>("/discovery/mam/status").then(r=>{if(r.stats)setCounts({upload:r.stats.upload_candidates||0,download:r.stats.available_to_download||0,missing:r.stats.missing_everywhere||0,unscanned:r.stats.total_unscanned||0})}).catch(()=>{});
 api.get("/discovery/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{});
+// Discovered libraries, for the library-selector tab bar. Pulled
+// from scan-status which already lists every library with
+// slug/content_type/label. Single-library installs collapse the
+// tabs; multi-library installs get one tab per library.
+api.get<any>("/discovery/scan-status").then(r=>{
+  const rows=(r?.scans||[]).filter((s:any)=>s.kind==="library");
+  setLibs(rows.map((s:any)=>({slug:s.slug,content_type:s.content_type||"ebook",label:s.label?.replace(/\s*Sync$/,"")||s.slug})));
+}).catch(()=>{});
 },[]);
 
 // Load section data
-const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const p=new URLSearchParams({section:tab,search:q,sort,page:String(page),per_page:String(perPage)});return api.get(`/discovery/mam/books?${p}`,signal).then(d=>{setBooks(d.books||[]);setTotal(d.total||0);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[tab,q,sort]);
+const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const p=new URLSearchParams({section:tab,search:q,sort,page:String(page),per_page:String(perPage)});if(libSlug)p.set("slug",libSlug);return api.get(`/discovery/mam/books?${p}`,signal).then(d=>{setBooks(d.books||[]);setTotal(d.total||0);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[tab,q,sort,libSlug]);
 useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
 
 // Scan polling
@@ -119,6 +133,15 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {counts.unscanned===0?<span style={{fontSize:12,color:t.grnt}}>✓ All scanned</span>:null}
 </div>}
 </div>
+
+{/* Library selector — hidden on single-library installs. The
+    Audiobook tab serves whatever ABS data the DB currently has;
+    until the MAM search path is extended to accept audiobook
+    main_cat IDs, audiobook entries render mostly as "not scanned".
+    See post-Phase-7 notes. */}
+{libs.length>1?<div style={{display:"flex",gap:4,marginBottom:4}}>
+{libs.map(l=>{const active=(libSlug??libs[0]?.slug)===l.slug;const color=l.content_type==="audiobook"?(t.pur||t.accent):t.accent;return<button key={l.slug} onClick={()=>{setLibSlug(l.slug);setPg(1)}} style={{padding:"6px 14px",background:active?color+"22":"transparent",color:active?color:t.tm,border:`1px solid ${active?color+"66":"transparent"}`,borderRadius:6,fontSize:13,fontWeight:active?600:500,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>{l.content_type==="audiobook"?"🎧":"📖"} <span>{l.label}</span></button>})}
+</div>:null}
 
 {/* Tab Bar */}
 <div style={{display:"flex",gap:0,borderBottom:`2px solid ${t.borderL}`,overflowX:"auto"}}>

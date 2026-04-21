@@ -533,9 +533,26 @@ async def mam_toggle():
 
 @router.get("/books")
 async def mam_books_endpoint(section: str = "upload", search: str = "",
-                              sort: str = "title", page: int = 1, per_page: int = 50):
-    """Get books for the MAM page, filtered by section."""
-    db = await get_db()
+                              sort: str = "title", page: int = 1, per_page: int = 50,
+                              slug: str | None = None):
+    """Get books for the MAM page, filtered by section.
+
+    `slug=X` targets a specific library DB — used by the MAM page's
+    library selector so the user can view ebook-library results
+    independently from audiobook-library results. Omitted falls back
+    to the active library. Cross-library badges + per-library cover
+    paths work because each returned book is stamped with
+    `library_slug` + `content_type`.
+
+    NOTE: Audiobook MAM scanning is still gated on the hardcoded
+    main_cat in _mam_search (`EBOOK_CATEGORY`) — this endpoint
+    serves whatever the DB already holds. Audiobook entries will
+    mostly show as unscanned until the search path is extended to
+    accept audiobook main_cat IDs.
+    """
+    from app import state as _state
+    effective_slug = slug or None  # get_db(None) falls back to active
+    db = await get_db(effective_slug)
     try:
         if section == "upload":
             where = "b.owned=1 AND b.mam_status='not_found' AND b.hidden=0"
@@ -580,7 +597,22 @@ async def mam_books_endpoint(section: str = "upload", search: str = "",
             ) st ON st.series_id = b.series_id
             WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?"""
         rows = await db.execute_fetchall(data_sql, params + [per_page, offset])
-        books = [dict(r) for r in rows]
+        # Resolve content_type for this library once so each book
+        # carries it — the frontend uses it to pick the audiobook
+        # pill color and route to per-library cover endpoints.
+        resolved_slug = effective_slug
+        if not resolved_slug:
+            from app.discovery.database import get_active_library as _active
+            resolved_slug = _active() or ""
+        content_type = next(
+            (l.get("content_type", "ebook") for l in _state._discovered_libraries
+             if l.get("slug") == resolved_slug),
+            "ebook",
+        )
+        books = [
+            {**dict(r), "library_slug": resolved_slug, "content_type": content_type}
+            for r in rows
+        ]
 
         return {"books": books, "total": total, "page": page, "per_page": per_page,
                 "total_pages": (total + per_page - 1) // per_page}
