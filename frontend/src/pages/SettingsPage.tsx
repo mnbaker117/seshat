@@ -2,6 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
+import { MetadataSourcesPanel } from "../components/MetadataSourcesPanel";
 import { api } from "../api";
 import { useTheme } from "../theme";
 
@@ -178,7 +179,6 @@ const SECTIONS = [
   { id: "sinks", label: "Sinks & Delivery", group: "Pipeline" },
   { id: "notifications", label: "Notifications", group: "Pipeline" },
   { id: "sources", label: "Metadata Sources", group: "Discovery" },
-  { id: "rates", label: "Source Rate Limits", group: "Discovery" },
   { id: "scanning", label: "Author Scanning", group: "Discovery" },
   { id: "library", label: "Library Management", group: "Discovery" },
   { id: "audiobookshelf", label: "Audiobookshelf", group: "Discovery" },
@@ -273,7 +273,12 @@ export default function SettingsPage() {
           </h1>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {msg && <span style={{ fontSize: 13, fontWeight: 600, color: msg.startsWith("Error") ? t.err : t.ok }}>{msg}</span>}
-            <Btn variant="primary" onClick={save} disabled={saving}>{saving ? <Spin size={14} /> : "Save"}</Btn>
+            {/* Sources section has its own Save button — top-level
+                Save would PATCH the whole settings dict and could
+                clobber any in-flight panel edits. */}
+            {section !== "sources" && (
+              <Btn variant="primary" onClick={save} disabled={saving}>{saving ? <Spin size={14} /> : "Save"}</Btn>
+            )}
           </div>
         </div>
 
@@ -463,50 +468,7 @@ export default function SettingsPage() {
           </SF>
         </>}
 
-        {section === "sources" && <>
-          <SF label="Goodreads" desc="HTML scraper for author pages. Richest data source for most fiction.">
-            <STog on={(s.goodreads_enabled as boolean) ?? true} onToggle={() => upd("goodreads_enabled", !(s.goodreads_enabled ?? true))} label />
-          </SF>
-          <SF label="Hardcover" desc="GraphQL API. Requires API key (set in Sinks & Delivery).">
-            <STog on={(s.hardcover_enabled as boolean) ?? true} onToggle={() => upd("hardcover_enabled", !(s.hardcover_enabled ?? true))} label />
-          </SF>
-          <SF label="Kobo" desc="HTML scraper. Good for ISBN and publication dates.">
-            <STog on={(s.kobo_enabled as boolean) ?? true} onToggle={() => upd("kobo_enabled", !(s.kobo_enabled ?? true))} label />
-          </SF>
-          <SF label="Amazon" desc="Kindle Store scraper. Slower but unique series data.">
-            <STog on={(s.amazon_enabled as boolean) ?? false} onToggle={() => upd("amazon_enabled", !(s.amazon_enabled ?? false))} label />
-          </SF>
-          <SF label="IBDB" desc="Internet Book Database. Supplementary source.">
-            <STog on={(s.ibdb_enabled as boolean) ?? false} onToggle={() => upd("ibdb_enabled", !(s.ibdb_enabled ?? false))} label />
-          </SF>
-          <SF label="Google Books" desc="REST API. Auto-disables on quota exhaustion (429s).">
-            <STog on={(s.google_books_enabled as boolean) ?? false} onToggle={() => upd("google_books_enabled", !(s.google_books_enabled ?? false))} label />
-          </SF>
-        </>}
-
-        {section === "rates" && <>
-          <SF label="Goodreads" desc="Default 2s">
-            <input type="number" min={0.5} step={0.5} value={s.rate_goodreads as number ?? 2} onChange={e => upd("rate_goodreads", parseFloat(e.target.value) || 2)} style={nist} />
-          </SF>
-          <SF label="Hardcover" desc="Default 1s">
-            <input type="number" min={0.5} step={0.5} value={s.rate_hardcover as number ?? 1} onChange={e => upd("rate_hardcover", parseFloat(e.target.value) || 1)} style={nist} />
-          </SF>
-          <SF label="Kobo" desc="Default 3s">
-            <input type="number" min={0.5} step={0.5} value={s.rate_kobo as number ?? 3} onChange={e => upd("rate_kobo", parseFloat(e.target.value) || 3)} style={nist} />
-          </SF>
-          <SF label="Amazon" desc="Default 2s">
-            <input type="number" min={0.5} step={0.5} value={s.rate_amazon as number ?? 2} onChange={e => upd("rate_amazon", parseFloat(e.target.value) || 2)} style={nist} />
-          </SF>
-          <SF label="IBDB" desc="Default 1s">
-            <input type="number" min={0.5} step={0.5} value={s.rate_ibdb as number ?? 1} onChange={e => upd("rate_ibdb", parseFloat(e.target.value) || 1)} style={nist} />
-          </SF>
-          <SF label="Google Books" desc="Default 1.5s">
-            <input type="number" min={0.5} step={0.5} value={s.rate_google_books as number ?? 1.5} onChange={e => upd("rate_google_books", parseFloat(e.target.value) || 1.5)} style={nist} />
-          </SF>
-          <SF label="MAM Search" desc="Default 2s — for discovery MAM scans">
-            <input type="number" min={0.5} step={0.5} value={s.rate_mam as number ?? 2} onChange={e => upd("rate_mam", parseFloat(e.target.value) || 2)} style={nist} />
-          </SF>
-        </>}
+        {section === "sources" && <MetadataSourcesPanel />}
 
         {section === "scanning" && <>
           <SF label="Auto-scan Enabled" desc="Periodically scan all authors against enabled sources.">

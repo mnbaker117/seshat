@@ -84,6 +84,31 @@ class TestMigration:
         assert sources["audible"]["ebook_scan"] is False
         assert sources["audible"]["audiobook_scan"] is True
 
+    def test_source_without_legacy_key_keeps_shipped_defaults(self):
+        """Sources that never had a legacy `*_enabled` key should
+        inherit the per-surface ship-with default, not collapse to
+        False via a single-bool fallback.
+
+        Surfaced when live migration produced audnexus audiobook_scan
+        = False despite the ship-with default being True, because
+        the buggy fallback used `defaults["ebook_scan"]` (False) as
+        the "absent legacy" fallback for BOTH surfaces.
+        """
+        settings = {
+            # Plausible legacy state: goodreads & hardcover mentioned,
+            # audnexus completely absent.
+            "goodreads_enabled": True,
+            "hardcover_enabled": True,
+        }
+        migrate_legacy_settings(settings)
+        audnexus = settings["metadata_sources"]["audnexus"]
+        # Ship-with default had audiobook_scan=True; we want that
+        # preserved for sources the user hadn't explicitly touched.
+        assert audnexus["audiobook_scan"] is True
+        # audnexus's ebook_scan default is False (ebook coverage
+        # is poor) — stays at the ship-with default too.
+        assert audnexus["ebook_scan"] is False
+
     def test_legacy_rate_limits_carried_over(self):
         settings = {
             "rate_goodreads": 1.5,

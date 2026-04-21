@@ -193,21 +193,23 @@ def _build_source_entry(
         "audiobook_enrich": False, "audiobook_scan": False,
     })
 
-    # Read legacy scan toggle: `<name>_enabled`. When absent fall
-    # back to the ship-with default. MAM is special-cased because
-    # `mam_enabled` guards the whole IRC listener, not just source
-    # scanning — don't inherit that here.
+    # Read legacy scan toggle: `<name>_enabled`. Three cases:
+    #   1. MAM — always use ship-with defaults; `mam_enabled` guards
+    #      the whole IRC listener, not source scanning.
+    #   2. Legacy key ABSENT — fall through to the ship-with default
+    #      for each surface independently. Sources like audnexus
+    #      that never had a legacy `*_enabled` key should inherit
+    #      their per-surface defaults rather than a single fallback.
+    #   3. Legacy key PRESENT — use that one bool to drive both
+    #      surfaces, filtered by `available_for` so Kobo (ebook-only)
+    #      doesn't flip its audiobook toggle on.
     legacy_scan_key = f"{name}_enabled"
-    if name == "mam":
+    legacy_present = legacy_scan_key in settings
+    if name == "mam" or not legacy_present:
         ebook_scan = defaults["ebook_scan"]
         audiobook_scan = defaults["audiobook_scan"]
     else:
-        scan_enabled = bool(
-            settings.get(legacy_scan_key, defaults.get("ebook_scan", False))
-        )
-        # One legacy bool, two new surfaces. Preserve availability:
-        # a source like Kobo (ebook-only) never gets its audiobook
-        # toggle turned on regardless of the legacy bool.
+        scan_enabled = bool(settings.get(legacy_scan_key))
         avail = meta.get("available_for", ())
         ebook_scan = scan_enabled and "ebook" in avail
         audiobook_scan = scan_enabled and "audiobook" in avail
@@ -318,7 +320,6 @@ def sync_legacy_keys(settings: dict) -> None:
     function and the legacy keys can be retired together.
     """
     sources = settings.get("metadata_sources") or {}
-    priority = settings.get("metadata_priority") or {}
 
     # Per-source legacy bools. The old `*_enabled` flag gated
     # discovery-side scanning, so mirror from the scan surface.
