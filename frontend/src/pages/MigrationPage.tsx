@@ -331,7 +331,7 @@ export default function MigrationPage() {
 
       {/* Getting started (no preview yet and no active job) */}
       {!preview && !isRunning && !isFinished && (
-        <Section title="Getting started">
+        <Section title="Getting Started">
           <div style={{
             background: t.warn + "14", border: `1px solid ${t.warn}33`, borderRadius: 10,
             padding: "14px 18px", marginBottom: 16, fontSize: 13, lineHeight: 1.6, color: t.text2,

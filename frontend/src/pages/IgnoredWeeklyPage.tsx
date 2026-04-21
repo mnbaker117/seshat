@@ -61,7 +61,7 @@ export default function IgnoredWeeklyPage() {
   return (
     <div>
       <h1 style={{ fontSize: 24, fontWeight: 700, color: theme.text, marginBottom: 4 }}>
-        Ignored weekly review
+        Ignored Weekly Review
       </h1>
       <p style={{ fontSize: 14, color: theme.textDim, marginBottom: 20 }}>
         Authors on your ignored list whose books appeared this week.

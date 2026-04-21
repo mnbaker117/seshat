@@ -136,7 +136,7 @@ export default function TentativePage() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 700, color: theme.text, marginBottom: 4 }}>
-            Tentative torrents
+            Tentative Torrents
           </h1>
           <p style={{ fontSize: 14, color: theme.textDim }}>
             Announces that passed every filter except the author allow-list.

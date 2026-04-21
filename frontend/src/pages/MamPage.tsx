@@ -129,7 +129,7 @@ export default function MamPage() {
           marginBottom: 4,
         }}
       >
-        MAM status
+        MAM Status
       </h1>
       <p style={{ fontSize: 14, color: theme.textDim, marginBottom: 20 }}>
         Account snapshot and cookie health. Refresh to bypass the 5-minute
@@ -204,7 +204,7 @@ export default function MamPage() {
           </Section>
 
           <Section
-            title="Cookie health"
+            title="Cookie Health"
             subtitle="Seshat auto-rotates the MAM cookie on every API call. Validate to re-run the explicit check."
             right={
               <div style={{ display: "flex", gap: 8 }}>
@@ -242,7 +242,7 @@ export default function MamPage() {
           </Section>
 
           <Section
-            title="Emergency cookie paste"
+            title="Emergency Cookie Paste"
             subtitle="If MAM expired your session and auto-rotation didn't catch it, paste a fresh mam_id cookie value here. The dispatcher picks it up immediately."
           >
             <textarea

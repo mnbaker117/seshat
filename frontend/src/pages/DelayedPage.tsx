@@ -89,7 +89,7 @@ export default function DelayedPage() {
           marginBottom: 4,
         }}
       >
-        Delayed torrents
+        Delayed Torrents
       </h1>
       <p style={{ fontSize: 14, color: theme.textDim, marginBottom: 20 }}>
         When the snatch queue was full, the oldest queued grab's .torrent

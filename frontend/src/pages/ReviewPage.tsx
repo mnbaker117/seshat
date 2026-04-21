@@ -202,7 +202,7 @@ export default function ReviewPage() {
             fontSize: 24, fontWeight: 700, color: theme.text,
             marginBottom: 4,
           }}>
-            Review queue
+            Review Queue
           </h1>
           <p style={{ fontSize: 14, color: theme.textDim, marginBottom: 24 }}>
             Books waiting on your approval before delivery to Calibre.

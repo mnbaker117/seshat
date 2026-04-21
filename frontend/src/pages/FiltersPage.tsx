@@ -180,7 +180,7 @@ export default function FiltersPage() {
 
       {/* ── Audiobook acceptance ──────────────────────────── */}
       <Section
-        title="Audiobook announces"
+        title="Audiobook Announces"
         subtitle="Pipeline-side toggle. When off, audiobook IRC announces are skipped regardless of the category list below."
       >
         <label
@@ -207,7 +207,7 @@ export default function FiltersPage() {
 
       {/* ── Categories ─────────────────────────────────────── */}
       <Section
-        title="Allowed categories"
+        title="Allowed Categories"
         subtitle={`${allowedCats.size} ebook + ${allowedAudiobookCats.size} audiobook selected. Empty = accept all that pass the format gate.`}
       >
         {Object.entries(catGroups).map(([mainName, cats]) => {
@@ -300,7 +300,7 @@ export default function FiltersPage() {
 
       {/* ── Languages ──────────────────────────────────────── */}
       <Section
-        title="Allowed languages"
+        title="Allowed Languages"
         subtitle={`${allowedLangs.size} selected. Empty = accept all languages.`}
       >
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>

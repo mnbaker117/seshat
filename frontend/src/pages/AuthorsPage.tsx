@@ -39,7 +39,7 @@ interface OverviewResponse {
 const TAB_LABELS: Record<ListName, string> = {
   allowed: "Allowed",
   ignored: "Ignored",
-  tentative_review: "Tentative review",
+  tentative_review: "Tentative Review",
 };
 
 const PAGE_SIZE = 100;
