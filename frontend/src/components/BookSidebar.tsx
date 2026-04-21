@@ -10,7 +10,8 @@ import { SBRow } from "./SBRow";
 import type { MamStatusResponse } from "../types";
 
 export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}:any){const t=useTheme();const[mounted,setMounted]=useState(false);useEffect(()=>{requestAnimationFrame(()=>setMounted(true));return()=>setMounted(false)},[]);const[editing,setEditing]=useState(false);const[ef,setEf]=useState<any>({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[hermeeceUrl,setHermeeceUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);const[mamOn,setMamOn]=useState(false);const[suggestion,setSuggestion]=useState<any>(null);const[sugBusy,setSugBusy]=useState<any>(null);const[hermSending,setHermSending]=useState(false);
-useEffect(()=>{api.get("/discovery/settings").then(s=>{setCwUrl(s.calibre_web_url||"");setHermeeceUrl(s.hermeece_url||"")}).catch(()=>{})},[]);
+const[absUrl,setAbsUrl]=useState("");
+useEffect(()=>{api.get("/discovery/settings").then(s=>{setCwUrl(s.calibre_web_url||"");setHermeeceUrl(s.hermeece_url||"");setAbsUrl(s.abs_web_url||"")}).catch(()=>{})},[]);
 useEffect(()=>{api.get<MamStatusResponse>("/discovery/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 // Fetch the active series-suggestion (if any) for this book when the
 // sidebar opens. The endpoint returns `{suggestion: null}` rather than
@@ -48,8 +49,9 @@ return<div style={{position:"fixed",top:0,right:0,width:420,maxWidth:"90vw",heig
 </div>:<>
 <SBRow label="Published" value={book.pub_date?fmtDate(book.pub_date):book.expected_date?`Expected: ${fmtDate(book.expected_date)}`:"Unknown"}/>
 <SBRow label="Status" value={book.owned?"Owned":"Missing"} color={book.owned?t.grnt:t.ylwt}/>
-<SBRow label="Source" value={book.owned?"Calibre":"Unowned"} color={book.owned?t.td:t.tg}/>
+{(()=>{const sourceLabel=book.owned?(book.source==="audiobookshelf"||book.audiobookshelf_id?"Audiobookshelf":book.source==="calibre"||book.calibre_id?"Calibre":(book.source?(book.source[0].toUpperCase()+book.source.slice(1)):"Owned")):"Unowned";return<SBRow label="Source" value={sourceLabel} color={book.owned?t.td:t.tg}/>})()}
 {cwUrl&&book.owned&&book.calibre_id?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Calibre Web</span><a href={`${cwUrl.replace(/\/$/,"")}/book/${book.calibre_id}`} target="_blank" rel="noopener noreferrer" style={{fontSize:13,color:t.accent,textDecoration:"none",display:"flex",alignItems:"center",gap:4}}>Open in Calibre Web <span style={{fontSize:10}}>↗</span></a></div>:null}
+{absUrl&&book.owned&&book.audiobookshelf_id?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Audiobookshelf</span><a href={`${absUrl.replace(/\/$/,"")}/item/${book.audiobookshelf_id}`} target="_blank" rel="noopener noreferrer" style={{fontSize:13,color:t.pur||t.accent,textDecoration:"none",display:"flex",alignItems:"center",gap:4}}>Open in Audiobookshelf <span style={{fontSize:10}}>↗</span></a></div>:null}
 {(()=>{
   const badgeColors={goodreads:{bg:"#553b1a",fg:"#e8c070",br:"#88642a"},hardcover:{bg:"#1a3355",fg:"#70a8e8",br:"#2a5588"},kobo:{bg:"#1a4533",fg:"#70e8a8",br:"#2a8855"},amazon:{bg:"#3d2e1a",fg:"#f0a83c",br:"#7a5c2a"},ibdb:{bg:"#2a1a3d",fg:"#c070e8",br:"#5a2a88"},google_books:{bg:"#1a3333",fg:"#70c8e8",br:"#2a7788"},manual:{bg:t.bg4,fg:t.td,br:t.border}};
   const order=["goodreads","hardcover","kobo","amazon","ibdb","google_books"];
