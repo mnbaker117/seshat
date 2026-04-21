@@ -121,6 +121,12 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "audible_enabled",
     "rate_audible",
     "metadata_audiobook_priority",
+    # Phase 7 unified metadata source configuration. The dedicated
+    # /v1/metadata-sources panel is the primary editor for these two
+    # keys; whitelisted here so the existing Settings PATCH router
+    # doesn't strip them if the UI round-trips the full settings dict.
+    "metadata_sources",
+    "metadata_priority",
     # Operational
     "verbose_logging",
     "dry_run",

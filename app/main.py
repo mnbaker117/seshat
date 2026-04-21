@@ -71,6 +71,7 @@ from app.routers.enums import router as enums_router
 from app.routers.inject import router as inject_router
 from app.routers.logs import router as logs_router, install_log_handler
 from app.routers.mam import router as mam_router
+from app.routers.metadata_sources import router as metadata_sources_router
 from app.routers.migration import router as migration_router
 from app.routers.review import router as review_router
 from app.routers.settings import router as settings_router
@@ -215,16 +216,34 @@ def _build_metadata_enricher(
     Hardcover silently unauthenticated across every enrichment run
     before v1.1.3).
     """
-    cfg = EnrichmentConfig(
-        enabled=bool(settings.get("metadata_enrichment_enabled", False)),
-        priority=tuple(
+    # Phase 7: priority lists derived from the unified
+    # `metadata_sources` + `metadata_priority` shape. The derivation
+    # filters the priority list to sources whose `*_enrich` toggle is
+    # True, so a user who turns Audnexus off for audiobook enrichment
+    # via the Metadata Sources panel sees that source drop out of the
+    # priority tuple here without further plumbing.
+    #
+    # Fallback to the legacy lists when the new shape is empty (e.g.
+    # pre-migration settings.json) so an upgrade-in-progress
+    # deployment keeps working.
+    from app.metadata.source_config import derive_enrich_priority
+    ebook_priority = tuple(derive_enrich_priority(settings, audiobook=False))
+    audiobook_priority = tuple(derive_enrich_priority(settings, audiobook=True))
+    if not ebook_priority:
+        ebook_priority = tuple(
             settings.get("metadata_provider_priority", [])
             or ("goodreads", "amazon", "hardcover", "kobo", "ibdb", "google_books")
-        ),
-        audiobook_priority=tuple(
+        )
+    if not audiobook_priority:
+        audiobook_priority = tuple(
             settings.get("metadata_audiobook_priority", [])
             or ("audible", "audnexus", "goodreads", "hardcover", "google_books")
-        ),
+        )
+
+    cfg = EnrichmentConfig(
+        enabled=bool(settings.get("metadata_enrichment_enabled", False)),
+        priority=ebook_priority,
+        audiobook_priority=audiobook_priority,
         disabled_sources=frozenset(
             settings.get("metadata_disabled_sources", []) or []
         ),
@@ -459,6 +478,20 @@ async def lifespan(app: FastAPI):
             "qBit orphan adoption cutoff initialized to %s (pre-existing "
             "torrents in the watch category will NOT be adopted)",
             settings["qbit_orphan_adoption_since"],
+        )
+
+    # Phase 7 unified metadata sources — migrate legacy settings on
+    # first boot, seed fresh installs. Idempotent; no-op after the
+    # first successful migration.
+    try:
+        from app.metadata.source_config import migrate_legacy_settings
+        from app.config import save_settings as _save_sources
+        if migrate_legacy_settings(settings):
+            _save_sources(settings)
+    except Exception:
+        _log.exception(
+            "metadata sources migration failed (non-fatal — enricher will "
+            "fall back to legacy priority lists)"
         )
 
     await init_db()
@@ -977,6 +1010,7 @@ app.include_router(enums_router)
 app.include_router(inject_router)
 app.include_router(logs_router)
 app.include_router(mam_router)
+app.include_router(metadata_sources_router)
 app.include_router(migration_router)
 app.include_router(review_router)
 app.include_router(settings_router)

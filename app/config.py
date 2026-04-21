@@ -365,6 +365,20 @@ DEFAULT_SETTINGS = {
         "hardcover",
         "google_books",
     ],
+    # Phase 7 unified metadata source configuration. `metadata_sources`
+    # is per-source toggles + rate limit; `metadata_priority` is per-
+    # content-type ordered name lists (priority rank comes from list
+    # position). Seeded empty — lifespan startup runs a one-shot
+    # migration from the legacy `*_enabled` / `rate_*` /
+    # `metadata_provider_priority` / `metadata_audiobook_priority`
+    # settings if these are empty. After migration the new shape is
+    # authoritative; the legacy keys stay shadow-synced at PATCH
+    # time so any code still reading the old names keeps working.
+    "metadata_sources": {},
+    "metadata_priority": {
+        "ebook": [],
+        "audiobook": [],
+    },
     # Audible regional catalog selector. Maps English-speaking
     # markets first — .com, .co.uk, .com.au, .ca — plus non-English
     # markets via Audnexus's region codes. "us" stays the safe
