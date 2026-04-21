@@ -250,3 +250,63 @@ class TestPipelineErrors:
             assert row["cnt"] == 0
         finally:
             await db.close()
+
+
+class TestAudiobookRouting:
+    """Phase 6: audiobook format detection + sink routing."""
+
+    def test_is_audiobook_grab_by_extension(self):
+        from app.orchestrator.pipeline import _is_audiobook_grab
+        assert _is_audiobook_grab("m4b", "")
+        assert _is_audiobook_grab("mp3", "")
+        assert _is_audiobook_grab("m4a", "")
+        assert _is_audiobook_grab(".m4b", "")  # tolerates leading dot
+        assert not _is_audiobook_grab("epub", "")
+        assert not _is_audiobook_grab("", "")
+
+    def test_is_audiobook_grab_by_category(self):
+        from app.orchestrator.pipeline import _is_audiobook_grab
+        assert _is_audiobook_grab("", "AudioBooks - Fantasy")
+        assert _is_audiobook_grab("", "audiobooks - science fiction")
+        assert not _is_audiobook_grab("", "Ebooks - Fantasy")
+        assert not _is_audiobook_grab("", "")
+
+    def test_pick_sink_routes_audiobook_to_abs_when_configured(self):
+        from app.orchestrator.pipeline import _pick_sink
+        from app.sinks.audiobookshelf import AudiobookshelfSink
+        from app.sinks.calibre import CalibreSink
+
+        # Audiobook grab + ABS configured → ABS sink, even with
+        # default_sink="calibre".
+        sink = _pick_sink(
+            default_sink="calibre",
+            calibre_library_path="/calibre",
+            folder_sink_path="",
+            audiobookshelf_library_path="/audiobooks",
+            cwa_ingest_path="",
+            book_format="m4b",
+        )
+        assert isinstance(sink, AudiobookshelfSink)
+
+        # Audiobook grab but ABS NOT configured → falls back to default.
+        sink = _pick_sink(
+            default_sink="calibre",
+            calibre_library_path="/calibre",
+            folder_sink_path="",
+            audiobookshelf_library_path="",
+            cwa_ingest_path="",
+            book_format="m4b",
+        )
+        assert isinstance(sink, CalibreSink)
+
+        # Ebook grab + ABS configured → still Calibre (default_sink
+        # respected; ABS routing is audiobook-only).
+        sink = _pick_sink(
+            default_sink="calibre",
+            calibre_library_path="/calibre",
+            folder_sink_path="",
+            audiobookshelf_library_path="/audiobooks",
+            cwa_ingest_path="",
+            book_format="epub",
+        )
+        assert isinstance(sink, CalibreSink)

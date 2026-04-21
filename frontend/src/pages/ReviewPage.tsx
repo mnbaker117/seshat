@@ -53,6 +53,12 @@ interface ReviewItem {
       source_url?: string;
       confidence?: number;
       source_log?: { source: string; confidence: number | null; status: string }[];
+      // Audiobook-specific fields populated by AudibleSource /
+      // AudnexusSource. Absent on ebook grabs.
+      narrator?: string;
+      duration_sec?: number;
+      asin?: string;
+      abridged?: boolean;
     };
   };
   cover_path: string | null;
@@ -294,9 +300,28 @@ function ReviewCard({
   const publisher = resolvedPublisher;
   const pubDate = resolvedPubDate;
   const pageCount = resolvedPageCount;
+  // Audiobook fields only appear when the grab was routed through the
+  // audiobook enricher priority (AudibleSource / AudnexusSource).
+  // Ebook grabs leave these undefined, so the conditionals below
+  // collapse to no-ops.
+  const narrator = e?.narrator || "";
+  const durationSec = e?.duration_sec;
+  const asin = e?.asin || "";
+  const abridged = e?.abridged;
+  const isAudiobookFormat = ["m4b", "mp3", "m4a"].includes(
+    (item.book_format || "").toLowerCase(),
+  );
   const sourceLog = (e?.source_log as { source: string; confidence: number | null; status: string }[] | undefined) ?? [];
   const sourceLabel = e?.source ? `via ${e.source}` : null;
   const confidence = e?.confidence;
+
+  function formatDuration(sec: number | undefined): string {
+    if (!sec || sec <= 0) return "";
+    const hours = Math.floor(sec / 3600);
+    const minutes = Math.floor((sec % 3600) / 60);
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+  }
 
   return (
     <article
@@ -328,6 +353,28 @@ function ReviewCard({
             <h3 style={{ fontSize: 17, fontWeight: 700, color: theme.text, wordBreak: "break-word" }}>
               {title}
             </h3>
+          )}
+          {isAudiobookFormat && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+              padding: "2px 7px", borderRadius: 99,
+              background: theme.accent + "22", color: theme.accent,
+              border: `1px solid ${theme.accent}55`,
+              letterSpacing: 0.4,
+            }}>
+              audiobook
+            </span>
+          )}
+          {abridged === true && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+              padding: "2px 7px", borderRadius: 99,
+              background: theme.err + "22", color: theme.err,
+              border: `1px solid ${theme.err}55`,
+              letterSpacing: 0.4,
+            }}>
+              abridged
+            </span>
           )}
           {sourceLog.length > 0 ? (
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
@@ -384,6 +431,11 @@ function ReviewCard({
             <Field label="Publisher">{publisher}</Field>
           ) : null}
           {pageCount && <Field label="Pages">{pageCount}</Field>}
+          {narrator && <Field label="Narrator">{narrator}</Field>}
+          {durationSec !== undefined && durationSec > 0 && (
+            <Field label="Duration">{formatDuration(durationSec)}</Field>
+          )}
+          {asin && <Field label="ASIN">{asin}</Field>}
           {editing ? (
             <Field label="ISBN"><EditInput value={editIsbn} onChange={setEditIsbn} placeholder="ISBN" style={{ fontSize: 12, width: "100%" }} /></Field>
           ) : isbn ? (

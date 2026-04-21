@@ -65,7 +65,29 @@ from app.storage import review_queue as review_storage
 _log = logging.getLogger("seshat.orchestrator.pipeline")
 
 # Book extensions used for single-file torrent matching.
-_BOOK_EXTS = (".epub", ".mobi", ".azw", ".azw3", ".pdf", ".m4b", ".mp3", ".cbz", ".cbr")
+_BOOK_EXTS = (".epub", ".mobi", ".azw", ".azw3", ".pdf", ".m4b", ".mp3", ".m4a", ".cbz", ".cbr")
+
+# File extensions that identify an audiobook grab. The sink router and
+# enricher both consult this — audiobook grabs go to ABS (when
+# configured) and use `metadata_audiobook_priority` (Audible +
+# Audnexus first) instead of the ebook priority list.
+_AUDIOBOOK_EXTS = frozenset({"m4b", "mp3", "m4a", "aax", "aa"})
+
+
+def _is_audiobook_grab(book_format: str, category: str = "") -> bool:
+    """Decide whether a grab is an audiobook.
+
+    Prefers the file extension when available (authoritative for
+    post-download routing). Falls back to the MAM category prefix
+    — "AudioBooks - Fantasy" etc. — for the pre-download path where
+    we haven't seen a file yet. Callers that only know one of the
+    two should pass "" for the other.
+    """
+    if book_format and book_format.lstrip(".").lower() in _AUDIOBOOK_EXTS:
+        return True
+    if category and category.strip().lower().startswith("audiobook"):
+        return True
+    return False
 
 
 def _find_torrent_file(parent: Path, torrent_name: str) -> Optional[Path]:
@@ -453,12 +475,15 @@ async def _prepare_book(
             enriched = None
 
     if enriched is None and metadata_enricher is not None:
+        grab_category = grab.category if grab else ""
+        is_audiobook = _is_audiobook_grab(book_format, grab_category)
         try:
             enriched = await metadata_enricher.enrich(
                 title=metadata.title,
                 author=metadata.author,
                 mam_torrent_id=grab.mam_torrent_id if grab else "",
                 mam_token=_get_mam_token(),
+                audiobook=is_audiobook,
             )
         except Exception:
             _log.exception(
@@ -706,6 +731,7 @@ async def _deliver_prepared(
         abs_base_url=abs_base_url,
         abs_api_key=abs_api_key,
         abs_library_id=abs_library_id,
+        book_format=prep.book_format,
     )
 
     try:
@@ -1010,7 +1036,25 @@ def _pick_sink(
     abs_base_url: str = "",
     abs_api_key: str = "",
     abs_library_id: str = "",
+    book_format: str = "",
+    category: str = "",
 ):
+    """Select the sink for a delivered book.
+
+    `book_format` (file extension) and `category` (MAM category)
+    enable audiobook-aware routing: when the book is an audiobook
+    AND AudiobookshelfSink is configured (library path set), route
+    to ABS regardless of `default_sink`. Falls back to the default
+    sink when ABS isn't configured so ebook-only setups keep working
+    without flipping their default.
+    """
+    if _is_audiobook_grab(book_format, category) and audiobookshelf_library_path:
+        return AudiobookshelfSink(
+            audiobookshelf_library_path,
+            abs_base_url=abs_base_url,
+            abs_api_key=abs_api_key,
+            abs_library_id=abs_library_id,
+        )
     if default_sink == "calibre":
         return CalibreSink(calibre_library_path)
     if default_sink == "cwa":

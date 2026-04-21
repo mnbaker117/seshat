@@ -45,6 +45,8 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "excluded_formats",
     "allowed_languages",
     "excluded_uploaders",
+    "accept_audiobook_announces",
+    "allowed_audiobook_categories",
     # Non-secret connection settings (visible in Settings as plain text)
     "ntfy_url",
     "qbit_url",

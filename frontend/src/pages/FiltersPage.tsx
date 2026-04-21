@@ -120,6 +120,9 @@ export default function FiltersPage() {
   const allowedCats = new Set(
     (effective.allowed_categories as string[]) ?? [],
   );
+  const allowedAudiobookCats = new Set(
+    (effective.allowed_audiobook_categories as string[]) ?? [],
+  );
   const excludedCats = new Set(
     (effective.excluded_categories as string[]) ?? [],
   );
@@ -132,6 +135,7 @@ export default function FiltersPage() {
   const excludedFormats = new Set(
     (effective.excluded_formats as string[]) ?? [],
   );
+  const acceptAudiobooks = !!effective.accept_audiobook_announces;
 
   function toggleInSet(
     settingKey: string,
@@ -142,6 +146,14 @@ export default function FiltersPage() {
     if (next.has(value)) next.delete(value);
     else next.add(value);
     setField(settingKey, [...next]);
+  }
+
+  // Route audiobook category chips to the separate
+  // `allowed_audiobook_categories` list so the user can toggle
+  // audiobook acceptance at the filter level without mutating their
+  // ebook category selections.
+  function isAudiobookGroup(mainName: string): boolean {
+    return mainName.toLowerCase().startsWith("audio");
   }
 
   const dirty = Object.keys(draft).length;
@@ -166,57 +178,97 @@ export default function FiltersPage() {
       {error && <Banner tone="err">{error}</Banner>}
       {ok && <Banner tone="ok">{ok}</Banner>}
 
+      {/* ── Audiobook acceptance ──────────────────────────── */}
+      <Section
+        title="Audiobook announces"
+        subtitle="Pipeline-side toggle. When off, audiobook IRC announces are skipped regardless of the category list below."
+      >
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            fontSize: 14,
+            color: theme.text,
+            cursor: "pointer",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={acceptAudiobooks}
+            onChange={(e) =>
+              setField("accept_audiobook_announces", e.target.checked)
+            }
+          />
+          Accept audiobook announces (routes m4b/mp3 downloads to
+          Audiobookshelf when an ABS library path is configured)
+        </label>
+      </Section>
+
       {/* ── Categories ─────────────────────────────────────── */}
       <Section
         title="Allowed categories"
-        subtitle={`${allowedCats.size} selected. Empty = accept all that pass the format gate.`}
+        subtitle={`${allowedCats.size} ebook + ${allowedAudiobookCats.size} audiobook selected. Empty = accept all that pass the format gate.`}
       >
-        {Object.entries(catGroups).map(([mainName, cats]) => (
-          <div key={mainName} style={{ marginBottom: 16 }}>
-            <h4
-              style={{
-                fontSize: 13,
-                fontWeight: 700,
-                color: theme.text2,
-                marginBottom: 8,
-                textTransform: "uppercase",
-                letterSpacing: 0.4,
-              }}
-            >
-              {mainName}
-            </h4>
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 6,
-              }}
-            >
-              {cats.map((c) => (
-                <Chip
-                  key={c.normalized}
-                  label={c.name}
-                  active={allowedCats.has(c.normalized)}
-                  excluded={excludedCats.has(c.normalized)}
-                  onClick={() =>
-                    toggleInSet(
-                      "allowed_categories",
-                      allowedCats,
-                      c.normalized,
-                    )
-                  }
-                  onRightClick={() =>
-                    toggleInSet(
-                      "excluded_categories",
-                      excludedCats,
-                      c.normalized,
-                    )
-                  }
-                />
-              ))}
+        {Object.entries(catGroups).map(([mainName, cats]) => {
+          const isAudio = isAudiobookGroup(mainName);
+          const activeSet = isAudio ? allowedAudiobookCats : allowedCats;
+          const settingKey = isAudio
+            ? "allowed_audiobook_categories"
+            : "allowed_categories";
+          const dimmed = isAudio && !acceptAudiobooks;
+          return (
+            <div key={mainName} style={{ marginBottom: 16, opacity: dimmed ? 0.4 : 1 }}>
+              <h4
+                style={{
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: theme.text2,
+                  marginBottom: 8,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.4,
+                }}
+              >
+                {mainName}
+                {isAudio && !acceptAudiobooks && (
+                  <span style={{
+                    marginLeft: 8, fontSize: 11, fontWeight: 500,
+                    color: theme.textDim, textTransform: "none",
+                    letterSpacing: 0,
+                  }}>
+                    (toggle audiobook announces above to enable)
+                  </span>
+                )}
+              </h4>
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 6,
+                }}
+              >
+                {cats.map((c) => (
+                  <Chip
+                    key={c.normalized}
+                    label={c.name}
+                    active={activeSet.has(c.normalized)}
+                    excluded={excludedCats.has(c.normalized)}
+                    onClick={() =>
+                      toggleInSet(settingKey, activeSet, c.normalized)
+                    }
+                    onRightClick={() =>
+                      toggleInSet(
+                        "excluded_categories",
+                        excludedCats,
+                        c.normalized,
+                      )
+                    }
+                  />
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         <p style={{ fontSize: 11, color: theme.textDim, marginTop: 8 }}>
           Click to toggle allowed. Right-click to toggle excluded (red
           strike-through = excluded even if parent format is allowed).

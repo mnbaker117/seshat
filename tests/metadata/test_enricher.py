@@ -154,3 +154,39 @@ class TestEnricher:
         assert await enricher.enrich(title="X", author="Y") is None
         assert a.call_count == 1
         assert b.call_count == 1
+
+    async def test_audiobook_flag_swaps_source_list(self):
+        """Phase 6: `audiobook=True` routes to `audiobook_sources` so the
+        audiobook-specific priority (Audible + Audnexus first) actually
+        runs, and the ebook sources aren't called."""
+        cfg = EnrichmentConfig(enabled=True, accept_confidence=0.6)
+        ebook_rec = MetaRecord(
+            title="Book", authors=["A"], source="goodreads",
+        )
+        audio_rec = MetaRecord(
+            title="Book", authors=["A"], source="audible",
+            narrator="Michael Kramer", duration_sec=36000, asin="B00XYZ",
+        )
+        ebook_src = _FakeSource(name="goodreads", result=ebook_rec)
+        audio_src = _FakeSource(name="audible", result=audio_rec)
+        enricher = MetadataEnricher(
+            cfg, sources=[ebook_src], audiobook_sources=[audio_src],
+        )
+
+        ebook_result = await enricher.enrich(
+            title="Book", author="A", audiobook=False,
+        )
+        assert ebook_result is not None
+        assert ebook_result.source == "goodreads"
+        assert ebook_src.call_count == 1
+        assert audio_src.call_count == 0
+
+        audio_result = await enricher.enrich(
+            title="Book", author="A", audiobook=True,
+        )
+        assert audio_result is not None
+        assert audio_result.source == "audible"
+        assert audio_result.narrator == "Michael Kramer"
+        assert audio_result.asin == "B00XYZ"
+        # Ebook source wasn't consulted on the audiobook call.
+        assert ebook_src.call_count == 1

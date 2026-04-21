@@ -160,16 +160,32 @@ async def _build_filter_config(settings: dict) -> FilterConfig:
     finally:
         await db.close()
 
+    # Start from the user's ebook category list. When audiobook
+    # acceptance is on, merge the separate audiobook category list so
+    # the filter admits audiobook announces without the user having
+    # to edit their existing ebook configuration.
+    category_entries = list(settings.get("allowed_categories", []) or [])
+    format_entries = list(settings.get("allowed_formats", []) or [])
+    if settings.get("accept_audiobook_announces", False):
+        category_entries.extend(
+            settings.get("allowed_audiobook_categories", []) or []
+        )
+        # Only augment allowed_formats when it's non-empty (an empty
+        # set already means "accept all formats"). If the user has
+        # restricted to specific formats, add "audiobooks" alongside.
+        if format_entries:
+            format_entries.append("audiobooks")
+
     return FilterConfig(
         allowed_categories=frozenset(
-            normalize_category(c) for c in settings.get("allowed_categories", [])
+            normalize_category(c) for c in category_entries
         ),
         excluded_categories=frozenset(
             normalize_category(c) for c in settings.get("excluded_categories", [])
         ),
         allowed_formats=frozenset(
             extract_format(f) or normalize_category(f)
-            for f in settings.get("allowed_formats", [])
+            for f in format_entries
         ),
         excluded_formats=frozenset(
             extract_format(f) or normalize_category(f)
@@ -204,6 +220,10 @@ def _build_metadata_enricher(
         priority=tuple(
             settings.get("metadata_provider_priority", [])
             or ("goodreads", "amazon", "hardcover", "kobo", "ibdb", "google_books")
+        ),
+        audiobook_priority=tuple(
+            settings.get("metadata_audiobook_priority", [])
+            or ("audible", "audnexus", "goodreads", "hardcover", "google_books")
         ),
         disabled_sources=frozenset(
             settings.get("metadata_disabled_sources", []) or []

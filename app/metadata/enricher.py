@@ -109,10 +109,16 @@ class EnrichmentConfig:
     Built from settings.json in `main.py`. Kept distinct from the
     source instances themselves so tests can construct an enricher
     with a fixed config without reading settings.
+
+    Two priority lists: `priority` is used for ebook grabs,
+    `audiobook_priority` for audiobook grabs. The pipeline picks
+    which list to use per-grab via the `audiobook=` kwarg on
+    `MetadataEnricher.enrich()`.
     """
 
     enabled: bool = False
     priority: tuple[str, ...] = DEFAULT_PRIORITY
+    audiobook_priority: tuple[str, ...] = DEFAULT_AUDIOBOOK_PRIORITY
     per_source_timeout: float = _PER_SOURCE_TIMEOUT
     per_book_budget: float = _PER_BOOK_BUDGET
     accept_confidence: float = _ACCEPT_CONFIDENCE
@@ -140,6 +146,7 @@ class MetadataEnricher:
         config: EnrichmentConfig,
         *,
         sources: Optional[list[MetaSource]] = None,
+        audiobook_sources: Optional[list[MetaSource]] = None,
         hardcover_api_key: str = "",
         audible_region: str = "us",
     ):
@@ -149,7 +156,15 @@ class MetadataEnricher:
             self._sources = sources
         else:
             self._sources = _build_default_sources(
-                config,
+                config.priority, config,
+                hardcover_api_key=hardcover_api_key,
+                audible_region=audible_region,
+            )
+        if audiobook_sources is not None:
+            self._audiobook_sources = audiobook_sources
+        else:
+            self._audiobook_sources = _build_default_sources(
+                config.audiobook_priority, config,
                 hardcover_api_key=hardcover_api_key,
                 audible_region=audible_region,
             )
@@ -161,6 +176,7 @@ class MetadataEnricher:
         author: str,
         mam_torrent_id: str = "",
         mam_token: str = "",
+        audiobook: bool = False,
     ) -> Optional[MetaRecord]:
         """Run the priority list and return the best merged record.
 
@@ -168,6 +184,11 @@ class MetadataEnricher:
         source gets an exact-ID lookup (confidence=1.0) for free —
         it reuses the cached torrent_info from the policy engine.
         External scrapers then fill any gaps (covers, page count, etc.)
+
+        `audiobook=True` switches the priority list to
+        `config.audiobook_priority` (Audible + Audnexus lead) so
+        narrator / duration / ASIN come from the audiobook-aware
+        sources first.
 
         Returns None when every source returned None or errored.
         """
@@ -179,7 +200,8 @@ class MetadataEnricher:
         # Build the source list, injecting a MAM source with the
         # torrent ID if available. This is per-call because the
         # torrent ID changes for each book.
-        sources = list(self._sources)
+        base_sources = self._audiobook_sources if audiobook else self._sources
+        sources = list(base_sources)
         if mam_torrent_id and mam_token:
             mam_src = MamSearchSource(
                 mam_token=mam_token, torrent_id=mam_torrent_id
@@ -284,7 +306,14 @@ class MetadataEnricher:
             return None
 
     async def aclose(self) -> None:
-        for src in self._sources:
+        # Close both source lists. A source can appear in both the
+        # ebook and audiobook priorities (audible, goodreads, etc.) —
+        # dedupe by identity so `close()` only fires once per instance.
+        seen = set()
+        for src in list(self._sources) + list(self._audiobook_sources):
+            if id(src) in seen:
+                continue
+            seen.add(id(src))
             try:
                 await src.close()
             except Exception:
@@ -292,12 +321,19 @@ class MetadataEnricher:
 
 
 def _build_default_sources(
+    priority: tuple[str, ...],
     config: EnrichmentConfig,
     *,
     hardcover_api_key: str = "",
     audible_region: str = "us",
 ) -> list[MetaSource]:
     """Instantiate the priority-ordered source list.
+
+    `priority` is the order to walk; `config.disabled_sources` filters
+    entries the user has explicitly switched off. The same enricher
+    instance builds BOTH an ebook source list (from `config.priority`)
+    and an audiobook source list (from `config.audiobook_priority`) —
+    callers pass the appropriate tuple.
 
     `hardcover_api_key` is plumbed through from `_build_dispatcher`'s
     resolved_secrets — sourced from the encrypted store rather than
@@ -310,13 +346,13 @@ def _build_default_sources(
     via the `audible_region` setting; defaults to "us".
     """
     if not hardcover_api_key:
-        _log.info(
+        _log.debug(
             "enricher: no Hardcover API key provided; Hardcover source "
             "will return no results"
         )
 
     out: list[MetaSource] = []
-    for name in config.priority:
+    for name in priority:
         if name in config.disabled_sources:
             continue
         cls = _SOURCE_REGISTRY.get(name)

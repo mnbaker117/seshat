@@ -167,6 +167,25 @@ DEFAULT_SETTINGS = {
     # Empty allowed_formats = accept all formats that pass category gate.
     "allowed_formats": [],
     "excluded_formats": [],
+    # Audiobook acceptance toggle. When True, the filter builder
+    # merges `allowed_audiobook_categories` into `allowed_categories`
+    # (so audiobook announces pass the category gate) and adds
+    # "audiobooks" to `allowed_formats` when `allowed_formats` is
+    # non-empty (preserving explicit format gating). When False, this
+    # is all a no-op — ebook-only deployments stay exactly as they
+    # were. Keep ebook and audiobook configuration separate so the
+    # user can toggle audiobook acceptance without editing their
+    # existing ebook category list.
+    "accept_audiobook_announces": False,
+    "allowed_audiobook_categories": [
+        "audiobooks action adventure",
+        "audiobooks science fiction",
+        "audiobooks fantasy",
+        "audiobooks urban fantasy",
+        "audiobooks general fiction",
+        "audiobooks young adult",
+        "audiobooks mixed collections",
+    ],
     # Language gate. Normalized lowercase. Empty = accept all languages.
     "allowed_languages": ["english"],
     # Uploaders whose torrents should NEVER be grabbed. Case-insensitive
