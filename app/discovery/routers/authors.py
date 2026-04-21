@@ -355,11 +355,24 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
 
 
 @router.post("/authors/{aid}/lookup")
-async def trigger_author_lookup(aid: int):
+async def trigger_author_lookup(aid: int, slug: Optional[str] = None):
+    """Run a source scan for one author in a specific library.
+
+    `slug=X` temporarily sets the active library to X for the duration
+    of the scan, then restores the original on finish. Needed because
+    `lookup_author` + every downstream helper calls `get_db()` with no
+    slug argument — threading slug through every site is invasive
+    and `_lookup_task` already serializes scan work. The primary-
+    author ID in the URL refers to THIS library's author id, so the
+    flip is required or we resolve the wrong person.
+    """
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
         raise HTTPException(400, "Author scanning is disabled — enable it in Settings")
-    db = await get_db()
+    from app.discovery.database import set_active_library as _set_active
+    original_slug = get_active_library()
+    target_slug = slug or original_slug
+    db = await get_db(target_slug)
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
         if not r:
@@ -367,29 +380,39 @@ async def trigger_author_lookup(aid: int):
     finally:
         await db.close()
     name = dict(r)["name"]
+    flip = bool(slug and slug != original_slug)
 
     async def _runner():
-        state._lookup_progress.update({"current_author": name})
-        # Surface running new_books count after each source so the
-        # widget climbs in real time instead of jumping 0 → final.
-        def _on_source(running):
-            state._lookup_progress["new_books"] = int(running)
-        new_books = await lookup_author(aid, name, on_progress=_on_source)
-        state._lookup_progress.update({
-            "checked": 1, "new_books": int(new_books or 0),
-        })
+        if flip:
+            _set_active(slug)
+        try:
+            state._lookup_progress.update({"current_author": name})
+            # Surface running new_books count after each source so the
+            # widget climbs in real time instead of jumping 0 → final.
+            def _on_source(running):
+                state._lookup_progress["new_books"] = int(running)
+            new_books = await lookup_author(aid, name, on_progress=_on_source)
+            state._lookup_progress.update({
+                "checked": 1, "new_books": int(new_books or 0),
+            })
+        finally:
+            if flip and original_slug:
+                _set_active(original_slug)
 
     _spawn_lookup_task("single_author", total=1, runner=_runner)
     return {"status": "started", "author": name}
 
 
 @router.post("/authors/{aid}/full-rescan")
-async def trigger_author_full_rescan(aid: int):
-    """Full re-scan for a single author."""
+async def trigger_author_full_rescan(aid: int, slug: Optional[str] = None):
+    """Full re-scan for a single author. `slug` scoped the same as /lookup."""
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
         raise HTTPException(400, "Author scanning is disabled — enable it in Settings")
-    db = await get_db()
+    from app.discovery.database import set_active_library as _set_active
+    original_slug = get_active_library()
+    target_slug = slug or original_slug
+    db = await get_db(target_slug)
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
         if not r:
@@ -397,15 +420,22 @@ async def trigger_author_full_rescan(aid: int):
     finally:
         await db.close()
     name = dict(r)["name"]
+    flip = bool(slug and slug != original_slug)
 
     async def _runner():
-        state._lookup_progress.update({"current_author": name})
-        def _on_source(running):
-            state._lookup_progress["new_books"] = int(running)
-        new_books = await lookup_author(aid, name, full_scan=True, on_progress=_on_source)
-        state._lookup_progress.update({
-            "checked": 1, "new_books": int(new_books or 0),
-        })
+        if flip:
+            _set_active(slug)
+        try:
+            state._lookup_progress.update({"current_author": name})
+            def _on_source(running):
+                state._lookup_progress["new_books"] = int(running)
+            new_books = await lookup_author(aid, name, full_scan=True, on_progress=_on_source)
+            state._lookup_progress.update({
+                "checked": 1, "new_books": int(new_books or 0),
+            })
+        finally:
+            if flip and original_slug:
+                _set_active(original_slug)
 
     _spawn_lookup_task("single_author_full", total=1, runner=_runner)
     return {"status": "started", "author": name}

@@ -93,8 +93,9 @@ const loadA=useCallback((signal?:AbortSignal)=>{setLd(true);const qs=authorSlug?
 //      `{status: "started"}`).
 //   3. Listen for `seshat:scan-completed` from App's unified
 //      poller and refresh the page data when it fires.
-const refresh=async(full=false)=>{if(ref)return;setRef(true);try{const r=await api.post(`/discovery/authors/${authorIdNum}/${full?"full-rescan":"lookup"}`);toast.info(`${full?"Full re-scan":"Source scan"} started for ${r.author||"author"}`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}catch(e){toast.error(e.message||"Scan failed to start");setRef(false)}};
-const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/discovery/mam/scan-author/${authorIdNum}`);if(r.status==="complete"){toast.info(r.message||"No un-scanned books for this author");setMamRef(false)}else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start");setMamRef(false)}};
+const scanQs=authorSlug?`?slug=${encodeURIComponent(authorSlug)}`:"";
+const refresh=async(full=false)=>{if(ref)return;setRef(true);try{const r=await api.post(`/discovery/authors/${authorIdNum}/${full?"full-rescan":"lookup"}${scanQs}`);toast.info(`${full?"Full re-scan":"Source scan"} started for ${r.author||"author"}`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}catch(e){toast.error(e.message||"Scan failed to start");setRef(false)}};
+const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/discovery/mam/scan-author/${authorIdNum}${scanQs}`);if(r.status==="complete"){toast.info(r.message||"No un-scanned books for this author");setMamRef(false)}else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("seshat:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start");setMamRef(false)}};
 // Listen for scan completion (broadcast by the unified poller in
 // App-level Dashboard) and refresh this page's author data + book grid.
 useEffect(()=>{const onDone=()=>{loadA();setRk(k=>k+1);setRef(false);setMamRef(false)};window.addEventListener("seshat:scan-completed",onDone);return()=>window.removeEventListener("seshat:scan-completed",onDone)},[loadA]);
@@ -204,18 +205,53 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
   } else {
     blocksToRender = [...crossBlocks, activeBlock].filter(b => b.slug === fmtTab);
   }
+  // Per-block scan trigger. Fires the same author-lookup endpoint
+  // the top-right Re-sync button uses, but with the block's slug so
+  // it always scans THIS library's copy of the author — even when
+  // the URL slug is a different library.
+  const scanBlock = async (block: Block) => {
+    const bAuthorId = block.data?.id;
+    if (!bAuthorId) return;
+    try {
+      const r = await api.post(`/discovery/authors/${bAuthorId}/lookup?slug=${encodeURIComponent(block.slug)}`);
+      toast.info(`${block.label} scan started for ${r.author || "author"}`);
+      window.dispatchEvent(new CustomEvent("seshat:scan-started"));
+    } catch (e:any) {
+      toast.error(e.message || "Scan failed to start");
+    }
+  };
   return blocksToRender.map(block => {
     const series = block.data?.series || [];
     const standalone = block.data?.standalone_books || [];
+    // Show the section header when multiple library blocks are
+    // visible at once (Combined mode). Single-tab view renders one
+    // block, so the header would be redundant with the tab strip.
     const showHdr = hasTabs && fmtTab === "combined";
     const color = block.content_type === "audiobook" ? (t.pur || t.accent) : t.accent;
+    // Per-block Scan button: always show when hasTabs (i.e. cross-
+    // library case) so the user can trigger "Scan Audiobook copy of
+    // this author" separately from "Scan Ebook copy".
+    const showScan = hasTabs;
     return (
       <div key={block.slug} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        {showHdr && (
+        {(showHdr || showScan) && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-            <div style={{ width: 4, height: 18, background: color, borderRadius: 2 }} />
-            <span style={{ fontSize: 13, fontWeight: 700, color: color, textTransform: "uppercase", letterSpacing: "0.05em" }}>{block.label}</span>
+            {showHdr && <>
+              <div style={{ width: 4, height: 18, background: color, borderRadius: 2 }} />
+              <span style={{ fontSize: 13, fontWeight: 700, color: color, textTransform: "uppercase", letterSpacing: "0.05em" }}>{block.label}</span>
+            </>}
             <div style={{ flex: 1, height: 1, background: t.borderL }} />
+            {showScan && (
+              <button
+                onClick={() => scanBlock(block)}
+                title={`Scan ${block.label.toLowerCase()} sources for this author`}
+                style={{
+                  fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 5,
+                  background: color + "22", color: color, border: `1px solid ${color}44`,
+                  cursor: "pointer", whiteSpace: "nowrap",
+                }}
+              >Scan {block.label}</button>
+            )}
           </div>
         )}
         {series.map((s:any)=><IS key={`${block.slug}_${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={block.data?.id ?? authorIdNum} librarySlug={block.slug}/>)}

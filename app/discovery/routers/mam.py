@@ -679,8 +679,14 @@ async def mam_scan_single_book(book_id: int):
 
 
 @router.post("/scan-author/{author_id}")
-async def mam_scan_single_author(author_id: int):
+async def mam_scan_single_author(author_id: int, slug: str | None = None):
     """Scan all of an author's missing/un-scanned books against MAM.
+
+    `slug=X` scans the author in a specific library (needed for the
+    cross-library author detail page — the author id only resolves
+    correctly in its origin library). Temporarily flips the active
+    library for the scan's duration so `get_db()` inside the worker
+    uses the right DB, then restores on finish.
 
     Spawned as a background asyncio task tracked through
     `state._mam_scan_task` / `state._mam_scan_progress` so the unified
@@ -699,7 +705,11 @@ async def mam_scan_single_author(author_id: int):
     if state._mam_scan_task and not state._mam_scan_task.done():
         raise HTTPException(409, "A MAM scan is already running")
 
-    db = await get_db()
+    from app.discovery.database import get_active_library as _active, set_active_library as _set_active
+    original_slug = _active()
+    target_slug = slug or original_slug
+    flip = bool(slug and slug != original_slug)
+    db = await get_db(target_slug)
     try:
         rows = await db.execute_fetchall(
             "SELECT name FROM authors WHERE id=?", (author_id,),
@@ -741,6 +751,8 @@ async def mam_scan_single_author(author_id: int):
     lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
 
     async def _do_scan():
+        if flip:
+            _set_active(slug)
         bdb = await get_db()
         try:
             for bid, btitle in book_rows:
@@ -786,6 +798,8 @@ async def mam_scan_single_author(author_id: int):
             state._mam_scan_progress.update({"running": False, "status": f"error: {e}"})
         finally:
             await bdb.close()
+            if flip and original_slug:
+                _set_active(original_slug)
 
     state._mam_scan_task = asyncio.create_task(_do_scan())
     return {"status": "started", "author": author_name, "total": len(book_rows)}
