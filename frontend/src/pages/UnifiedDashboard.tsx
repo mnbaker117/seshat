@@ -23,7 +23,11 @@ export default function UnifiedDashboard({ onNav }: Props) {
   const [settings, setSettings] = useState<any>(null);
   const [cd, setCd] = useState(POLL);
   const [scanStatus, setScanStatus] = useState<any>(null);
-  const [syncing, setSyncing] = useState(false);
+  // Per-slug syncing spinner state. Serialized server-side (only one
+  // library sync runs at a time via _library_sync_in_progress), but
+  // the UI tracks per-slug so the clicked button is the one that
+  // spins — not every Sync button at once.
+  const [syncingSlug, setSyncingSlug] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [mamScanning, setMamScanning] = useState(false);
 
@@ -67,19 +71,31 @@ export default function UnifiedDashboard({ onNav }: Props) {
   const cwaUrl = settings?.cwa_web_url || "";
   const calibreUrl = settings?.calibre_web_url || "";
 
-  // Scan progress — API returns {scans: [{kind: "lookup"}, {kind: "mam"}, {kind: "library"}]}
+  // Scan progress — API returns {scans: [...{kind: "lookup"}, {kind: "mam"}, {kind: "library", slug}...]}
+  // Libraries are now keyed per-slug: Calibre and Audiobookshelf each
+  // get their own entry so the Command Center shows dedicated rows
+  // with independent in-flight progress + "(Last Sync: …)" timestamps.
   const scansArr = scanStatus?.scans || [];
-  const libScan = scansArr.find(s => s.kind === "library") || {};
+  const libScans = scansArr.filter(s => s.kind === "library");
   const srcScan = scansArr.find(s => s.kind === "lookup") || {};
   const mamScan = scansArr.find(s => s.kind === "mam") || {};
 
-  const triggerSync = async () => { setSyncing(true); try { await api.post("/discovery/sync/library"); } catch {} setSyncing(false); refresh(); };
+  const triggerSync = async (slug?: string) => {
+    setSyncingSlug(slug || "__active__");
+    try {
+      const qs = slug ? `?slug=${encodeURIComponent(slug)}` : "";
+      await api.post(`/discovery/sync/library${qs}`);
+    } catch {}
+    setSyncingSlug(null);
+    refresh();
+  };
   const triggerSources = async () => { setScanning(true); try { await api.post("/discovery/lookup"); } catch {} setScanning(false); refresh(); };
   const triggerMam = async () => { setMamScanning(true); try { await api.post("/discovery/mam/scan"); } catch {} setMamScanning(false); refresh(); };
   const cancelSources = async () => { try { await api.post("/discovery/lookup/cancel"); } catch {} refresh(); };
   const cancelMam = async () => { try { await api.post("/discovery/mam/scan/cancel"); } catch {} refresh(); };
 
-  const anyRunning = libScan.running || srcScan.running || mamScan.running || syncing;
+  const anyLibRunning = libScans.some(s => s.running);
+  const anyRunning = anyLibRunning || srcScan.running || mamScan.running || syncingSlug !== null;
   const pollMs = anyRunning ? 3000 : POLL * 1000;
   useVisibleInterval(refresh, pollMs);
   useVisibleInterval(() => setCd(c => Math.max(0, c - 1)), 1000);
@@ -215,7 +231,18 @@ export default function UnifiedDashboard({ onNav }: Props) {
           <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 0, alignItems: "stretch" }}>
             {/* Trigger buttons */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingRight: 16 }}>
-              <CmdBtn label={<><Dot color={t.jade} /> Sync Library</>} busy={syncing || libScan.running} onClick={triggerSync} />
+              {libScans.map(ls => {
+                const color = ls.content_type === "audiobook" ? t.pur : t.jade;
+                const shortLabel = ls.label?.replace(/\s*Sync$/, "") || ls.slug;
+                return (
+                  <CmdBtn
+                    key={ls.slug}
+                    label={<><Dot color={color} /> Sync {shortLabel}</>}
+                    busy={syncingSlug === ls.slug || ls.running}
+                    onClick={() => triggerSync(ls.slug)}
+                  />
+                );
+              })}
               <CmdBtn label={<><Dot color={t.cyan} /> Scan Sources</>} busy={scanning || srcScan.running} onClick={triggerSources} />
               <CmdBtn label={<><Dot color={t.ylw} /> MAM Scan</>} busy={mamScanning || mamScan.running} onClick={triggerMam} />
               <div style={{ borderTop: `1px solid ${t.borderL}`, paddingTop: 6, marginTop: 4, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -226,7 +253,9 @@ export default function UnifiedDashboard({ onNav }: Props) {
             {/* Progress display */}
             <div style={{ ...vsep, paddingRight: 40 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase", marginBottom: 8 }}>Progress</div>
-              <ProgressRow label="Library Sync" scan={libScan} t={t} />
+              {libScans.map(ls => (
+                <ProgressRow key={ls.slug} label={ls.label || "Library Sync"} scan={ls} t={t} />
+              ))}
               <ProgressRow label="Source Scan" scan={srcScan} t={t} onCancel={srcScan.running ? cancelSources : undefined} />
               <ProgressRow label="MAM Scan" scan={mamScan} t={t} onCancel={mamScan.running ? cancelMam : undefined} />
             </div>

@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.discovery.calibre_sync import sync_calibre
 from app.config import load_settings, save_settings
-from app.discovery.database import get_active_library, get_db
+from app.discovery.database import get_active_library, get_db, set_active_library
 from app.library_apps import get_app
 from app.discovery.lookup import run_full_lookup, run_full_rescan
 from app import state
@@ -43,21 +43,33 @@ router = APIRouter(prefix="/api/discovery", tags=["scan"])
 
 # ─── Library Sync ────────────────────────────────────────────
 @router.post("/sync/library")
-async def trigger_sync():
-    """Manual sync of the active library.
+async def trigger_sync(slug: str | None = None):
+    """Manual sync of a specific library (defaults to the active one).
 
-    Routes through the active library backend's `sync()` method via
+    `slug` targets a specific discovered library so the Command Center
+    can offer per-library sync buttons (Calibre + ABS) without flipping
+    the user's active library. Sync functions read the active slug via
+    `get_active_library()`, so we temporarily switch it for the sync
+    and restore the original afterward — same pattern scheduled_jobs
+    uses for its iteration.
+
+    Routes through the target library backend's `sync()` method via
     its `LibraryApp` adapter. Flagged through
     `state._library_sync_in_progress` so MAM and other write-heavy
     background tasks yield to us cleanly.
     """
-    active_slug = get_active_library()
-    lib = next((l for l in state._discovered_libraries if l["slug"] == active_slug), None)
+    original_active = get_active_library()
+    target_slug = slug or original_active
+    lib = next((l for l in state._discovered_libraries if l["slug"] == target_slug), None)
+    if slug and not lib:
+        raise HTTPException(404, f"Library '{slug}' not found")
     # Flag the sync so background writers (MAM scanner) yield to us
     # instead of racing on the write lock. Always cleared in finally.
     state._library_sync_in_progress = True
     try:
         if lib:
+            if slug and slug != original_active:
+                set_active_library(slug)
             app_instance = get_app(lib.get("app_type", "calibre"))
             if app_instance:
                 result = await app_instance.sync(lib)
@@ -66,7 +78,7 @@ async def trigger_sync():
             # Update mtime after successful manual sync
             s = load_settings()
             mtimes = s.get("library_mtimes", {})
-            mtimes[active_slug] = app_instance.get_mtime(lib) if app_instance else os.path.getmtime(lib["source_db_path"])
+            mtimes[target_slug] = app_instance.get_mtime(lib) if app_instance else os.path.getmtime(lib["source_db_path"])
             s["library_mtimes"] = mtimes
             save_settings(s)
             try:
@@ -96,6 +108,8 @@ async def trigger_sync():
         raise HTTPException(500, str(e))
     finally:
         state._library_sync_in_progress = False
+        if slug and slug != original_active and original_active:
+            set_active_library(original_active)
 
 
 # Back-compat aliases. /sync/calibre is what the original public release
@@ -315,46 +329,46 @@ def _project_mam() -> dict:
     }
 
 
-def _project_library() -> dict:
-    """Project `_library_sync_progress` into the unified shape.
+def _project_libraries() -> list[dict]:
+    """Project per-library sync progress into the unified shape.
 
-    Library sync is the third "kind" in the unified scan widget,
-    alongside `lookup` and `mam`. This lets the user see exactly how
-    far a sync has gotten before kicking off another scan that would
-    block behind it (the `_library_sync_in_progress` flag still gates
-    writers — see the active backend's `sync()` method and the MAM
-    scanner's wait-for-other-writers loop).
+    Emits one entry per discovered library so the Command Center can
+    render a dedicated row for Calibre and Audiobookshelf simultaneously,
+    each with its own "(Last Sync: …)" stamp and in-flight progress
+    bar. Syncs are still serialized through `_library_sync_in_progress`;
+    the per-slug keying exists so a just-completed Calibre sync doesn't
+    get erased when ABS starts, and vice versa.
 
-    The `label` here passes the active library's `display_name`
-    through `_label_for` so a Calibre sync renders as "Calibre Sync"
-    today and a future Audiobookshelf sync would render as
-    "Audiobookshelf Sync" automatically — no projection changes
-    required when a new backend lands.
+    Libraries that have never been synced still get an idle entry (via
+    `get_lib_progress` lazily seeding) so every row renders at startup
+    instead of appearing only after the first sync completes.
     """
-    p = state._library_sync_progress
-    # Look up the active library's display_name for the label.
-    active_slug = get_active_library()
-    lib = next(
-        (l for l in state._discovered_libraries if l["slug"] == active_slug),
-        None,
-    )
-    display_name = (lib or {}).get("display_name") or "Library"
-    return {
-        "kind": "library",
-        "type": p.get("type", "none"),
-        "label": _label_for("library", display_name),
-        "running": bool(p.get("running")),
-        "current": p.get("current", 0),
-        "total": p.get("total", 0),
-        "current_label": None,
-        "current_book": p.get("current_book", "") or None,
-        "status": p.get("status", "idle"),
-        "completed_at": _stamp_completed(p),
-        "extra": {
-            "books_new": p.get("books_new", 0),
-            "books_updated": p.get("books_updated", 0),
-        },
-    }
+    out: list[dict] = []
+    for lib in state._discovered_libraries:
+        slug = lib["slug"]
+        p = state.get_lib_progress(slug)
+        display_name = lib.get("display_name") or lib.get("name") or "Library"
+        out.append({
+            "kind": "library",
+            "slug": slug,
+            "app_type": lib.get("app_type", ""),
+            "content_type": lib.get("content_type", "ebook"),
+            "type": p.get("type", "none"),
+            "label": _label_for("library", display_name),
+            "running": bool(p.get("running")),
+            "current": p.get("current", 0),
+            "total": p.get("total", 0),
+            "current_label": None,
+            "current_book": p.get("current_book", "") or None,
+            "status": p.get("status", "idle"),
+            "completed_at": _stamp_completed(p),
+            "extra": {
+                "books_new": p.get("books_new", 0),
+                "books_updated": p.get("books_updated", 0),
+                "books_pruned": p.get("books_pruned", 0),
+            },
+        })
+    return out
 
 
 @router.get("/scan-status")
@@ -369,11 +383,13 @@ async def scan_status():
     auto-hides when nothing has run yet.
     """
     out = []
-    for proj in (_project_lookup(), _project_mam(), _project_library()):
+    for proj in (_project_lookup(), _project_mam(), *_project_libraries()):
         # Hide entries that are pristine idle (never ran). Keep complete
         # ones so the user sees the result of the last scan even after
-        # it finishes.
-        if proj["status"] == "idle" and proj["type"] == "none":
+        # it finishes. Library rows are always kept so the Command
+        # Center shows every library (Calibre, ABS) as a dedicated row
+        # even before the first scheduled sync tick fires.
+        if proj.get("kind") != "library" and proj["status"] == "idle" and proj["type"] == "none":
             continue
         out.append(proj)
     return {"scans": out}

@@ -40,6 +40,8 @@ async def sync_audiobookshelf(library: dict) -> dict:
 
     abs_url = library.get("abs_base_url", "")
     abs_library_id = library.get("abs_library_id", "")
+    slug = library.get("slug", "")
+    progress = state.get_lib_progress(slug) if slug else {}
     if not abs_url or not abs_library_id:
         raise ValueError(
             f"ABS sync requires abs_base_url and abs_library_id; got library={library}"
@@ -74,7 +76,7 @@ async def sync_audiobookshelf(library: dict) -> dict:
         books = [_flatten_item(it) for it in items]
         books = [b for b in books if b is not None]
 
-        state._library_sync_progress = {
+        progress.update({
             "running": True,
             "current": 0,
             "total": len(books),
@@ -84,7 +86,8 @@ async def sync_audiobookshelf(library: dict) -> dict:
             "books_pruned": 0,
             "status": "scanning",
             "type": "manual",
-        }
+        })
+        progress.pop("completed_at", None)
 
         # ── Pass 1: authors ────────────────────────────────────
         # ABS gives a single comma-joined `authorName` string. We
@@ -168,8 +171,8 @@ async def sync_audiobookshelf(library: dict) -> dict:
             if not book["authors"]:
                 continue
             books_found += 1
-            state._library_sync_progress["current"] = books_found
-            state._library_sync_progress["current_book"] = book["title"]
+            progress["current"] = books_found
+            progress["current_book"] = book["title"]
 
             our_author_id = author_id_map.get(book["authors"][0])
             if not our_author_id:
@@ -210,7 +213,7 @@ async def sync_audiobookshelf(library: dict) -> dict:
                         existing["id"],
                     ),
                 )
-                state._library_sync_progress["books_updated"] += 1
+                progress["books_updated"] += 1
             else:
                 await db.execute(
                     """
@@ -233,7 +236,7 @@ async def sync_audiobookshelf(library: dict) -> dict:
                     ),
                 )
                 books_new += 1
-                state._library_sync_progress["books_new"] += 1
+                progress["books_new"] += 1
 
         # ── Pass 4: reconcile ──────────────────────────────────
         # Prune audiobookshelf-sourced rows that no longer exist in ABS
@@ -254,7 +257,7 @@ async def sync_audiobookshelf(library: dict) -> dict:
                     f"ABS sync: pruned {books_pruned} stale row(s) "
                     f"no longer in ABS"
                 )
-        state._library_sync_progress["books_pruned"] = books_pruned
+        progress["books_pruned"] = books_pruned
 
         await db.commit()
         await db.execute(
@@ -268,10 +271,11 @@ async def sync_audiobookshelf(library: dict) -> dict:
             f"ABS sync complete: {books_found} books, "
             f"{books_new} new, {books_pruned} pruned"
         )
-        state._library_sync_progress.update({
+        progress.update({
             "running": False,
             "current_book": "",
             "status": "complete",
+            "completed_at": time.time(),
         })
         return {
             "books_found": books_found,
@@ -286,10 +290,11 @@ async def sync_audiobookshelf(library: dict) -> dict:
                 (time.time(), str(e), sync_id),
             )
             await db.commit()
-        state._library_sync_progress.update({
+        progress.update({
             "running": False,
             "current_book": "",
             "status": f"error: {e}",
+            "completed_at": time.time(),
         })
         raise
     finally:

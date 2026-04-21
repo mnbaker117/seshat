@@ -763,17 +763,20 @@ async def lifespan(app: FastAPI):
         # keeps the display consistent across startup and scheduled runs.
         # `sync_calibre` / `sync_audiobookshelf` already populate the
         # progress dict during actual syncs, so only the all-skipped
-        # branch needs an explicit completion update here.
+        # branch needs an explicit completion update here. Stamp every
+        # discovered library so the Command Center shows a timestamp
+        # per row immediately at startup (not just the active one).
         if not any_synced:
-            state._library_sync_progress.update({
-                "running": False,
-                "status": "complete",
-                "type": "startup_skip",
-                "current": 0,
-                "total": 0,
-                "current_book": "",
-                "completed_at": _time.time(),
-            })
+            for lib in state._discovered_libraries:
+                state.get_lib_progress(lib["slug"]).update({
+                    "running": False,
+                    "status": "complete",
+                    "type": "startup_skip",
+                    "current": 0,
+                    "total": 0,
+                    "current_book": "",
+                    "completed_at": _time.time(),
+                })
 
     # Per-source rate limits and the Hardcover API key are read once
     # into module-level source instances at import time. Refresh them

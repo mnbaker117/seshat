@@ -199,8 +199,16 @@ _last_library_sync_check: Dict[str, Any] = {"at": None, "synced": False}
 # flag before grabbing the DB write lock so they yield cleanly.
 _library_sync_in_progress: bool = False
 
-# Per-book progress for the active library sync.
-_library_sync_progress: Dict[str, Any] = {
+# Per-library sync progress keyed by library slug. Each entry mirrors
+# the old single-dict shape (running/current/total/current_book/status
+# /type/books_new/books_updated/completed_at). Keyed by slug so the
+# Command Center can show Calibre AND Audiobookshelf rows side-by-side
+# each with their own in-flight stats and last-sync timestamp. Syncs
+# are still serialized through `_library_sync_in_progress`; the keying
+# exists to preserve per-library history across alternating syncs.
+_library_sync_progress: Dict[str, Dict[str, Any]] = {}
+
+_IDLE_LIB_PROGRESS: Dict[str, Any] = {
     "running": False,
     "current": 0,
     "total": 0,
@@ -210,6 +218,18 @@ _library_sync_progress: Dict[str, Any] = {
     "status": "idle",
     "type": "none",
 }
+
+
+def get_lib_progress(slug: str) -> Dict[str, Any]:
+    """Return the per-slug progress dict, lazily creating an idle one.
+
+    Readers and writers both use this helper so the keying invariant
+    lives in one place. Returns the live dict (not a copy) so callers
+    can mutate fields directly without another lookup.
+    """
+    if slug not in _library_sync_progress:
+        _library_sync_progress[slug] = dict(_IDLE_LIB_PROGRESS)
+    return _library_sync_progress[slug]
 
 # Author lookup scan state.
 _lookup_task: Optional[asyncio.Task] = None

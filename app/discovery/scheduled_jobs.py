@@ -119,17 +119,19 @@ async def sync_all_libraries() -> None:
         # value freezes at the last real sync and users correctly suspect
         # the scheduler stopped. sync_calibre already updates the progress
         # dict on actual syncs — we only need to handle the all-skipped
-        # case here.
+        # case here. Stamp every discovered library's per-slug dict so
+        # both Calibre and ABS rows advance together on a no-op tick.
         if not any_synced:
-            state._library_sync_progress.update({
-                "running": False,
-                "status": "complete",
-                "type": "scheduled_skip",
-                "current": 0,
-                "total": 0,
-                "current_book": "",
-                "completed_at": time.time(),
-            })
+            for lib in state._discovered_libraries:
+                state.get_lib_progress(lib["slug"]).update({
+                    "running": False,
+                    "status": "complete",
+                    "type": "scheduled_skip",
+                    "current": 0,
+                    "total": 0,
+                    "current_book": "",
+                    "completed_at": time.time(),
+                })
 
         # Post-sync: refresh cross-library work links once the ebook
         # + audiobook libraries are both current. Only run when at

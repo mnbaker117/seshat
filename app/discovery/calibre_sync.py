@@ -195,6 +195,14 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
     lib_path = calibre_library_path or CALIBRE_LIBRARY_PATH
     logger.info(f"Starting Calibre sync from {cal_path}...")
     start_time = time.time()
+    # Slug is whichever library is active during this call — callers
+    # (main.py lifespan, scheduled_jobs, trigger_sync) always set it
+    # via `set_active_library` before invoking us. Per-slug progress
+    # means Calibre + ABS each keep their own last-sync timestamp and
+    # in-flight display, instead of stomping a single shared dict.
+    from app.discovery.database import get_active_library
+    slug = get_active_library() or "calibre"
+    progress = state.get_lib_progress(slug)
 
     db = await get_db()
     try:
@@ -212,7 +220,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
         # captures the total upfront (right after metadata.db has been
         # read, before any upserts start) so the widget can render a
         # real progress bar instead of an indeterminate spinner.
-        state._library_sync_progress = {
+        progress.update({
             "running": True,
             "current": 0,
             "total": len(calibre_data["books"]),
@@ -222,7 +230,8 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
             "books_pruned": 0,
             "status": "scanning",
             "type": "manual",
-        }
+        })
+        progress.pop("completed_at", None)
 
         # Pass 1: upsert authors
         author_map = {}  # calibre_author_id -> our_id
@@ -309,8 +318,8 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
             # `current` advances AFTER the no-author skip so the
             # progress bar reflects books actually being processed,
             # not raw iteration count.
-            state._library_sync_progress["current"] = books_found
-            state._library_sync_progress["current_book"] = book["title"]
+            progress["current"] = books_found
+            progress["current_book"] = book["title"]
 
             primary_cal_id = book["authors"][0]["id"]
             our_author_id = author_map.get(primary_cal_id)
@@ -341,7 +350,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                       book["description"], book["tags"], book["rating"],
                       book["language"], book["publisher"], book["formats"],
                       row["id"]))
-                state._library_sync_progress["books_updated"] += 1
+                progress["books_updated"] += 1
                 logger.debug(f"  Calibre: updated '{book['title']}' (calibre_id={book['book_id']}, tags={book['tags']}, rating={book['rating']})")
             else:
                 # Before INSERTing a new Calibre row, look for a matching
@@ -382,7 +391,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                           book["description"], book["tags"], book["rating"],
                           book["language"], book["publisher"], book["formats"],
                           target_id))
-                    state._library_sync_progress["books_updated"] += 1
+                    progress["books_updated"] += 1
                     logger.info(
                         f"  Calibre: merged Missing row id={target_id} with "
                         f"new Calibre book_id={book['book_id']} ('{book['title']}')"
@@ -399,7 +408,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                           book["description"], book["tags"], book["rating"],
                           book["language"], book["publisher"], book["formats"]))
                     books_new += 1
-                    state._library_sync_progress["books_new"] += 1
+                    progress["books_new"] += 1
                     logger.debug(f"  Calibre: NEW '{book['title']}' by {book['authors'][0]['name']} (tags={book['tags']}, lang={book['language']})")
 
             # Flip ownership on any pre-existing discovery row that
@@ -445,7 +454,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                     f"Calibre sync: pruned {books_pruned} stale row(s) "
                     f"no longer in metadata.db"
                 )
-        state._library_sync_progress["books_pruned"] = books_pruned
+        progress["books_pruned"] = books_pruned
 
         await db.commit()
 
@@ -459,10 +468,11 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
             f"Calibre sync complete: {books_found} books, "
             f"{books_new} new, {books_pruned} pruned"
         )
-        state._library_sync_progress.update({
+        progress.update({
             "running": False,
             "current_book": "",
             "status": "complete",
+            "completed_at": time.time(),
         })
         return {
             "books_found": books_found,
@@ -477,10 +487,11 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
             (time.time(), str(e), sync_id)
         )
         await db.commit()
-        state._library_sync_progress.update({
+        progress.update({
             "running": False,
             "current_book": "",
             "status": f"error: {e}",
+            "completed_at": time.time(),
         })
         raise
     finally:
