@@ -126,8 +126,17 @@ async def _tick_inner(deps: DispatcherDeps, db) -> TickResult:
     # row in time for `check_for_completions` on this same tick. The
     # adopt pass creates state=submitted rows; the check pass then
     # sees each one and fires the pipeline if the download is done.
+    #
+    # `qbit_orphan_adoption_since` is the grandfather line — only
+    # torrents added to qBit AFTER this Unix timestamp get adopted.
+    # See DEFAULT_SETTINGS for why this filter exists (early Phase 6
+    # build adopted every pre-existing torrent in the watch category
+    # on first tick, flooding the review queue).
     try:
-        adopted = await adopt_orphan_torrents(db, qbit_torrents)
+        adopted = await adopt_orphan_torrents(
+            db, qbit_torrents,
+            adoption_cutoff=deps.qbit_orphan_adoption_since,
+        )
         if adopted:
             _log.info(
                 "budget watcher: adopted %d orphan qBit torrent(s) "

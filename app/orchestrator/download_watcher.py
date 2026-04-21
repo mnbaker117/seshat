@@ -65,6 +65,8 @@ class CompletionEvent:
 async def adopt_orphan_torrents(
     db: aiosqlite.Connection,
     qbit_torrents: list,
+    *,
+    adoption_cutoff: float,
 ) -> int:
     """Create grab rows for torrents qBit has but Seshat doesn't know about.
 
@@ -78,6 +80,17 @@ async def adopt_orphan_torrents(
     qbit_hash set. `check_for_completions()` on the same tick picks
     up any that are already done; ones still downloading get caught
     on a future tick.
+
+    `adoption_cutoff` is a Unix timestamp — only torrents with
+    `added_on >= adoption_cutoff` are considered. This is load-
+    bearing: without it, the first tick after deploying the adopter
+    code re-adopts EVERY pre-existing torrent in the watch category
+    (which on a long-running qBit instance can be thousands of
+    already-processed books), flooding the review queue and
+    re-staging files that were delivered months ago. The caller
+    seeds the cutoff on first run to the current time, meaning only
+    freshly-added torrents after the upgrade get adopted. Pass 0 to
+    disable the time filter entirely (tests only).
 
     MAM-safe: zero outbound traffic. Pure local observation.
 
@@ -98,6 +111,12 @@ async def adopt_orphan_torrents(
     for t in qbit_torrents:
         h = getattr(t, "hash", "") or ""
         if not h or h in known:
+            continue
+        added_on = int(getattr(t, "added_on", 0) or 0)
+        if adoption_cutoff and added_on < adoption_cutoff:
+            # Pre-existing torrent — predates the adopter feature
+            # being enabled for this deployment. Silently skip so
+            # long-standing qBit snapshots don't flood the pipeline.
             continue
         name = getattr(t, "name", "") or f"manual_{h[:12]}"
         grab_id = await grabs_storage.create_grab(

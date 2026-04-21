@@ -152,6 +152,11 @@ class DispatcherDeps:
     review_queue_enabled: bool = True
     review_staging_path: str = ""
     metadata_review_timeout_days: int = 14
+    # Orphan adoption cutoff — only qBit torrents with
+    # `added_on >= qbit_orphan_adoption_since` get adopted. Defaults
+    # to 0 for tests / backward compat (no filter); production sets it
+    # from settings at dispatcher-build time.
+    qbit_orphan_adoption_since: float = 0.0
 
     # Tier 4 metadata enrichment. The enricher instance is built
     # at startup from settings and passed through here so the

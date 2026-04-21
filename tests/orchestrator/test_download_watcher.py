@@ -21,6 +21,7 @@ class _FakeQbitTorrent:
     """Stand-in for the real QbitTorrent snapshot fields used by the adopter."""
     hash: str
     name: str
+    added_on: int = 0
 
 
 async def _insert_submitted_grab(db, torrent_id: str, qbit_hash: str) -> int:
@@ -170,7 +171,7 @@ class TestAdoptOrphanTorrents:
                 _FakeQbitTorrent(hash="orphan_aaa", name="Manual Book A"),
                 _FakeQbitTorrent(hash="orphan_bbb", name="Manual Book B"),
             ]
-            adopted = await adopt_orphan_torrents(db, torrents)
+            adopted = await adopt_orphan_torrents(db, torrents, adoption_cutoff=0)
             assert adopted == 2
 
             # Both grabs should exist in submitted state with qbit_hash set.
@@ -198,7 +199,7 @@ class TestAdoptOrphanTorrents:
                 _FakeQbitTorrent(hash="known_hash", name="Already Tracked"),
                 _FakeQbitTorrent(hash="orphan_new", name="New Manual Add"),
             ]
-            adopted = await adopt_orphan_torrents(db, torrents)
+            adopted = await adopt_orphan_torrents(db, torrents, adoption_cutoff=0)
             assert adopted == 1  # only orphan_new
 
             cursor = await db.execute("SELECT COUNT(*) as cnt FROM grabs")
@@ -210,8 +211,65 @@ class TestAdoptOrphanTorrents:
     async def test_empty_list_noop(self, temp_db):
         db = await get_db()
         try:
-            adopted = await adopt_orphan_torrents(db, [])
+            adopted = await adopt_orphan_torrents(db, [], adoption_cutoff=0)
             assert adopted == 0
+        finally:
+            await db.close()
+
+    async def test_cutoff_skips_pre_existing_torrents(self, temp_db):
+        """Grandfather line: torrents added before `adoption_cutoff` are
+        silently skipped. This is the fix for the cascade bug — without
+        it, the first tick after deploying the adopter would re-adopt
+        every pre-existing torrent in the watch category (thousands on
+        a long-running qBit instance), flooding the review queue.
+        """
+        db = await get_db()
+        try:
+            cutoff = 1_700_000_000  # a fixed Unix timestamp
+            torrents = [
+                _FakeQbitTorrent(
+                    hash="old_aaa", name="Pre-existing",
+                    added_on=cutoff - 86400,
+                ),
+                _FakeQbitTorrent(
+                    hash="new_bbb", name="Fresh Manual Add",
+                    added_on=cutoff + 3600,
+                ),
+                _FakeQbitTorrent(
+                    hash="exact_ccc", name="Added exactly at cutoff",
+                    added_on=cutoff,
+                ),
+            ]
+            adopted = await adopt_orphan_torrents(
+                db, torrents, adoption_cutoff=cutoff,
+            )
+            assert adopted == 2  # fresh + exact-boundary, not pre-existing
+
+            cursor = await db.execute(
+                "SELECT qbit_hash FROM grabs ORDER BY id"
+            )
+            rows = await cursor.fetchall()
+            hashes = {r["qbit_hash"] for r in rows}
+            assert hashes == {"new_bbb", "exact_ccc"}
+        finally:
+            await db.close()
+
+    async def test_cutoff_zero_disables_filter(self, temp_db):
+        """`adoption_cutoff=0` disables the time filter (tests + backward
+        compat). All unknown torrents get adopted regardless of added_on.
+        """
+        db = await get_db()
+        try:
+            torrents = [
+                _FakeQbitTorrent(
+                    hash="ancient", name="Very Old",
+                    added_on=1,  # effectively "forever ago"
+                ),
+            ]
+            adopted = await adopt_orphan_torrents(
+                db, torrents, adoption_cutoff=0,
+            )
+            assert adopted == 1
         finally:
             await db.close()
 
@@ -222,7 +280,7 @@ class TestAdoptOrphanTorrents:
                 _FakeQbitTorrent(hash="", name="No Hash"),
                 _FakeQbitTorrent(hash="orphan_ccc", name="Valid"),
             ]
-            adopted = await adopt_orphan_torrents(db, torrents)
+            adopted = await adopt_orphan_torrents(db, torrents, adoption_cutoff=0)
             assert adopted == 1
         finally:
             await db.close()
@@ -235,7 +293,7 @@ class TestAdoptOrphanTorrents:
             torrents = [
                 _FakeQbitTorrent(hash="orphan_done", name="Finished Manual Add"),
             ]
-            await adopt_orphan_torrents(db, torrents)
+            await adopt_orphan_torrents(db, torrents, adoption_cutoff=0)
 
             snapshot = {
                 "orphan_done": TorrentSnap(

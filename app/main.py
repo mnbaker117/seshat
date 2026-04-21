@@ -327,6 +327,9 @@ async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> Di
         review_queue_enabled=bool(settings.get("review_queue_enabled", True)),
         review_staging_path=settings.get("review_staging_path", ""),
         metadata_review_timeout_days=int(settings.get("metadata_review_timeout_days", 14)),
+        qbit_orphan_adoption_since=float(
+            settings.get("qbit_orphan_adoption_since", 0) or 0
+        ),
         default_sink=settings.get("default_sink", "calibre"),
         calibre_library_path=settings.get("calibre_library_path", ""),
         folder_sink_path=settings.get("folder_sink_path", ""),
@@ -439,6 +442,25 @@ async def lifespan(app: FastAPI):
     apply_logging(settings.get("verbose_logging", False))
     install_log_handler()
     _log.info("Seshat starting")
+
+    # Grandfather-line initialization for qBit orphan adoption.
+    # `qbit_orphan_adoption_since` defaults to 0; on the first boot of
+    # any build that contains the adopter, set it to `time.time()` so
+    # pre-existing torrents in the watch category (potentially
+    # thousands on long-running qBit instances) aren't mass-adopted
+    # into the pipeline. Once initialized it's never auto-updated —
+    # the user can reset via Settings if they want a different cutoff.
+    if settings.get("qbit_orphan_adoption_since", 0) == 0:
+        import time as _time_init
+        from app.config import save_settings as _save
+        settings["qbit_orphan_adoption_since"] = _time_init.time()
+        _save(settings)
+        _log.info(
+            "qBit orphan adoption cutoff initialized to %s (pre-existing "
+            "torrents in the watch category will NOT be adopted)",
+            settings["qbit_orphan_adoption_since"],
+        )
+
     await init_db()
     _log.info("Database initialized")
     await init_auth_db()

@@ -239,6 +239,17 @@ DEFAULT_SETTINGS = {
     "qbit_username": "",
     "qbit_password": "",
     "qbit_watch_category": "[mam-reseed]",
+    # Unix timestamp — grandfather line for qBit orphan adoption.
+    # The download watcher only adopts torrents with
+    # `added_on >= qbit_orphan_adoption_since`. Older torrents in the
+    # watch category (pre-Seshat / Hermeece-era / prior install) are
+    # treated as pre-existing and skipped, so a long-running qBit
+    # instance with thousands of seeding books doesn't get
+    # mass-adopted on first tick after deploying the adopter.
+    # Initialized to `time.time()` once at lifespan startup when the
+    # stored value is still 0 (the DEFAULT_SETTINGS sentinel). Never
+    # auto-updated after that.
+    "qbit_orphan_adoption_since": 0,
     # Comma-separated tag list applied to every torrent Seshat
     # submits to qBit. Lines up with the user's existing
     # manual-seed / autobrr-seed / seshat-seed convention so
