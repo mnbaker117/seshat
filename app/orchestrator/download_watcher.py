@@ -62,6 +62,65 @@ class CompletionEvent:
     pipeline_run_id: int
 
 
+async def adopt_orphan_torrents(
+    db: aiosqlite.Connection,
+    qbit_torrents: list,
+) -> int:
+    """Create grab rows for torrents qBit has but Seshat doesn't know about.
+
+    Handles the manual-add workflow: user downloads a .torrent from
+    MAM and drops it into qBit directly (or any other non-Seshat
+    tool puts a torrent in the watched category). Without a grabs
+    row the download watcher silently ignores the completion, so
+    manually-added books never flow through the pipeline.
+
+    We insert one row per unknown qBit hash with state=submitted and
+    qbit_hash set. `check_for_completions()` on the same tick picks
+    up any that are already done; ones still downloading get caught
+    on a future tick.
+
+    MAM-safe: zero outbound traffic. Pure local observation.
+
+    `mam_torrent_id` is intentionally blank — we didn't fetch this
+    from MAM, so there's no authoritative ID to record. Callers that
+    need provenance can filter on `category = 'manual_add'`.
+    """
+    if not qbit_torrents:
+        return 0
+
+    cursor = await db.execute(
+        "SELECT qbit_hash FROM grabs WHERE qbit_hash IS NOT NULL"
+    )
+    rows = await cursor.fetchall()
+    known = {row["qbit_hash"] for row in rows if row["qbit_hash"]}
+
+    adopted = 0
+    for t in qbit_torrents:
+        h = getattr(t, "hash", "") or ""
+        if not h or h in known:
+            continue
+        name = getattr(t, "name", "") or f"manual_{h[:12]}"
+        grab_id = await grabs_storage.create_grab(
+            db,
+            announce_id=None,
+            mam_torrent_id="",
+            torrent_name=name,
+            category="manual_add",
+            author_blob="",
+            state=grabs_storage.STATE_SUBMITTED,
+        )
+        await grabs_storage.set_state(
+            db, grab_id, grabs_storage.STATE_SUBMITTED, qbit_hash=h,
+        )
+        adopted += 1
+        _log.info(
+            "download watcher: adopted orphan torrent grab_id=%d hash=%s name=%r",
+            grab_id, h[:16], name,
+        )
+
+    return adopted
+
+
 async def check_for_completions(
     db: aiosqlite.Connection,
     qbit_snapshot: dict[str, "TorrentSnap"],

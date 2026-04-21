@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -82,6 +83,50 @@ DEFAULT_AUDIOBOOK_PRIORITY: tuple[str, ...] = (
     "hardcover",
     "google_books",
 )
+
+# Audiobook title sanitization. MAM filenames often carry
+# `[Series N]` / `(Unabridged)` / `, Book 5` suffixes that the
+# Audible + Audnexus catalogs don't, which breaks fuzzy title
+# matching. Stripped only for audiobook enrichment calls — the
+# canonical title stored on the review queue is untouched.
+_AB_BRACKET_TAIL_RX = re.compile(r"\s*\[[^\]]*\]\s*$")
+_AB_FORMAT_PAREN_RX = re.compile(
+    r"\s*\((unabridged|abridged|audio[\s-]?book|audible)\)\s*$",
+    re.IGNORECASE,
+)
+_AB_VOLUME_TAIL_RX = re.compile(
+    r"\s*[:,]\s*(book|vol\.?|volume|part)\s+\d+(?:\.\d+)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_audiobook_title(title: str) -> str:
+    """Normalize an audiobook title for external catalog search.
+
+    Runs when `enrich(audiobook=True)` is invoked — strips publisher
+    decorations that Audible / Audnexus don't reproduce. Ordering
+    matters: remove outer wrappers first, then the volume tail so
+    "Halo: Empty Throne [Halo 36] (Unabridged)" collapses cleanly to
+    "Halo: Empty Throne".
+
+    The cleaned string is what we hand to each audiobook source's
+    `search_book(title, author)` — the enricher never writes it back
+    onto the MetaRecord or review-queue row.
+    """
+    if not title:
+        return title
+    s = title
+    # Re-run each pass up to 3 times so stacked decorations unwind —
+    # "Title [X] [Y]" collapses fully instead of leaving "Title [X]".
+    for _ in range(3):
+        s_new = _AB_BRACKET_TAIL_RX.sub("", s)
+        s_new = _AB_FORMAT_PAREN_RX.sub("", s_new)
+        s_new = _AB_VOLUME_TAIL_RX.sub("", s_new)
+        if s_new == s:
+            break
+        s = s_new
+    return s.strip()
+
 
 # Accept threshold — records with confidence >= this are considered
 # good enough to stop searching. Tuned so exact and near-exact
@@ -196,6 +241,20 @@ class MetadataEnricher:
             return None
         if not title and not author:
             return None
+
+        # Audiobook title cleanup. Publisher decorations on MAM
+        # filenames ("Halo: Empty Throne [Halo 36]", "(Unabridged)")
+        # don't match Audible's catalog title. Strip them before the
+        # loop so every source gets the clean form — the canonical
+        # title in `metadata.title` is untouched.
+        if audiobook:
+            cleaned = _clean_audiobook_title(title)
+            if cleaned != title:
+                _log.debug(
+                    "enricher: audiobook title cleaned %r → %r for search",
+                    title, cleaned,
+                )
+                title = cleaned
 
         # Build the source list, injecting a MAM source with the
         # torrent ID if available. This is per-call because the

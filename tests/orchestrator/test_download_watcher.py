@@ -4,13 +4,23 @@ Unit tests for the post-download completion detector.
 Tests target `check_for_completions()` directly with a temp database
 and synthetic qBit snapshots.
 """
+from dataclasses import dataclass
+
 from app.database import get_db
 from app.orchestrator.download_watcher import (
     TorrentSnap,
+    adopt_orphan_torrents,
     check_for_completions,
 )
 from app.storage import grabs as grabs_storage
 from app.storage import pipeline as pipeline_storage
+
+
+@dataclass
+class _FakeQbitTorrent:
+    """Stand-in for the real QbitTorrent snapshot fields used by the adopter."""
+    hash: str
+    name: str
 
 
 async def _insert_submitted_grab(db, torrent_id: str, qbit_hash: str) -> int:
@@ -145,5 +155,96 @@ class TestCheckForCompletions:
 
             events = await check_for_completions(db, snapshot)
             assert len(events) == 0
+        finally:
+            await db.close()
+
+
+class TestAdoptOrphanTorrents:
+    """Fix: manually-added qBit torrents (no grabs row) get adopted so
+    the pipeline can process them when they finish."""
+
+    async def test_adopts_unknown_hashes(self, temp_db):
+        db = await get_db()
+        try:
+            torrents = [
+                _FakeQbitTorrent(hash="orphan_aaa", name="Manual Book A"),
+                _FakeQbitTorrent(hash="orphan_bbb", name="Manual Book B"),
+            ]
+            adopted = await adopt_orphan_torrents(db, torrents)
+            assert adopted == 2
+
+            # Both grabs should exist in submitted state with qbit_hash set.
+            cursor = await db.execute(
+                "SELECT qbit_hash, state, torrent_name, category, mam_torrent_id "
+                "FROM grabs ORDER BY id"
+            )
+            rows = await cursor.fetchall()
+            assert len(rows) == 2
+            assert rows[0]["qbit_hash"] == "orphan_aaa"
+            assert rows[0]["state"] == grabs_storage.STATE_SUBMITTED
+            assert rows[0]["torrent_name"] == "Manual Book A"
+            assert rows[0]["category"] == "manual_add"
+            # mam_torrent_id blank — we didn't pull this from MAM.
+            assert rows[0]["mam_torrent_id"] == ""
+        finally:
+            await db.close()
+
+    async def test_skips_known_hashes(self, temp_db):
+        db = await get_db()
+        try:
+            # Pre-existing grab for this hash.
+            await _insert_submitted_grab(db, "mam_111", "known_hash")
+            torrents = [
+                _FakeQbitTorrent(hash="known_hash", name="Already Tracked"),
+                _FakeQbitTorrent(hash="orphan_new", name="New Manual Add"),
+            ]
+            adopted = await adopt_orphan_torrents(db, torrents)
+            assert adopted == 1  # only orphan_new
+
+            cursor = await db.execute("SELECT COUNT(*) as cnt FROM grabs")
+            row = await cursor.fetchone()
+            assert row["cnt"] == 2  # one pre-existing + one adopted
+        finally:
+            await db.close()
+
+    async def test_empty_list_noop(self, temp_db):
+        db = await get_db()
+        try:
+            adopted = await adopt_orphan_torrents(db, [])
+            assert adopted == 0
+        finally:
+            await db.close()
+
+    async def test_skips_torrents_without_hash(self, temp_db):
+        db = await get_db()
+        try:
+            torrents = [
+                _FakeQbitTorrent(hash="", name="No Hash"),
+                _FakeQbitTorrent(hash="orphan_ccc", name="Valid"),
+            ]
+            adopted = await adopt_orphan_torrents(db, torrents)
+            assert adopted == 1
+        finally:
+            await db.close()
+
+    async def test_adopted_row_picked_up_by_completion_check(self, temp_db):
+        """Integration: adopt a torrent that's already finished, then the
+        completion check on the same tick should fire the pipeline."""
+        db = await get_db()
+        try:
+            torrents = [
+                _FakeQbitTorrent(hash="orphan_done", name="Finished Manual Add"),
+            ]
+            await adopt_orphan_torrents(db, torrents)
+
+            snapshot = {
+                "orphan_done": TorrentSnap(
+                    state="stalledUP", save_path="/dl/finished",
+                ),
+            }
+            events = await check_for_completions(db, snapshot)
+            assert len(events) == 1
+            assert events[0].qbit_hash == "orphan_done"
+            assert events[0].torrent_name == "Finished Manual Add"
         finally:
             await db.close()

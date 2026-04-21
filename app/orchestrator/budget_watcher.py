@@ -37,6 +37,7 @@ from app.orchestrator.dispatch import DispatcherDeps
 from app.orchestrator.download_folders import translate_path
 from app.orchestrator.download_watcher import (
     TorrentSnap,
+    adopt_orphan_torrents,
     check_for_completions,
 )
 from app.orchestrator.pipeline import process_completion
@@ -121,6 +122,20 @@ async def _tick_inner(deps: DispatcherDeps, db) -> TickResult:
         _log.exception("manual qBit extras count failed (non-fatal)")
 
     # ── Phase 1b: check for download completions ────────────
+    # Adopt orphan torrents first so manually-added books get a grab
+    # row in time for `check_for_completions` on this same tick. The
+    # adopt pass creates state=submitted rows; the check pass then
+    # sees each one and fires the pipeline if the download is done.
+    try:
+        adopted = await adopt_orphan_torrents(db, qbit_torrents)
+        if adopted:
+            _log.info(
+                "budget watcher: adopted %d orphan qBit torrent(s) "
+                "into the grabs table", adopted,
+            )
+    except Exception:
+        _log.exception("orphan adoption failed (non-fatal)")
+
     # Build the richer snapshot that the download watcher needs.
     # Translate qBit's save_path from qBit's container namespace
     # to Seshat's container namespace so the pipeline can find files.

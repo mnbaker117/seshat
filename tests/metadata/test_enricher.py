@@ -10,7 +10,11 @@ from typing import Optional
 
 import pytest
 
-from app.metadata.enricher import EnrichmentConfig, MetadataEnricher
+from app.metadata.enricher import (
+    EnrichmentConfig,
+    MetadataEnricher,
+    _clean_audiobook_title,
+)
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
 
@@ -190,3 +194,45 @@ class TestEnricher:
         assert audio_result.asin == "B00XYZ"
         # Ebook source wasn't consulted on the audiobook call.
         assert ebook_src.call_count == 1
+
+
+class TestCleanAudiobookTitle:
+    """MAM filenames carry publisher decorations that Audible's catalog
+    doesn't. The cleaner strips them so title searches hit."""
+
+    def test_strips_trailing_bracket(self):
+        assert _clean_audiobook_title("Halo: Empty Throne [Halo 36]") == "Halo: Empty Throne"
+
+    def test_strips_format_paren(self):
+        assert _clean_audiobook_title("The Way of Kings (Unabridged)") == "The Way of Kings"
+        assert _clean_audiobook_title("Dune (Audiobook)") == "Dune"
+        assert _clean_audiobook_title("Mistborn (Abridged)") == "Mistborn"
+
+    def test_strips_volume_tail(self):
+        assert _clean_audiobook_title("Mistborn, Book 1") == "Mistborn"
+        assert _clean_audiobook_title("The Stormlight Archive: Book 3") == "The Stormlight Archive"
+        assert _clean_audiobook_title("Some Series, Vol. 2") == "Some Series"
+
+    def test_strips_stacked_decorations(self):
+        """'Halo: Empty Throne [Halo 36] (Unabridged)' collapses fully."""
+        result = _clean_audiobook_title(
+            "Halo: Empty Throne [Halo 36] (Unabridged)"
+        )
+        assert result == "Halo: Empty Throne"
+
+    def test_empty_and_none_safe(self):
+        assert _clean_audiobook_title("") == ""
+        assert _clean_audiobook_title(None) is None
+
+    def test_preserves_clean_title(self):
+        """No-op on titles that don't carry decorations."""
+        assert _clean_audiobook_title("Project Hail Mary") == "Project Hail Mary"
+
+    def test_does_not_strip_midsentence_brackets(self):
+        """Only TRAILING brackets get stripped — internal ones are
+        part of the title. "2001: A Space Odyssey" with an inner
+        volume marker shouldn't lose its body."""
+        # This one has no trailing bracket so it's untouched.
+        assert _clean_audiobook_title(
+            "A Novel [Remastered Edition] with Extras"
+        ) == "A Novel [Remastered Edition] with Extras"
