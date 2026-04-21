@@ -150,7 +150,19 @@ async def _backfill_audio_companions(
 
     torrent = await qbit.get_torrent(qbit_hash)
     if torrent is not None and torrent.save_path:
-        qbit_save = Path(torrent.save_path)
+        # Apply the qbit_path_prefix → local_path_prefix translation
+        # (the rest of the pipeline does this in budget_watcher before
+        # emitting a CompletionEvent; the live qBit query bypasses that
+        # path). Unraid-style setups where qBit mounts /data and
+        # Seshat mounts /downloads need this or the raw qBit string
+        # doesn't resolve on our side.
+        from app.orchestrator.download_folders import translate_path
+        translated = translate_path(
+            torrent.save_path,
+            dispatcher.qbit_path_prefix,
+            dispatcher.local_path_prefix,
+        )
+        qbit_save = Path(translated)
         if qbit_save not in candidate_paths:
             candidate_paths.append(qbit_save)
 
