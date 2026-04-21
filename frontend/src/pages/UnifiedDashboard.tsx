@@ -177,8 +177,8 @@ export default function UnifiedDashboard({ onNav }: Props) {
         alignItems: "start" as const,
       };
 
-  const sectionHdr = { fontSize: 13, fontWeight: 600, color: t.td, textTransform: "uppercase" as const, marginBottom: 8, letterSpacing: "0.04em" };
-  const hsep = { height: 1, background: t.borderL, margin: "14px 0" };
+  const sectionHdr = { fontSize: 12, fontWeight: 600, color: t.td, textTransform: "uppercase" as const, marginBottom: 6, letterSpacing: "0.04em" };
+  const hsep = { height: 1, background: t.borderL, margin: "10px 0" };
 
   return (
     <div style={gridStyle}>
@@ -190,8 +190,8 @@ export default function UnifiedDashboard({ onNav }: Props) {
             its own ownership percentage, progress bar, MAM metrics,
             and external-link column so the user can see both libraries'
             state simultaneously. */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
-          <div style={{ ...hdr(), marginBottom: 10 }}><Dot color={t.accent} /> Athena</div>
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 16px" }}>
+          <div style={{ ...hdr(), marginBottom: 8 }}><Dot color={t.accent} /> Athena</div>
           <LibrarySection
             stats={ebookStats}
             color={t.jade}
@@ -224,10 +224,10 @@ export default function UnifiedDashboard({ onNav }: Props) {
             Restructured from the old 3-col (buttons | progress | last)
             layout into a 2-row top/bottom so it reads cleanly at
             half-dashboard width instead of being squeezed horizontally. */}
-        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
-          <div style={{ ...hdr(), marginBottom: 12 }}><Dot color={t.accent} /> Command Center</div>
+        <div style={{ background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 16px" }}>
+          <div style={{ ...hdr(), marginBottom: 8 }}><Dot color={t.accent} /> Command Center</div>
           {/* Buttons row */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
             {libScans.map(ls => {
               const color = ls.content_type === "audiobook" ? t.pur : t.jade;
               const shortLabel = ls.label?.replace(/\s*Sync$/, "") || ls.slug;
@@ -254,7 +254,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
           <ProgressRow label="MAM Scan" scan={mamScan} t={t} onCancel={mamScan.running ? cancelMam : undefined} />
           {/* Last-scan summary inline, below the progress rows */}
           {(srcScan.extra?.new_books != null || (srcScan.extra?.source_timeouts && Object.keys(srcScan.extra.source_timeouts).length > 0)) && (
-            <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${t.borderL}` }}>
+            <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${t.borderL}` }}>
               {srcScan.status === "complete" && srcScan.extra?.source_timeouts && Object.keys(srcScan.extra.source_timeouts).length > 0 ? (
                 <div style={{ fontSize: 13, color: t.warn }}>
                   {Object.entries(srcScan.extra.source_timeouts).map(([src, sec]) => (
@@ -278,34 +278,34 @@ export default function UnifiedDashboard({ onNav }: Props) {
           divider sit Snatch Budget, Recent Activity, and Seeding
           Progress as stacked mini-sections. Widget is tall (roughly
           Athena+CC combined height) which matches the sketch. */}
-      <div style={{ gridArea: "middle", background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
+      <div style={{ gridArea: "middle", background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 16px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
           <div style={{ flex: 1 }}>
             <div style={hdr(t.jade)}><Dot color={t.jade} /> Hermes</div>
-            <div style={{ fontSize: 14, color: t.td, marginTop: 3 }}>
+            <div style={{ fontSize: 13, color: t.td, marginTop: 2 }}>
               {health?.dispatcher_ready ? `${fmtNum(totalGrabs)} grabs · ${fmtNum(calibreAdds)} to Calibre` : "Starting…"}
             </div>
-            <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
               <Pill label="Dispatcher" ok={health?.dispatcher_ready} />
               <Pill label="IRC" ok={health?.dispatcher_ready} />
               <Pill label="Cookie" ok={mam?.validation_ok} warn={mam?.cookie_configured && !mam?.validation_ok} />
               <Pill label="Watcher" ok={health?.dispatcher_ready} />
-              <div style={{ background: t.bg3, borderRadius: 8, padding: "8px 16px", display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 12, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>Poll</span>
-                <span style={{ fontSize: 20, fontWeight: 700, color: cd <= 5 ? t.accent : t.text2 }}>{cd}s</span>
+              <div style={{ background: t.bg3, borderRadius: 8, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 11, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>Poll</span>
+                <span style={{ fontSize: 17, fontWeight: 700, color: cd <= 5 ? t.accent : t.text2 }}>{cd}s</span>
               </div>
             </div>
           </div>
           {mam?.username && (
-            <div style={{ background: t.bg3, borderRadius: 10, padding: "14px 18px", textAlign: "right", minWidth: 190 }}>
-              <div style={{ fontSize: 13, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>{mam.username}</div>
-              {mam.classname && <div style={{ fontSize: 12, color: t.tf }}>{mam.classname}</div>}
-              <div style={{ display: "flex", gap: 18, justifyContent: "flex-end", marginTop: 8 }}>
-                {mam.ratio != null && <div><div style={{ fontSize: 26, fontWeight: 700, color: mam.ratio >= 1 ? t.ok : t.warn }}>{fmtRatio(mam.ratio)}</div><div style={{ fontSize: 12, color: t.td }}>Ratio</div></div>}
-                {mam.wedges != null && <div><div style={{ fontSize: 26, fontWeight: 700, color: t.accent }}>{fmtNum(mam.wedges)}</div><div style={{ fontSize: 12, color: t.td }}>Wedges</div></div>}
+            <div style={{ background: t.bg3, borderRadius: 10, padding: "10px 14px", textAlign: "right", minWidth: 170 }}>
+              <div style={{ fontSize: 12, color: t.td, textTransform: "uppercase", fontWeight: 600 }}>{mam.username}</div>
+              {mam.classname && <div style={{ fontSize: 11, color: t.tf }}>{mam.classname}</div>}
+              <div style={{ display: "flex", gap: 14, justifyContent: "flex-end", marginTop: 5 }}>
+                {mam.ratio != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: mam.ratio >= 1 ? t.ok : t.warn }}>{fmtRatio(mam.ratio)}</div><div style={{ fontSize: 11, color: t.td }}>Ratio</div></div>}
+                {mam.wedges != null && <div><div style={{ fontSize: 22, fontWeight: 700, color: t.accent }}>{fmtNum(mam.wedges)}</div><div style={{ fontSize: 11, color: t.td }}>Wedges</div></div>}
               </div>
               {(mam.uploaded_bytes || mam.downloaded_bytes) && (
-                <div style={{ fontSize: 12, color: t.tf, marginTop: 6 }}>↑ {fmtBytes(mam.uploaded_bytes)} · ↓ {fmtBytes(mam.downloaded_bytes)}</div>
+                <div style={{ fontSize: 11, color: t.tf, marginTop: 4 }}>↑ {fmtBytes(mam.uploaded_bytes)} · ↓ {fmtBytes(mam.downloaded_bytes)}</div>
               )}
             </div>
           )}
@@ -317,11 +317,11 @@ export default function UnifiedDashboard({ onNav }: Props) {
         <div>
           <div style={sectionHdr}>Snatch Budget</div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-            <span style={{ fontSize: 32, fontWeight: 700, color: (b.budget_used ?? 0) >= (b.budget_cap ?? 1) ? t.warn : t.accent }}>{b.budget_used ?? 0}</span>
-            <span style={{ fontSize: 16, color: t.td }}>/ {b.budget_cap ?? 0}</span>
-            {b.next_release_seconds > 0 && <span style={{ fontSize: 13, color: t.accent, marginLeft: 12 }}>Next release in {fmtDuration(b.next_release_seconds)}</span>}
+            <span style={{ fontSize: 26, fontWeight: 700, color: (b.budget_used ?? 0) >= (b.budget_cap ?? 1) ? t.warn : t.accent }}>{b.budget_used ?? 0}</span>
+            <span style={{ fontSize: 14, color: t.td }}>/ {b.budget_cap ?? 0}</span>
+            {b.next_release_seconds > 0 && <span style={{ fontSize: 12, color: t.accent, marginLeft: 12 }}>Next release in {fmtDuration(b.next_release_seconds)}</span>}
           </div>
-          <div style={{ fontSize: 13, color: t.td, marginTop: 4 }}>
+          <div style={{ fontSize: 12, color: t.td, marginTop: 2 }}>
             {b.ledger_active ?? 0} active + {b.qbit_extras ?? 0} manual
             {(b.queue_size ?? 0) > 0 && <span style={{ color: t.warn }}> · {b.queue_size} queued</span>}
           </div>
@@ -366,7 +366,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
       </div>
 
       {/* ══════ ACTIONS BAR: Quick Actions + Tools (full-width) ══════ */}
-      <div style={{ gridArea: "actions", background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "14px 20px" }}>
+      <div style={{ gridArea: "actions", background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 16px" }}>
         <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
           <div style={{ flex: 2, minWidth: 280 }}>
             <div style={{ ...sectionHdr }}>Discovery</div>
@@ -410,7 +410,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
           the rail — a single column would be too tall; 3+ would be
           too cramped at ~380px. When wrapped below the actions bar
           (narrow viewport) it widens to 4 columns for density. */}
-      <div style={{ gridArea: "stats", background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px 20px" }}>
+      <div style={{ gridArea: "stats", background: t.bg2, border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 16px" }}>
         <div style={{ ...hdr(), marginBottom: 12 }}><Dot color={t.accent} /> Seshat Stats</div>
 
         <div style={sectionHdr}>Ebook</div>
@@ -467,27 +467,27 @@ function LibrarySection({ stats, color, accent, links, onNavMam, t }: any) {
   const name = stats?.library_display_name || stats?.library_name || "Library";
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 600, color: t.text2 }}>
             <Dot color={color} /> {name}
           </div>
-          <div style={{ fontSize: 14, color: t.td, marginTop: 3 }}>
+          <div style={{ fontSize: 13, color: t.td, marginTop: 2 }}>
             {fmtNum(owned)} of {fmtNum(total)} {stats?.content_type === "audiobook" ? "audiobooks" : "books"} owned
           </div>
         </div>
-        <div style={{ fontSize: 34, fontWeight: 800, color: accent, lineHeight: 1 }}>{comp}%</div>
+        <div style={{ fontSize: 28, fontWeight: 800, color: accent, lineHeight: 1 }}>{comp}%</div>
       </div>
-      <div style={{ height: 6, background: t.bg4, borderRadius: 3, overflow: "hidden", marginBottom: 12 }}>
+      <div style={{ height: 5, background: t.bg4, borderRadius: 3, overflow: "hidden", marginBottom: 8 }}>
         <div style={{ height: "100%", width: `${Math.min(comp, 100)}%`, background: `linear-gradient(90deg, ${color}, ${accent})`, borderRadius: 3 }} />
       </div>
-      <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, flex: 1 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, flex: 1 }}>
           <MiniBox value={fmtNum(available)} label="Available on MAM" color={color} onClick={onNavMam} />
           <MiniBox value={fmtNum(upload)} label="Upload Candidates" color={t.ylw} onClick={onNavMam} />
           <MiniBox value={fmtNum(missing)} label="Missing Everywhere" color={t.red} />
         </div>
-        <div style={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 12, display: "flex", flexDirection: "column", gap: 6, justifyContent: "center", minWidth: 130 }}>
+        <div style={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 10, display: "flex", flexDirection: "column", gap: 5, justifyContent: "center", minWidth: 120 }}>
           {links.length > 0 ? links.map((l: any) => (
             <TBtn key={l.label} icon={<Bar color={l.color} />} label={l.label} onClick={() => window.open(l.href, "_blank")} />
           )) : <span style={{ fontSize: 12, color: t.tf }}>No links</span>}
@@ -501,12 +501,12 @@ function MiniBox({ value, label, color, onClick }) {
   const t = useTheme();
   return (
     <div onClick={onClick} style={{
-      background: t.bg3, borderRadius: 8, padding: "14px 10px",
+      background: t.bg3, borderRadius: 8, padding: "10px 8px",
       cursor: onClick ? "pointer" : "default", textAlign: "center",
       display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
     }}>
-      <div style={{ fontSize: 26, fontWeight: 700, color: color || t.text, lineHeight: 1.1 }}>{value}</div>
-      <div style={{ fontSize: 12, color: t.td, marginTop: 5 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: color || t.text, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 11, color: t.td, marginTop: 3 }}>{label}</div>
     </div>
   );
 }
@@ -516,11 +516,11 @@ function Pill({ label, ok, warn }) {
   const color = ok ? t.ok : warn ? t.warn : t.td;
   const text = ok ? "Online" : warn ? "Check" : "Offline";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 0" }}>
-      <div style={{ width: 10, height: 10, borderRadius: "50%", background: color, boxShadow: ok ? `0 0 6px ${color}66` : "none" }} />
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 0" }}>
+      <div style={{ width: 9, height: 9, borderRadius: "50%", background: color, boxShadow: ok ? `0 0 6px ${color}66` : "none" }} />
       <div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: t.text2 }}>{label}</div>
-        <div style={{ fontSize: 12, color }}>{text}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: t.text2 }}>{label}</div>
+        <div style={{ fontSize: 11, color }}>{text}</div>
       </div>
     </div>
   );
@@ -565,11 +565,11 @@ function ProgressRow({ label, scan, t, onCancel }) {
   const kind = label.split(" ").pop();
   const statusText = status === "complete" ? "Done" : status === "cancelled" ? "Cancelled" : "Idle";
   return (
-    <div style={{ padding: "8px 0", borderBottom: `1px solid ${t.borderL}` }}>
+    <div style={{ padding: "5px 0", borderBottom: `1px solid ${t.borderL}` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: running ? t.accent : t.td }}>{label}</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 14, color: running ? t.text2 : t.tf }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: running ? t.accent : t.td }}>{label}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, color: running ? t.text2 : t.tf }}>
             {running ? `${checked}/${total} (${pctDone}%)` : (
               <>
                 {ago && <span style={{ fontStyle: "italic" }}>(Last {kind}: {ago}) </span>}
@@ -579,7 +579,7 @@ function ProgressRow({ label, scan, t, onCancel }) {
           </span>
           {running && onCancel && (
             <button onClick={onCancel} style={{
-              padding: "3px 10px", fontSize: 11, fontWeight: 600, borderRadius: 4,
+              padding: "2px 8px", fontSize: 10, fontWeight: 600, borderRadius: 4,
               background: t.red + "22", color: t.red, border: `1px solid ${t.red}44`,
               cursor: "pointer",
             }}>Stop</button>
@@ -588,11 +588,11 @@ function ProgressRow({ label, scan, t, onCancel }) {
       </div>
       {running && (
         <>
-          <div style={{ height: 5, background: t.bg4, borderRadius: 2, marginTop: 5, overflow: "hidden" }}>
+          <div style={{ height: 4, background: t.bg4, borderRadius: 2, marginTop: 3, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${pctDone}%`, background: t.accent, borderRadius: 2, transition: "width 0.3s" }} />
           </div>
           {(authorName || bookName) && (
-            <div style={{ fontSize: 13, color: t.td, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div style={{ fontSize: 12, color: t.td, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {authorName && <span style={{ fontWeight: 600 }}>{authorName}</span>}
               {authorName && bookName && <span style={{ color: t.tf }}> — </span>}
               {bookName && <span style={{ color: t.tf }}>{bookName}</span>}
@@ -608,12 +608,12 @@ function CmdBtn({ label, busy, highlight, onClick }) {
   const t = useTheme();
   return (
     <button onClick={onClick} disabled={busy} style={{
-      padding: "9px 14px", borderRadius: 6, fontSize: 13, fontWeight: 600,
+      padding: "7px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600,
       background: highlight ? t.accent : t.bg4, color: highlight ? t.bg : t.text2,
       border: `1px solid ${highlight ? t.accent : t.border}`, cursor: busy ? "wait" : "pointer",
-      opacity: busy ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+      opacity: busy ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
       whiteSpace: "nowrap",
-    }}>{busy ? <Spin size={14} /> : null}{label}</button>
+    }}>{busy ? <Spin size={12} /> : null}{label}</button>
   );
 }
 
