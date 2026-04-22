@@ -9,11 +9,17 @@ export function Section({
   count,
   defaultOpen = true,
 }: {
-  title: string;
+  // Rendered inside an <h2>; ReactNode so callers can pass a rich
+  // header (e.g. the "shared series" chip on the author-detail page)
+  // instead of a plain string.
+  title: ReactNode;
   subtitle?: string;
   children: ReactNode;
   right?: ReactNode;
-  count?: number;
+  // ReactNode for symmetry with title, and so callers can pass a
+  // formatted string like "3/5 · 12 total" rather than being
+  // constrained to a plain count.
+  count?: ReactNode;
   defaultOpen?: boolean;
 }) {
   const theme = useTheme();
