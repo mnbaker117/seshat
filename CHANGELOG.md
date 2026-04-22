@@ -7,6 +7,270 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [Unreleased] — 1.4.0 candidate
+
+Audiobook integration. Adds Audiobookshelf as a first-class library
+backend alongside Calibre, with cross-library work linking so the same
+book in both libraries surfaces as one entity in discovery views. The
+MAM pipeline now grabs audiobooks and routes them to Audiobookshelf via
+a new sink. Settings consolidated and the Dashboard redesigned to
+accommodate two library backends.
+
+### Added
+
+- **Audiobookshelf library backend.** `app/library_apps/audiobookshelf.py`
+  adds an ABS API client + library-app adapter matching the pattern
+  `CalibreApp` uses; `app/discovery/audiobookshelf_sync.py` runs a
+  3-pass sync (items → authors → series) populating the per-library
+  DB. Works alongside Calibre — users can have either, both, or
+  multiple of each. Covers proxy through
+  `/api/discovery/covers/{slug}/{bid}` so ABS covers render in the
+  Seshat UI without the browser ever seeing the API key.
+
+- **Audiobook metadata sources.** `app/metadata/sources/audnexus.py`
+  and `app/metadata/sources/audible.py` land audiobook-specific
+  enrichment (narrator, duration, ASIN, abridged flag). Audible also
+  has a discovery-side variant in `app/discovery/sources/audible.py`
+  for author / series searches.
+
+- **Cross-library works.** New `work_links` table (pipeline DB) links
+  (library_slug, book_id, content_type) tuples across libraries —
+  the same book in Calibre + ABS collapses to one "work". New
+  `app/works/` module (normalize + storage + matcher + preferences),
+  `/api/v1/works/*` router, and a Works browser page. The matcher
+  is conservative by design: exact-match + strict " - Subtitle"
+  loose variant only, no trailing-volume stripping (proven unsafe
+  after a Spice & Wolf / Hero-Killing Bride false-merge incident).
+
+- **Per-author format preferences.** Users can pin an author to
+  "ebook only", "audiobook only", or "both". Keyed by normalized
+  name so Calibre's "Brandon Sanderson" and ABS's "Brandon Sanderson"
+  share one preference row. Global default comes from
+  `audiobook_tracking_mode`; per-author overrides win. Feeds into
+  the Missing / Upcoming filters so an "audiobook only" author
+  stops surfacing ebook rows.
+
+- **Format tabs on cross-library views.** `/books`, `/missing`,
+  `/upcoming`, `/authors`, `/series-suggestions`, `/books/hidden`
+  all accept `content_type=ebook|audiobook|all`. Omit → active
+  library only (legacy). Pass → aggregate. Dashboard, Authors,
+  Works, and the cross-library Author Detail page surface the
+  tabs in the UI.
+
+- **Audiobook pipeline grabs (Phase 6).** MAM announce filter
+  accepts audiobook categories via `accept_audiobook_announces` +
+  `allowed_audiobook_categories`. The enricher holds both ebook +
+  audiobook source lists at construction and swaps via
+  `enrich(audiobook=True)`. Grabs are routed to either
+  `CalibreSink` or the new `AudiobookshelfSink` based on
+  `_is_audiobook_grab(book_format, category)` + the presence of
+  `audiobookshelf_library_path`. Review queue shows narrator /
+  duration / ASIN / abridged badge. `adopt_orphan_torrents()`
+  picks up manually-added torrents in the watch category and
+  inserts grab rows.
+
+- **Full audiobook MAM search path.** `_mam_search` accepts
+  audiobook `main_cat` ("13") via caller-supplied `content_type`;
+  `_evaluate_results` inverts its category/format gating based on
+  content_type; `check_book` / `scan_books_batch` /
+  `run_full_scan_batch` all thread content_type through. Routers
+  derive content_type from the active library via
+  `_active_content_type(slug)`. The MAM Search page gained a
+  library selector.
+
+- **Unified Metadata Sources panel.** New `/v1/metadata-sources`
+  GET/PUT with a `metadata_sources` + `metadata_priority` shape
+  replacing the scattered `*_enabled` bools + `rate_*` floats +
+  dual priority lists. Settings UI panel with 2 tabs
+  (Ebook/Audiobook), 2 checkboxes per row (Enrich/Scan), arrow
+  reorder, and MAM locked at #1. Legacy keys stay shadow-synced
+  via `sync_legacy_keys()` during the transition.
+
+- **`audiobook_format_priority` setting.** Default
+  `["m4b", "m4a", "mp3"]`. `file_copier` applies a stable re-rank
+  after largest-first, so multi-file audiobooks pick the largest
+  file *within* the user's preferred format instead of the
+  largest file period.
+
+- **`abs_sync_interval_minutes` setting.** ABS library sync now
+  has an independent scheduler gate mirroring the Calibre sync
+  interval, so users can dial ABS scan frequency separately.
+  State tracked per-slug in `state._library_last_sync_at`.
+
+- **Dashboard redesign.** Three-column grid with a Stats rail,
+  stacked Athena + Command Center left, Hermes (absorbing MAM
+  Activity) middle, Quick Actions full-width bottom. Per-library
+  sync states (`state._library_sync_progress[slug]`) surface as
+  dual Calibre + ABS rows in Command Center with their own
+  triggers, progress bars, and last-sync timestamps.
+  Audiobook-aware widgets (listening hours, narrators, abridged
+  split) surface when an ABS library is connected.
+
+- **Cross-format badges.** BCard + BListRow show a 🎧/📖 indicator
+  when a book is part of a linked work with both formats. Also
+  surfaced as an "Also Available" row inside `BookSidebar` via a
+  new `get_siblings_for_books` bulk helper.
+
+- **Cross-library Author Detail page.** Clicking a merged Authors
+  row opens a unified view with Combined / Ebook / Audiobook tabs.
+  `?include_cross_library=1&slug=X` routes `/authors/{id}` and
+  `/series/{id}` to the right library since the same author can
+  have different row IDs in each library's DB. Per-block Scan
+  buttons trigger a library-scoped lookup / full rescan.
+
+- **Logs Announces tab.** Dedicated `seshat.mam.announce` logger
+  routes parsed announces to the Announces tab in the log viewer
+  without mixing into the raw IRC feed.
+
+- **Path aliasing for qBit ↔ Seshat mount differences.** New
+  `translate_path()` helper maps `qbit_path_prefix` (e.g. `/data`)
+  to `local_path_prefix` (e.g. `/downloads`) so the multi-file
+  audiobook backfill can scan qBit-reported paths against the
+  filesystem Seshat can see.
+
+- **Phase 8 test coverage.** 64 new tests across
+  `cross_library`, covers endpoint, `_apply_tracking_mode_filter`,
+  Works router, and a skip-by-default live integration scaffold.
+
+### Changed
+
+- **Settings consolidated and pruned.** Four audit rounds retired
+  ~15 dead / legacy keys (`monthly_download_folders`,
+  `policy_lookup_torrent_info`, `weekly_audit_day`,
+  `weekly_audit_hour`, `cookie_check_interval_hours`,
+  `pipeline_irc_enabled`, `pipeline_qbit_watcher_enabled`,
+  `pipeline_notifications_enabled`, the full `*_enabled` +
+  `rate_*` source-toggle set, `SourceSpec.setting_key`). Calibre-Web
+  and CWA Web URLs collapsed to one field
+  (writes `cwa_web_url`, reads fall through to the legacy
+  `calibre_web_url`). `abs_url` + `abs_web_url` auto-mirror with
+  an override. Notifications split into master SF + dimmed
+  dependents. Policy section now a 2×3 grid. Hardcover API key
+  moved from Sinks to Metadata Sources. Previously-hidden but
+  PATCH-whitelisted paths (`calibre_library_path`, `staging_path`,
+  `review_staging_path`, `cwa_ingest_path`, `folder_sink_path`)
+  surfaced in the UI.
+
+- **Bulk route ordering.** `/bulk/*` handlers now declared before
+  the generic `/{id}/*` handlers in the tentative + review
+  routers — FastAPI's first-match semantics were routing
+  `/bulk/reject` to `/{tentative_id}/reject` with
+  `tentative_id="bulk"`, yielding a 422.
+
+- **Secret redaction.** `_SECRET_KEYS` in the settings router now
+  derives from `app.secrets.SECRET_KEYS` so every encrypted-store
+  key (including `hardcover_api_key` + `abs_api_key`) is
+  redacted from GET /api/v1/settings automatically. Previously
+  these two had drifted out of the hardcoded redact list.
+
+- **Runtime-state keys protected.** New `_RUNTIME_STATE_KEYS`
+  frozenset blocks PATCH writes for keys that background jobs
+  own (`qbit_orphan_adoption_since`, `mam_validation_ok`,
+  `mam_last_validated_at`, `google_books_auto_disabled_at`).
+  Prevents a user clobbering the orphan-adopt cutoff from
+  flooding the pipeline with adopted grabs.
+
+- **Matcher normalization conservative.** After the Spice & Wolf
+  vs Hero-Killing Bride incident, we no longer strip trailing
+  volume markers. Rely on exact + `" - Subtitle"` loose variant
+  plus manual linking.
+
+- **Capitalization pass.** Title Case across every page header,
+  tab, card title, modal header, and sidebar label. Live
+  examples: "Tentative torrents" → "Tentative Torrents",
+  "Review queue" → "Review Queue".
+
+### Fixed
+
+- **Multi-file audiobooks only staged the first file.**
+  `_stage_for_review` now mirrors every book-format sibling from
+  the staging dir; `AudiobookshelfSink.deliver` scans
+  `src.parent` for audio companions. A `_backfill_audio_companions`
+  helper repairs existing broken reviews by querying qBit via
+  `pipeline_runs.source_path` and translating the returned
+  `save_path` through `translate_path()`.
+
+- **Cross-library author detail opened the wrong person.**
+  `/authors/{id}` used the active library's DB, but the ID from a
+  cross-library view could be ABS's ID (a different author than
+  Calibre's row with the same number). Fixed via a `?slug=X`
+  query param + `"slug:id"` compound nav arg on the frontend.
+
+- **F5 on detail pages spun forever.** `pageArg` wasn't persisted
+  to localStorage (only `page` was), so the route re-rendered
+  with an undefined arg. Persisted with numeric/string roundtrip.
+
+- **Google Books circuit breaker silently no-op'd.** The Phase 7
+  migration moved consumers to `metadata_sources`, but the breaker
+  kept writing the retired `google_books_enabled` key. Migrated
+  breaker to write into `metadata_sources["google_books"]`
+  surfaces. Surfaced via a grep-everything audit after the bulk
+  key retirement.
+
+- **Spurious legacy-DB warning every startup.**
+  `_find_legacy_db` false-matched Seshat's current pipeline DB
+  (`seshat.db`) and tried to read a `books` table from it.
+  Narrowed to look for AthenaScout's `athenascout.db` only.
+
+- **`accept_audiobook_announces` + audiobook settings stripped
+  on PATCH.** ABS keys weren't on the settings PATCH whitelist,
+  so the UI could only read them, not save them. Added
+  `abs_url`, `abs_web_url`, `abs_sink_library_id`,
+  `abs_sync_interval_minutes`, `audiobookshelf_library_path`,
+  `audiobook_tracking_mode`, `audiobook_format_priority`,
+  `audible_region`, `accept_audiobook_announces`,
+  `allowed_audiobook_categories` to the whitelist.
+
+- **Announces tab populated with AttributeError noise.** Announce
+  logging used wrong `Announce` dataclass field names (`.name`,
+  `.format` instead of `.torrent_name`, `.filetype`, `.vip`).
+
+- **qBit orphan adopter flooded the review queue on first boot.**
+  No grandfather line meant every pre-existing qBit torrent in
+  the watch category got adopted and routed to review. Added
+  `qbit_orphan_adoption_since` — a cutoff timestamp written
+  the first time the adopter runs; only torrents added after
+  the cutoff are eligible.
+
+- **Re-enrich endpoint ignored audiobook priority.** Re-enrich
+  always used `metadata_provider_priority` — now consults the
+  grab's format and swaps to the audiobook list when appropriate.
+
+- **ABS cover proxy dropped webp content-type.** Streaming
+  response hardcoded `image/jpeg`; fixed to preserve the
+  upstream content-type header.
+
+- **Works false-merges.** Volume markers ("Vol 1", "Book 2",
+  "Part I") + trailing-series strips were unifying unrelated
+  books. Dropped all trailing normalization in favor of exact +
+  loose-subtitle only.
+
+- **`discover_libraries()` early-return broke composability.**
+  File-based apps (Priority 1) returned without letting
+  API-based apps (Priority 2) contribute. Removed the
+  early-return so both paths compose.
+
+- **Route-ordering: `/api/v1/works/author-preferences`.** Same
+  class of bug as the bulk/tentative fix: the generic
+  `/{work_id}` handler swallowed the static-prefix
+  `/author-preferences` route because it was declared first.
+  Moved `/{work_id}` below every static-prefix route.
+
+### Removed
+
+- **Legacy settings keys** (listed under Changed — retired across
+  four audit rounds).
+
+- **`SourceSpec.setting_key`** (unused post Phase-7 consolidation).
+
+- **Dashboard `pipeline_qbit_watcher_enabled` toggle** (UI-only,
+  had no backend effect).
+
+- **Inline `monthly_download_folders` code** (superseded by the
+  `download_folder_structure` string setting added in v1.3.0).
+
+---
+
 ## [1.3.0] — 2026-04-15
 
 Closes the v1.2 backlog. One new feature + polish across the board.

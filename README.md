@@ -38,10 +38,24 @@ manage a snatch budget, download through your torrent client, enrich
 metadata from 7 sources, queue everything for manual review with cover
 images, and deliver approved books to Calibre/CWA.
 
+### Audiobook support
+
+Audiobookshelf is a first-class library backend. Seshat discovers your
+ABS library alongside Calibre, pulls metadata from Audible + Audnexus,
+routes audiobook MAM grabs through a dedicated sink, and triggers a
+scan on the ABS server so new books show up without a manual refresh.
+
+Cross-library *works* link the same book across ebook + audiobook
+libraries so your Discovery views can show "Foundation" as one entity
+with both formats. Per-author tracking preferences let you pin an
+author to ebook-only, audiobook-only, or both — missing detection and
+MAM scans respect the preference automatically.
+
 ### Unified Dashboard
 
-Both domains report to a single two-column dashboard — discovery stats
-on the left, pipeline stats on the right. All the goodies in one view.
+Discovery stats, pipeline stats, and per-library sync rows (Calibre +
+ABS side-by-side) all live on a single three-column dashboard. Stats
+rail on the right, Quick Actions across the bottom.
 
 ---
 
@@ -57,6 +71,7 @@ services:
     volumes:
       - ./data:/app/data
       - /path/to/calibre/books:/calibre:ro
+      - /path/to/audiobookshelf/library:/audiobooks   # optional
       - /path/to/downloads:/downloads
       - ./staging:/staging
       - ./review-staging:/review-staging
@@ -66,6 +81,10 @@ services:
 ```
 
 Then open `http://your-server:8789` and follow the first-run wizard.
+If you're adding Audiobookshelf, point it at the same `/audiobooks`
+mount so Seshat can drop new audiobook files straight into ABS's
+library path — Seshat will trigger a scan on the ABS server as soon
+as the file lands.
 
 ---
 
@@ -79,6 +98,9 @@ Then open `http://your-server:8789` and follow the first-run wizard.
 - **Theme:** Egyptian goddess palette (gold, deep indigo, jade green)
 - **Docker:** two-stage build (node:22-alpine + python:3.12-slim)
 - **API routes:** 138 total (74 discovery + 53 pipeline + 11 shared)
+- **Library backends:** Calibre (file-based) + Audiobookshelf (API-based),
+  composable — users can run multiple of either. Cross-library `works`
+  linked via the pipeline DB.
 
 ---
 
@@ -104,7 +126,8 @@ Seshat boot. Safe to re-run — skips files that already exist.
 - A **Calibre library** (mounted read-only for discovery sync)
 - A **MyAnonamouse** account with IRC credentials + session cookie
 - A **torrent client** (qBittorrent, Transmission, Deluge, or rTorrent)
-- *Optional:* Hardcover API key, ntfy server for notifications
+- *Optional:* **Audiobookshelf** (URL + API key) for audiobook support,
+  Hardcover API key, ntfy server for notifications
 
 ---
 
