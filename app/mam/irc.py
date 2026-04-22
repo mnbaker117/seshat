@@ -770,11 +770,14 @@ class IrcClient:
         # the line compact — torrent name, category, format, VIP flag.
         # Downstream dispatcher logs the accept/drop decision against
         # seshat.orchestrator.dispatch which the Announces tab also
-        # surfaces.
+        # surfaces. Uses the gate.py Announce dataclass field names
+        # (torrent_name + filetype) — NOT `.name` / `.format` which
+        # don't exist on this object and produced AttributeError
+        # before the fix.
         _announce_log.info(
             "announce tid=%s %r cat=%s fmt=%s vip=%s",
-            announce.torrent_id, announce.name,
-            announce.category or "?", announce.format or "?",
+            announce.torrent_id, announce.torrent_name,
+            announce.category or "?", announce.filetype or "?",
             announce.vip,
         )
 
