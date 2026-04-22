@@ -220,54 +220,37 @@ class TestDerivation:
 
 
 class TestSyncLegacy:
-    def test_writes_legacy_bools_and_rates(self):
+    """Post-Phase-7 sync_legacy_keys is narrowed to one responsibility:
+    mirror the MAM rate_limit from the unified `metadata_sources`
+    shape onto the standalone `rate_mam` key, since `rate_mam` still
+    has ~7 non-metadata-source call sites that weren't migrated.
+    Every other legacy mirror (goodreads_enabled, rate_goodreads,
+    metadata_provider_priority, etc.) was retired alongside the
+    DEFAULT_SETTINGS cleanup."""
+
+    def test_mirrors_rate_mam_from_panel(self):
         settings: dict = {}
         migrate_legacy_settings(settings)
-        # Flip some state.
-        settings["metadata_sources"]["goodreads"]["ebook_scan"] = False
-        settings["metadata_sources"]["goodreads"]["audiobook_scan"] = False
-        settings["metadata_sources"]["hardcover"]["rate_limit"] = 0.8
+        settings["metadata_sources"]["mam"]["rate_limit"] = 3.5
         sync_legacy_keys(settings)
-        assert settings["goodreads_enabled"] is False
-        assert settings["rate_hardcover"] == 0.8
+        assert settings["rate_mam"] == 3.5
 
-    def test_writes_legacy_priority_lists(self):
+    def test_no_op_when_mam_rate_missing(self):
+        """Missing MAM rate_limit shouldn't stamp a default onto
+        settings — leave rate_mam to its own default elsewhere."""
         settings: dict = {}
         migrate_legacy_settings(settings)
-        # Turn Audible off for both surfaces — should drop from both
-        # legacy priority lists.
-        settings["metadata_sources"]["audible"]["ebook_enrich"] = False
-        settings["metadata_sources"]["audible"]["audiobook_enrich"] = False
+        # Explicitly delete rate_limit to confirm we don't write.
+        settings["metadata_sources"]["mam"].pop("rate_limit", None)
+        settings.pop("rate_mam", None)
         sync_legacy_keys(settings)
-        assert "audible" not in settings["metadata_provider_priority"]
-        assert "audible" not in settings["metadata_audiobook_priority"]
-
-    def test_or_rule_for_legacy_single_bool(self):
-        """Legacy single-bool semantics: `<name>_enabled` True if
-        EITHER ebook_scan OR audiobook_scan is on."""
-        settings: dict = {}
-        migrate_legacy_settings(settings)
-        settings["metadata_sources"]["goodreads"]["ebook_scan"] = True
-        settings["metadata_sources"]["goodreads"]["audiobook_scan"] = False
-        sync_legacy_keys(settings)
-        assert settings["goodreads_enabled"] is True
-
-        settings["metadata_sources"]["goodreads"]["ebook_scan"] = False
-        settings["metadata_sources"]["goodreads"]["audiobook_scan"] = True
-        sync_legacy_keys(settings)
-        assert settings["goodreads_enabled"] is True
-
-        settings["metadata_sources"]["goodreads"]["ebook_scan"] = False
-        settings["metadata_sources"]["goodreads"]["audiobook_scan"] = False
-        sync_legacy_keys(settings)
-        assert settings["goodreads_enabled"] is False
+        assert "rate_mam" not in settings
 
     def test_mam_enabled_is_not_clobbered(self):
         """`mam_enabled` is a wider-scope toggle (IRC listener gate),
         not just a source toggle. sync_legacy_keys must NOT touch it."""
         settings = {"mam_enabled": False}
         migrate_legacy_settings(settings)
-        # User flips MAM source flags on in the new panel.
         settings["metadata_sources"]["mam"]["ebook_scan"] = True
         sync_legacy_keys(settings)
         # The wider IRC gate stays False.

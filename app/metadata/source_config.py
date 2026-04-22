@@ -308,44 +308,21 @@ def get_source_rate_limit(settings: dict, name: str) -> float:
 
 
 def sync_legacy_keys(settings: dict) -> None:
-    """Mirror the new shape back onto legacy keys.
+    """Mirror MAM's rate_limit from the unified shape onto `rate_mam`.
 
-    Called by the `/v1/metadata-sources` PATCH handler after a user
-    edits the panel. Keeps `goodreads_enabled` / `rate_goodreads` /
-    `metadata_provider_priority` / `metadata_audiobook_priority`
-    consistent so any part of the codebase still reading the old
-    names during the Phase 7 transition sees the same truth.
+    Phase 7 retired the per-source `*_enabled` bools, `rate_<name>`
+    floats for every metadata source, and both `metadata_provider_priority`
+    / `metadata_audiobook_priority` legacy keys — every consumer reads
+    from `metadata_sources` + `metadata_priority` via the derivation
+    helpers now.
 
-    After every consumer is ported to the derivation helpers, this
-    function and the legacy keys can be retired together.
+    `rate_mam` survives intact because it has ~7 non-metadata-source
+    call sites (the pipeline's MAM batch scan, schedulers, etc.) that
+    weren't worth migrating for this pass. The Metadata Sources panel
+    is still where the user edits MAM rate, so we keep the mirror
+    here to avoid forcing a second editor UI for one number.
     """
     sources = settings.get("metadata_sources") or {}
-
-    # Per-source legacy bools. The old `*_enabled` flag gated
-    # discovery-side scanning, so mirror from the scan surface.
-    # Take ebook_scan OR audiobook_scan — either surface enabled
-    # means the source is "on" in the legacy single-bool sense.
-    for name, meta in KNOWN_SOURCES.items():
-        if name == "mam":
-            continue  # mam_enabled is a separate, wider-scope toggle
-        entry = sources.get(name) or {}
-        legacy_on = bool(
-            entry.get("ebook_scan") or entry.get("audiobook_scan")
-        )
-        settings[f"{name}_enabled"] = legacy_on
-        rate_key = f"rate_{name}"
-        if "rate_limit" in entry:
-            settings[rate_key] = float(entry["rate_limit"])
-
-    # Rate limit for MAM sits separately under `rate_mam`.
     mam_entry = sources.get("mam") or {}
     if "rate_limit" in mam_entry:
         settings["rate_mam"] = float(mam_entry["rate_limit"])
-
-    # Priority lists: legacy shape is just the filtered enrich list.
-    settings["metadata_provider_priority"] = derive_enrich_priority(
-        settings, audiobook=False,
-    )
-    settings["metadata_audiobook_priority"] = derive_enrich_priority(
-        settings, audiobook=True,
-    )

@@ -167,17 +167,27 @@ audible = AudibleDiscoverySource()
 
 
 def reload_sources():
+    """Rebuild the module-level source singletons from current settings.
+
+    Rate limits come from `metadata_sources[<name>].rate_limit` via
+    `get_source_rate_limit` — the unified Phase-7 shape. Legacy
+    `rate_*` keys were retired once this file was the last reader;
+    the helper falls back to each source's default_rate when the
+    setting is missing so upgrade paths keep working before the
+    panel is touched.
+    """
     global hardcover, goodreads, kobo, amazon, ibdb, google_books, audible
+    from app.metadata.source_config import get_source_rate_limit
     s = load_settings()
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
-    goodreads = GoodreadsSource(rate_limit=s.get("rate_goodreads", 2))
-    kobo = KoboSource(rate_limit=s.get("rate_kobo", 3))
-    amazon = AmazonSource(rate_limit=s.get("rate_amazon", 2))
-    ibdb = IbdbSource(rate_limit=s.get("rate_ibdb", 1))
-    google_books = GoogleBooksSource(rate_limit=s.get("rate_google_books", 0.5))
+    goodreads = GoodreadsSource(rate_limit=get_source_rate_limit(s, "goodreads"))
+    kobo = KoboSource(rate_limit=get_source_rate_limit(s, "kobo"))
+    amazon = AmazonSource(rate_limit=get_source_rate_limit(s, "amazon"))
+    ibdb = IbdbSource(rate_limit=get_source_rate_limit(s, "ibdb"))
+    google_books = GoogleBooksSource(rate_limit=get_source_rate_limit(s, "google_books"))
     audible = AudibleDiscoverySource(
         region=s.get("audible_region", "us"),
-        rate_limit=s.get("rate_audible", 0.5),
+        rate_limit=get_source_rate_limit(s, "audible"),
     )
 
 
@@ -1836,10 +1846,23 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     active_sources = _sources_for_content_type(
         state.get_active_library_content_type()
     )
+    # Enabled-check reads from the Phase-7 unified `metadata_sources`
+    # dict. The scan surface (ebook_scan / audiobook_scan) matches the
+    # active library's content_type — ebook libraries read
+    # `metadata_sources[name].ebook_scan`, audiobook libraries read
+    # `metadata_sources[name].audiobook_scan`. `default_enabled` on
+    # the SourceSpec is the fallback for fresh installs whose
+    # metadata_sources dict hasn't been populated yet.
+    ct = state.get_active_library_content_type()
+    scan_surface = "audiobook_scan" if ct == "audiobook" else "ebook_scan"
+    meta_sources = settings.get("metadata_sources") or {}
     for spec in active_sources:
-        # Gate by user setting. default_enabled mirrors the historical
-        # behavior of the per-source if-block (Amazon/IBDB/GB default off).
-        if not settings.get(spec.setting_key, spec.default_enabled):
+        entry = meta_sources.get(spec.name)
+        if entry is not None:
+            if not entry.get(scan_surface, False):
+                continue
+        elif not spec.default_enabled:
+            # No panel entry AND default is off — stay off.
             continue
         # Hardcover requires a configured API key — silently skip otherwise
         # so the user doesn't see a failed scan they never asked for.

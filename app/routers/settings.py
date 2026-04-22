@@ -72,7 +72,6 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "review_timeout_check_interval_seconds",
     "delayed_torrents_path",
     "metadata_enrichment_enabled",
-    "metadata_provider_priority",
     "metadata_disabled_sources",
     "metadata_per_source_timeout",
     "metadata_accept_confidence",
@@ -120,9 +119,6 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "audiobook_tracking_mode",
     "audiobook_format_priority",
     "audible_region",
-    "audible_enabled",
-    "rate_audible",
-    "metadata_audiobook_priority",
     # Phase 7 unified metadata source configuration. The dedicated
     # /v1/metadata-sources panel is the primary editor for these two
     # keys; whitelisted here so the existing Settings PATCH router

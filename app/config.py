@@ -473,17 +473,11 @@ DEFAULT_SETTINGS = {
 
     # ── Discovery domain (library scanning & metadata lookup) ─
     "hardcover_api_key": "",
-    "goodreads_enabled": True,
-    "hardcover_enabled": True,
-    "kobo_enabled": True,
-    "amazon_enabled": False,
-    "ibdb_enabled": False,
-    "google_books_enabled": False,
-    # Discovery-side Audible source — ON by default but only consulted
-    # for audiobook libraries (ebook libraries skip it entirely via
-    # the content-type router in lookup.py).
-    "audible_enabled": True,
-    "rate_audible": 0.5,
+    # Per-source enable/disable and rate limits are now stored under
+    # the unified `metadata_sources` dict (see Phase 7). The legacy
+    # scatter of `goodreads_enabled` / `rate_goodreads` / etc. was
+    # retired once lookup.py started reading from `metadata_sources`
+    # directly via the derivation helpers in app.metadata.source_config.
     "google_books_auto_disabled_at": None,
     "theme": "dark",
     "languages": ["English"],
@@ -496,12 +490,6 @@ DEFAULT_SETTINGS = {
     # per-library gates inside sync_all_libraries skip individual
     # libraries until their own interval has elapsed.
     "abs_sync_interval_minutes": 0,
-    "rate_goodreads": 2,
-    "rate_hardcover": 1,
-    "rate_kobo": 3,
-    "rate_amazon": 2,
-    "rate_ibdb": 1,
-    "rate_google_books": 1.5,
     "author_scanning_enabled": True,
     "author_scan_owned_only": False,
     "exclude_audiobooks": True,

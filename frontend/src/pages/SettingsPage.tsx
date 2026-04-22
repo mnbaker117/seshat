@@ -836,16 +836,10 @@ function AudiobookshelfSection({ s, upd, ist, nist, creds, onCredSaved }: {
       </select>
     </SF>
 
-    <SF
-      label="Discovery Audible Source"
-      desc="Use Audible + Audnexus when scanning audiobook libraries for an author's catalog."
-    >
-      <STog
-        on={(s.audible_enabled as boolean) ?? true}
-        onToggle={() => upd("audible_enabled", !(s.audible_enabled ?? true))}
-        label
-      />
-    </SF>
+    {/* Note: the per-source Audible toggle previously lived here but
+        migrated to the unified Metadata Sources panel (Discovery →
+        Metadata Sources). Same for Audnexus, Goodreads, Hardcover,
+        etc. — the panel is now the sole editor. */}
 
     <SF
       label="Rebuild Cross-Library Links"
