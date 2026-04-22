@@ -217,7 +217,6 @@ def reload_sources():
 @dataclass
 class SourceSpec:
     name: str
-    setting_key: str
     role: str
     timeout_sec: float
     getter: Any  # callable returning the live source instance
@@ -238,12 +237,12 @@ def _src_audible():      return audible
 # registry — Goodreads primary, Hardcover primary, rest filling
 # supplementary roles.
 SOURCES: list[SourceSpec] = [
-    SourceSpec("goodreads",    "goodreads_enabled",    "primary",       300.0, _src_goodreads,    True),
-    SourceSpec("hardcover",    "hardcover_enabled",    "primary",       180.0, _src_hardcover,    True),
-    SourceSpec("kobo",         "kobo_enabled",         "secondary",     120.0, _src_kobo,         True),
-    SourceSpec("amazon",       "amazon_enabled",       "secondary",     180.0, _src_amazon,       False),
-    SourceSpec("ibdb",         "ibdb_enabled",         "supplementary",  90.0, _src_ibdb,         False),
-    SourceSpec("google_books", "google_books_enabled", "supplementary",  60.0, _src_google_books, False),
+    SourceSpec("goodreads",    "primary",       300.0, _src_goodreads,    True),
+    SourceSpec("hardcover",    "primary",       180.0, _src_hardcover,    True),
+    SourceSpec("kobo",         "secondary",     120.0, _src_kobo,         True),
+    SourceSpec("amazon",       "secondary",     180.0, _src_amazon,       False),
+    SourceSpec("ibdb",         "supplementary",  90.0, _src_ibdb,         False),
+    SourceSpec("google_books", "supplementary",  60.0, _src_google_books, False),
 ]
 
 
@@ -256,8 +255,8 @@ SOURCES: list[SourceSpec] = [
 # surface audiobook-specific metadata and the catalog coverage
 # heavily overlaps Audible.
 AUDIOBOOK_SOURCES: list[SourceSpec] = [
-    SourceSpec("audible",   "audible_enabled",   "primary",   300.0, _src_audible,   True),
-    SourceSpec("hardcover", "hardcover_enabled", "secondary", 180.0, _src_hardcover, True),
+    SourceSpec("audible",   "primary",   300.0, _src_audible,   True),
+    SourceSpec("hardcover", "secondary", 180.0, _src_hardcover, True),
 ]
 
 

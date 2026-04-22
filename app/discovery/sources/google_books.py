@@ -87,16 +87,29 @@ class GoogleBooksSource(BaseSource):
     def _trip_circuit_breaker(self) -> None:
         """Auto-disable Google Books in settings after repeated 429s.
 
-        Flips `google_books_enabled` to False and logs a WARNING. Safe to
-        call multiple times — if the setting is already False (a prior
-        trip on this process), this is a no-op. The user re-enables in
-        Settings when quota resets; the save triggers `reload_sources()`,
-        which builds a fresh source instance with counter=0."""
+        Flips the Google Books scan+enrich toggles to False inside the
+        Phase-7 `metadata_sources` dict (lookup.py reads from there),
+        logs a WARNING, and timestamps the trip in
+        `google_books_auto_disabled_at`. Safe to call multiple times —
+        if both toggles are already off (a prior trip on this process),
+        this is a no-op. The user re-enables via the Metadata Sources
+        panel when quota resets; the PATCH triggers `reload_sources()`
+        which builds a fresh source instance with counter=0.
+        """
         from app.config import load_settings, save_settings
         s = load_settings()
-        if not s.get("google_books_enabled"):
+        sources = s.get("metadata_sources") or {}
+        entry = dict(sources.get("google_books") or {})
+        already_off = not (entry.get("ebook_scan") or entry.get("ebook_enrich")
+                           or entry.get("audiobook_scan") or entry.get("audiobook_enrich"))
+        if already_off:
             return  # already off — another caller tripped first
-        s["google_books_enabled"] = False
+        entry["ebook_scan"] = False
+        entry["ebook_enrich"] = False
+        entry["audiobook_scan"] = False
+        entry["audiobook_enrich"] = False
+        sources["google_books"] = entry
+        s["metadata_sources"] = sources
         s["google_books_auto_disabled_at"] = time.time()
         save_settings(s)
         logger.warning(

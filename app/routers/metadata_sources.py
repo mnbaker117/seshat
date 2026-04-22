@@ -150,6 +150,19 @@ async def put_state(body: MetadataSourcesState) -> PutResponse:
     audiobook = [n for n in body.priority.audiobook if n in known_names]
 
     settings = load_settings()
+    # Detect a Google Books re-enable so the circuit-breaker timestamp
+    # can be cleared. Without this, re-enabling via the panel after a
+    # trip would keep the Dashboard banner up forever and let
+    # reload_sources() rebuild a fresh instance only to immediately
+    # re-trip since the breaker reads the "was tripped" stamp.
+    prev_gb = (settings.get("metadata_sources") or {}).get("google_books") or {}
+    new_gb_entry = body.sources.get("google_books")
+    new_gb = new_gb_entry.model_dump() if new_gb_entry else {}
+    gb_was_off = not (prev_gb.get("ebook_scan") or prev_gb.get("ebook_enrich")
+                      or prev_gb.get("audiobook_scan") or prev_gb.get("audiobook_enrich"))
+    gb_now_on = bool(new_gb.get("ebook_scan") or new_gb.get("ebook_enrich")
+                     or new_gb.get("audiobook_scan") or new_gb.get("audiobook_enrich"))
+    gb_reenabled = gb_was_off and gb_now_on
     settings["metadata_sources"] = {
         name: entry.model_dump() for name, entry in body.sources.items()
     }
@@ -157,6 +170,8 @@ async def put_state(body: MetadataSourcesState) -> PutResponse:
         "ebook": ebook,
         "audiobook": audiobook,
     }
+    if gb_reenabled:
+        settings["google_books_auto_disabled_at"] = None
     # Keep the legacy keys in sync so any code still reading them
     # during the Phase 7 transition sees the user's new intent.
     sync_legacy_keys(settings)

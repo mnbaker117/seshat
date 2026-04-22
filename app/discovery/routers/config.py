@@ -67,15 +67,6 @@ async def get_settings():
 async def update_settings(body: dict = Body(...)):
     from app.secrets import set_secret, SECRET_KEYS
     cur = load_settings()
-    # Detect a Google Books re-enable so the circuit-breaker timestamp
-    # can be cleared. Without this, re-enabling after a trip would keep
-    # the Dashboard banner up forever (and the next scan would immediately
-    # re-trip because the source instance gets rebuilt but the timestamp
-    # would still show "auto-disabled at T").
-    gb_reenabled = (
-        body.get("google_books_enabled") is True
-        and not cur.get("google_books_enabled")
-    )
     for k, v in body.items():
         if k not in cur:
             continue
@@ -87,8 +78,9 @@ async def update_settings(body: dict = Body(...)):
             cur[k] = ""  # blank in settings.json
             continue
         cur[k] = v
-    if gb_reenabled:
-        cur["google_books_auto_disabled_at"] = None
+    # Google Books re-enable detection moved to /v1/metadata-sources
+    # PUT — the legacy `google_books_enabled` key is gone, and the
+    # panel is now the only editor that can flip source toggles.
     save_settings(cur)
     reload_sources()
     apply_logging(cur.get("verbose_logging", False))
