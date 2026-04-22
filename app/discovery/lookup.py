@@ -195,13 +195,12 @@ def reload_sources():
 # Centralizes per-source metadata so `lookup_author` walks a single
 # typed list instead of a hand-rolled if-chain. Each spec carries:
 #   - role: "primary" | "secondary" | "supplementary"
-#       Informational; not yet used to short-circuit. Hermeece's
-#       per-book enricher short-circuits at score >= 0.8, but
-#       AthenaScout legitimately *wants* every source's per-book
-#       signals (Amazon for series confirmation, IBDB for ISBN, GB
-#       for descriptions) so cross-source short-circuit would lose
-#       backfills. Kept here for future use (e.g., owned-only mode
-#       could skip supplementary).
+#       Informational; not yet used to short-circuit. The pipeline's
+#       per-book enricher short-circuits at score >= 0.8, but discovery
+#       legitimately *wants* every source's per-book signals (Amazon
+#       for series confirmation, IBDB for ISBN, GB for descriptions) so
+#       cross-source short-circuit would lose backfills. Kept here for
+#       future use (e.g., owned-only mode could skip supplementary).
 #   - timeout_sec: hard wall-clock cap on a single-author scan of
 #       this source. Generous enough that a normal scan completes,
 #       tight enough that a stuck source can't hang the whole pipeline.
@@ -233,9 +232,8 @@ def _src_audible():      return audible
 
 
 # Ebook-library source list. Walked for every library whose
-# `content_type == "ebook"`. Same shape as the AthenaScout-era
-# registry — Goodreads primary, Hardcover primary, rest filling
-# supplementary roles.
+# `content_type == "ebook"`. Goodreads primary, Hardcover primary, rest
+# filling supplementary roles.
 SOURCES: list[SourceSpec] = [
     SourceSpec("goodreads",    "primary",       300.0, _src_goodreads,    True),
     SourceSpec("hardcover",    "primary",       180.0, _src_hardcover,    True),

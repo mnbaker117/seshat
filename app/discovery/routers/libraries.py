@@ -1,7 +1,7 @@
 """
 Library discovery, switching, and validation endpoints.
 
-AthenaScout supports multiple libraries (typically separate Calibre
+Discovery supports multiple libraries (typically separate Calibre
 installations) and exposes one as "active" at a time. The active
 library determines which per-library SQLite database backs every
 other endpoint, so switching libraries means tearing down any
@@ -123,7 +123,7 @@ async def validate_library_path(body: dict = Body(...)):
     a filesystem browser for the library setup wizard — that's the whole
     feature. Access is gated by AuthMiddleware (see app/main.py) so only
     authenticated admins can call it. The admin is trusted by definition
-    in AthenaScout's threat model — see SECURITY.md.
+    in Seshat's threat model — see SECURITY.md.
 
     Defense in depth: the input sanitization below rejects obviously
     malformed paths (empty, excessively long, containing null bytes)

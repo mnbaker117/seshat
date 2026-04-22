@@ -9,9 +9,8 @@ A budget watcher pops the highest-priority pending grab whenever a
 
 The queue is FIFO by default — older queued grabs win — but every
 row also has a `priority` integer column that overrides FIFO when
-non-zero. Manually-injected grabs and AthenaScout-driven requests
-will set higher priority in later phases; the IRC dispatcher uses
-priority 0.
+non-zero. Manually-injected and discovery-sent grabs can set higher
+priority; the IRC dispatcher uses priority 0.
 
 Pop ordering: highest priority first, then oldest queued_at first.
 The `idx_pending_queue_priority` index in the schema makes this a

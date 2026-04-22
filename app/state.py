@@ -1,10 +1,9 @@
 """
 Shared mutable state for Seshat's background tasks.
 
-Mirrors the AthenaScout state-module pattern: module-level singletons
-that the lifespan startup, the routers, and the background workers
-all read and mutate. Because Python modules are singletons within a
-process, every importer sees the same values.
+Module-level singletons that the lifespan startup, the routers, and the
+background workers all read and mutate. Because Python modules are
+singletons within a process, every importer sees the same values.
 
 IMPORTANT — module attribute access:
     Always use `state.foo`, not `from app.state import foo`. Direct
@@ -29,9 +28,9 @@ def supervised_task(
 ) -> asyncio.Task:
     """Wrap a long-running background coroutine with exception logging.
 
-    Lifted from AthenaScout's `app/state.py`. The problem it solves:
-    `asyncio.create_task(some_coro())` silently loses exceptions unless
-    the task is awaited. For fire-and-forget workers (the IRC listener,
+    The problem it solves: `asyncio.create_task(some_coro())` silently
+    loses exceptions unless the task is awaited. For fire-and-forget
+    workers (the IRC listener,
     the qBit poller, the snatch-budget watcher) a crash would otherwise
     show up as a one-line "Task exception was never retrieved" at
     interpreter shutdown — no traceback, no restart, no visible failure.
@@ -169,7 +168,7 @@ _migration_status: Dict[str, Any] = {
 }
 
 
-# ─── Discovery domain state (from AthenaScout) ─────────────
+# ─── Discovery domain state ─────────────────────────────────
 
 # Library discovery cache — populated in lifespan startup.
 _discovered_libraries: list[dict] = []

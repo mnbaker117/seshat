@@ -1,8 +1,7 @@
 """
-Goodreads metadata source for Seshat.
+Goodreads metadata source.
 
-Book-centric port of AthenaScout's author-centric Goodreads scraper.
-Two-pass flow mirroring the upstream design:
+Book-centric scraper. Two-pass flow:
 
   1. `/search?q={title author}&search_type=books` — get candidate book
      IDs + list-page titles + author names. Iterate in rank order,
@@ -39,8 +38,7 @@ _log = logging.getLogger("seshat.metadata.goodreads")
 _BASE = "https://www.goodreads.com"
 
 # Goodreads will serve the bot page if the User-Agent looks like a
-# headless client, so we claim a normal Firefox UA. This matches
-# AthenaScout's working setup.
+# headless client, so we claim a normal Firefox UA.
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "

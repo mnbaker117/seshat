@@ -1,5 +1,5 @@
 """
-ntfy notification sender for AthenaScout.
+ntfy notification sender.
 
 Sends push notifications via ntfy.sh (or a self-hosted ntfy server)
 for significant events: scan completions, new books found, MAM matches.
@@ -13,8 +13,6 @@ Two delivery modes, switched per-user:
 The per-event API stays the same in either mode — call sites are
 agnostic. Digest mode is implemented by routing send() through an
 in-memory queue when ntfy_digest_enabled is True.
-
-Ported from Hermeece's notify/ntfy.py.
 """
 import asyncio
 import logging
@@ -57,7 +55,7 @@ async def aclose() -> None:
 
 @dataclass
 class DigestEvent:
-    kind: str  # "scan_complete", "new_books", "mam", "hermeece", "library", "cookie"
+    kind: str  # "scan_complete", "new_books", "mam", "pipeline", "library", "cookie"
     title: str
     message: str
     at: float = field(default_factory=time.time)
@@ -225,10 +223,6 @@ async def notify_pipeline_sent(sent: int, skipped: int) -> bool:
         message=f"{sent} queued for download" + (f", {skipped} skipped" if skipped else ""),
         tags=["arrow_down", "books"],
     )
-
-
-# Backward-compatible alias
-notify_hermeece_sent = notify_pipeline_sent
 
 
 async def notify_library_sync(library_name: str, new: int, updated: int) -> bool:

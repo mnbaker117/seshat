@@ -9,9 +9,6 @@ Positioned as a supplementary source for ISBN, publisher, and
 description backfill. Match quality is poor for niche/indie titles
 and there's no native series field — we parse series from the title
 parenthetical pattern when possible.
-
-Adapted from Hermeece's google_books.py for AthenaScout's author-centric
-model. Uses the scoring system for match quality evaluation.
 """
 import logging
 import re

@@ -111,19 +111,14 @@ def _item_to_record(item: dict) -> MetaRecord:
     title = item.get("title") or item.get("name") or ""
     authors = _extract_authors(item)
 
-    # ibdb.dev's actual response shape (verified live 2026-04-15 during
-    # the AthenaScout v1.1.9 fix): camelCase keys, and `image` is always
-    # a DICT `{id, url, width, height}` — never a bare URL string. The
-    # older snake_case mappings below were written against a pre-2026
-    # shape that no longer matches. Kept as fallbacks in case the API
-    # drifts, but in practice only the camelCase keys hit.
+    # ibdb.dev's actual response shape: camelCase keys, and `image` is
+    # always a DICT `{id, url, width, height}` — never a bare URL
+    # string. The older snake_case mappings below were written against
+    # a pre-2026 shape that no longer matches. Kept as fallbacks in
+    # case the API drifts, but in practice only the camelCase keys hit.
     #
-    # AthenaScout v1.1.8 crashed sqlite3 binding with "type 'dict' is not
-    # supported" because the old code shoved `image` (a dict) straight
-    # into `cover_url`. Seshat's record path is mostly downstream of
-    # the DB bind layer (MetaRecord → staging → OPF), but a dict-shaped
-    # cover_url would blow up differently once it reached URL
-    # serialization or the downloader. Fix is the same shape either way:
+    # A dict shoved into `cover_url` would blow up at URL serialization
+    # or in the downloader, so we type-guard the cover extraction:
     # prefer camelCase first, then type-guard the cover extraction.
     isbn = item.get("isbn13") or item.get("isbn_13") or item.get("isbn") or item.get("isbn_10")
     cover_raw = item.get("image") or item.get("cover") or item.get("thumbnail")

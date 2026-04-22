@@ -2,7 +2,7 @@
 Calibre library sync.
 
 Reads Calibre's `metadata.db` (read-only, via SQLite URI mode) and
-upserts the user's library into AthenaScout's database. Runs in three
+upserts the user's library into the discovery database. Runs in three
 passes — authors, series, books — so foreign key targets exist before
 the rows that reference them get inserted.
 
@@ -52,8 +52,8 @@ def _read_calibre_db(calibre_path: str, library_path: str = None) -> dict:
     matter compared to the main async upsert pass that follows.
 
     `library_path` is the on-disk root of the Calibre library; we use
-    it to resolve `cover.jpg` paths so AthenaScout can serve covers
-    without re-uploading them.
+    it to resolve `cover.jpg` paths so the discovery domain can serve
+    covers without re-uploading them.
     """
     lib_path = library_path or CALIBRE_LIBRARY_PATH
     if not Path(calibre_path).exists():
@@ -173,7 +173,7 @@ def _read_calibre_db(calibre_path: str, library_path: str = None) -> dict:
 
 
 async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
-    """Run a full Calibre → AthenaScout import.
+    """Run a full Calibre → discovery DB import.
 
     Three passes, in this exact order (because each pass needs the FK
     targets from the previous one to exist):
@@ -356,7 +356,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                 # Before INSERTing a new Calibre row, look for a matching
                 # discovery row (typically a Missing entry created by an
                 # earlier source scan + later fulfilled in Calibre via the
-                # Hermeece handoff). Without this fallback, every fulfilled
+                # pipeline). Without this fallback, every fulfilled
                 # Missing book ends up duplicated: the original row gets
                 # `owned=1` flipped by the safety net below, but stays
                 # without a calibre_id, and the new Calibre row sits next

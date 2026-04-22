@@ -1,10 +1,9 @@
 """
 Kobo metadata source — web scraping.
 
-Adapted from AthenaScout's excellent KoboSource. Kobo has no public
-API, so we scrape the storefront pages. Cloudflare sits in front of
-kobo.com, so the HTTP layer uses `cloudscraper` (synchronous)
-wrapped in `asyncio.to_thread`.
+Kobo has no public API, so we scrape the storefront pages. Cloudflare
+sits in front of kobo.com, so the HTTP layer uses `cloudscraper`
+(synchronous) wrapped in `asyncio.to_thread`.
 
 Two-pass flow for single-book lookup:
   1. Search page: `kobo.com/us/en/search?query={title+author}&fcmedia=Book`
@@ -172,10 +171,7 @@ class KoboSource(MetaSource):
         )
 
     async def _get_book_details(self, kobo_url: str) -> Optional[dict]:
-        """Fetch a Kobo detail page and extract structured metadata.
-
-        Selectors adapted from AthenaScout's battle-tested KoboSource.
-        """
+        """Fetch a Kobo detail page and extract structured metadata."""
         details: dict = {}
         page_html = await self._fetch(kobo_url)
         if not page_html:

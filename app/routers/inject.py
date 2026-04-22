@@ -3,22 +3,18 @@ Manual grab-injection HTTP endpoint.
 
 POST /api/v1/grabs/inject
 
-Three callers will hit this endpoint:
+Two callers hit this endpoint:
 
   1. **Cookie-rotation manual test recipe** — paste a torrent ID,
      verify the full grab path works, then rotate the cookie and
      repeat to verify the failure + retry flow.
-  2. **AthenaScout integration** (Phase 3, with the metadata bundle
-     extension preserved as an optional `metadata_bundle` field).
-  3. **Operator manual override** — when an announce is missed
+  2. **Operator manual override** — when an announce is missed
      (Seshat was offline) and the operator wants to grab it
      anyway from the MAM web UI's "Recent Activity" page.
 
 The endpoint reads the dispatcher singleton out of `app.state`,
-calls `inject_grab`, and serializes the result as JSON. There's
-no auth on this endpoint in Phase 1 — Seshat runs on the LAN
-behind whatever auth its container provides. Phase 3 wires up
-the AthenaScout-style auth_secret session cookies.
+calls `inject_grab`, and serializes the result as JSON. Session
+auth (auth_secret cookie) is enforced by the global middleware.
 """
 from __future__ import annotations
 

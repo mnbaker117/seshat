@@ -1,16 +1,16 @@
 """
 MetaSource base class — contract that every metadata provider must honor.
 
-Book-centric (unlike AthenaScout's author-centric `BaseSource`): given a
-title + author, return the single best match as a `MetaRecord`. This
-matches Seshat's review-queue use case where we already know which
-torrent we grabbed and just want metadata to enrich it.
+Book-centric (contrast with the discovery domain's author-centric
+`BaseSource` in `app.discovery.sources.base`): given a title + author,
+return the single best match as a `MetaRecord`. This matches the
+review-queue use case where we already know which torrent we grabbed
+and just want metadata to enrich it.
 
 Shared concerns that live in this base:
   - httpx.AsyncClient lifecycle (lazy-created, aclose on shutdown)
-  - A rate-limited `_get()` helper that mirrors the AthenaScout
-    pattern (asyncio.sleep before each request, exponential backoff
-    on 5xx/network errors)
+  - A rate-limited `_get()` helper (asyncio.sleep before each request,
+    exponential backoff on 5xx/network errors)
   - Hooks for test injection: subclasses read self._get / self.client
     so tests can swap in a fake transport on the httpx client.
 
@@ -72,9 +72,8 @@ class MetaSource:
     ) -> httpx.Response:
         """Rate-limited GET with exponential backoff on failure.
 
-        Mirrors AthenaScout's BaseSource._get shape. Retries up to
-        `retries` additional attempts with 3s → 6s → 12s waits.
-        Re-raises the final exception on terminal failure so the
+        Retries up to `retries` additional attempts with 3s → 6s → 12s
+        waits. Re-raises the final exception on terminal failure so the
         caller (the enricher) can log + fall through to the next
         provider.
         """

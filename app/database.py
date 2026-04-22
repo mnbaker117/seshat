@@ -1,9 +1,9 @@
 """
 Database layer.
 
-Single SQLite database under DATA_DIR (no per-library multiplexing —
-Seshat operates on one workflow at a time, unlike AthenaScout which
-supports multiple Calibre libraries).
+Single SQLite database under DATA_DIR for the pipeline domain. The
+discovery domain uses its own per-library DBs; see
+`app/discovery/database.py`.
 
 Schema and migrations both live in this file. SCHEMA is the up-to-date
 target shape; MIGRATIONS is the ordered list of statements that bring an
@@ -281,9 +281,9 @@ CREATE TABLE IF NOT EXISTS author_format_preferences (
 # only get added when we need to evolve the schema after Seshat is
 # running in production.
 MIGRATIONS: list[str] = [
-    # v1.1 — AthenaScout metadata handoff (plan item 1.2).
-    # Stores the JSON-encoded metadata dict that AthenaScout sends
-    # with /from-athenascout POSTs. When present on a grab row, the
+    # v1.1 — source-metadata handoff. Stores the JSON-encoded metadata
+    # dict that the discovery domain (or external batch submitters)
+    # sends alongside a grab. When present on a grab row, the
     # pipeline's _prepare_book uses it to skip the enricher call and
     # save 6 outbound scraper requests per book.
     "ALTER TABLE grabs ADD COLUMN source_metadata TEXT",

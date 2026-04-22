@@ -7,7 +7,6 @@ because:
   2. It handles duplicate detection, format conversion, and metadata
      enrichment automatically
   3. No auth setup needed (it talks to the library directory directly)
-  4. AthenaScout already uses this exact approach — proven pattern
 
 The library path must be configured in settings.json or via the
 CALIBRE_LIBRARY_PATH environment variable.

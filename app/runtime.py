@@ -2,9 +2,8 @@
 Runtime environment detection — Docker vs standalone, OS type, default
 data directory paths.
 
-Mirrors AthenaScout's `app/runtime.py` for suite cohesion. Kept free of
-any in-app imports so it can be imported early by `app.config` without
-circular dependency risk.
+Kept free of any in-app imports so it can be imported early by
+`app.config` without circular dependency risk.
 """
 import os
 import platform as _platform

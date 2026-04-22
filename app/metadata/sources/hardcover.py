@@ -1,8 +1,7 @@
 """
 Hardcover.app metadata source — GraphQL API.
 
-Adapted from AthenaScout's author-centric HardcoverSource into
-Seshat's book-centric MetaSource. Two queries:
+Book-centric MetaSource. Two queries:
   1. Search by "{title} {author}" → get book IDs
   2. FindBooksByIds → full metadata with English edition preference
 

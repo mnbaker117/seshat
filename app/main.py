@@ -59,7 +59,7 @@ from app.notify.digests import DigestContext
 from app.notify.ntfy import aclose as ntfy_aclose
 from app.auth_db import init_auth_db
 from app.auth_sessions import SESSION_COOKIE_NAME, verify_session_token
-from app.routers.athenascout import router as athenascout_router
+from app.routers.grabs import router as grabs_router
 from app.routers.auth import router as auth_router
 from app.routers.authors import router as authors_router
 from app.routers.covers import router as covers_router
@@ -91,6 +91,7 @@ from app.discovery.routers.covers import router as disc_covers_router
 from app.discovery.routers.audiobookshelf import router as disc_abs_router
 from app.discovery.routers.import_export import router as disc_import_export_router
 from app.discovery.routers.config import router as disc_config_router
+from app.discovery.routers.pipeline_send import router as disc_pipeline_send_router
 
 # Configure logging once at import time. The verbose toggle gets re-applied
 # from settings.json after load_settings() runs in the lifespan.
@@ -689,8 +690,6 @@ async def lifespan(app: FastAPI):
         init_db as init_discovery_db,
         set_active_library,
         get_active_library as get_active_disc_library,
-        migrate_legacy_db,
-        match_legacy_db_to_library,
     )
     from app.library_apps import get_app
     from app.discovery.log_buffer import init_log_buffer
@@ -704,13 +703,7 @@ async def lifespan(app: FastAPI):
         lib_names = [l["name"] for l in state._discovered_libraries]
         _log.info(f"Discovered {len(state._discovered_libraries)} libraries: {', '.join(lib_names)}")
 
-        # Legacy migration from athenascout.db or seshat.db
         first_slug = state._discovered_libraries[0]["slug"]
-        migration_slug = match_legacy_db_to_library(state._discovered_libraries)
-        migrated_to = migrate_legacy_db(migration_slug)
-        if migrated_to:
-            _log.info(f"Legacy database migrated to library '{migrated_to}'")
-            first_slug = migrated_to
 
         for lib in state._discovered_libraries:
             await init_discovery_db(lib["slug"])
@@ -972,9 +965,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     Requests outside /api/ pass through unchanged so the frontend
     bundle (HTML, JS, CSS, images) loads without a cookie. API
     requests in the public allowlist also pass through. Every other
-    API request must carry either a valid signed session cookie OR
-    a matching `X-API-Key` header (used by AthenaScout for
-    service-to-service calls on the LAN).
+    API request must carry a valid signed session cookie.
 
     Also forces `Cache-Control: no-store` on every /api/* response
     so dynamic API payloads never get poisoned by stale cached HTML
@@ -1005,7 +996,7 @@ app.add_middleware(AuthMiddleware)
 
 # Auth router is registered first by convention since it gates
 # everything else. The other routers are protected by the middleware.
-app.include_router(athenascout_router)
+app.include_router(grabs_router)
 app.include_router(auth_router)
 app.include_router(authors_router)
 app.include_router(covers_router)
@@ -1036,6 +1027,7 @@ app.include_router(disc_covers_router)
 app.include_router(disc_abs_router)
 app.include_router(disc_import_export_router)
 app.include_router(disc_config_router)
+app.include_router(disc_pipeline_send_router)
 
 
 @app.get("/api/health")

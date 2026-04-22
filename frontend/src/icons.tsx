@@ -1,4 +1,4 @@
-// SVG icon set for AthenaScout.
+// SVG icon set for Seshat.
 //
 // _i is a tiny helper that wraps SVG path data in a configured <svg> element.
 // Ic is the master icon dictionary — reference as Ic.refresh, Ic.sync, etc.

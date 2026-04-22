@@ -1,13 +1,12 @@
 """
-Send to Pipeline — direct internal call to the acquisition pipeline.
+Send to Pipeline — hands a confirmed-match book off to the acquisition
+pipeline.
 
 When a book has a confirmed MAM match (mam_status="found"), the user
 can send it to the pipeline for automatic download and processing.
-Supports both single-book sends and bulk sends.
-
-In the original two-app setup, this was an HTTP call from AthenaScout
-to Hermeece. In the unified Seshat app, it's a direct function call
-to inject_grab().
+Supports both single-book sends and bulk sends. Calls `inject_grab`
+directly (no HTTP round-trip) since both domains live in the same
+process.
 """
 import json
 import logging

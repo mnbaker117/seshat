@@ -162,10 +162,10 @@ async def set_torrent_name(
     """Overwrite the human-readable torrent name on a grab row.
 
     Used by the review-queue edit flow when the user corrects a
-    bad title (e.g. the `manual_inject_<id>` placeholder left behind
-    by pre-v1.1.4 AthenaScout sends). The new value flows into the
-    dashboard's Snatch Budget widget, the Recent Activity feed,
-    and anywhere else that renders `grabs.torrent_name`.
+    bad title (e.g. a `manual_inject_<id>` placeholder). The new
+    value flows into the dashboard's Snatch Budget widget, the
+    Recent Activity feed, and anywhere else that renders
+    `grabs.torrent_name`.
     """
     await db.execute(
         "UPDATE grabs SET torrent_name = ? WHERE id = ?",
@@ -238,7 +238,7 @@ async def get_source_metadata(
     Separated from `get_grab` so the GrabRow dataclass stays narrow
     and callers that don't care about the blob (the vast majority)
     don't pay any cost. Only the pipeline's _prepare_book reads this
-    column — to short-circuit the enricher when AthenaScout pre-
+    column — to short-circuit the enricher when the submitter pre-
     baked metadata at submission time.
     """
     cursor = await db.execute(

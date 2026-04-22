@@ -27,7 +27,7 @@ Two non-obvious things in this module worth knowing about:
     `search_author` function tallies each book's
     `contributions[].author.id`, vote-ranks them by owned-title
     overlap, and keeps only the winning ID's books before merging.
-    Without this filter, AthenaScout would silently glue another
+    Without this filter, the merge would silently glue another
     person's catalog onto the user's author.
 
 Auth: the API key goes into the `Authorization` header. Users paste
@@ -196,7 +196,7 @@ class HardcoverSource(BaseSource):
     name = "hardcover"
     default_headers = {
         "Content-Type": "application/json",
-        "User-Agent": "AthenaScout/1.0 (https://github.com/mnbaker117/AthenaScout)",
+        "User-Agent": "Seshat/1.0 (https://github.com/mnbaker117/seshat)",
     }
     default_timeout = 30.0
 
@@ -446,7 +446,7 @@ class HardcoverSource(BaseSource):
             # Cold War espionage writer with 3. Both the bare-name
             # query and the owned-title queries above are name-based,
             # so the accumulated book set can mix all three. Without
-            # filtering, AthenaScout would silently glue another
+            # filtering, the merge would silently glue another
             # David Burke's catalog onto the user's LitRPG author.
             #
             # Strategy: tally each `book.contributions[].author.id`

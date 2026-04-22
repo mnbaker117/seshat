@@ -1,4 +1,4 @@
-// Shared types for AthenaScout frontend.
+// Shared types for the Seshat frontend.
 //
 // Kept intentionally lean — only the shapes that cross component
 // boundaries or come back from the API live here. Single-component
@@ -50,9 +50,9 @@ export type NavFn = (page: string, arg?: number | string | null) => void;
 export type BookAction = "hide" | "unhide" | "dismiss" | "delete";
 export type BookActionHandler = (action: BookAction, bookId: number) => void | Promise<void>;
 
-// `SendToHermeece` is the bulk-send callback used by the MAM page
-// + book sidebar. Returns void; errors surface as toasts.
-export type SendToHermeeceFn = (bookIds: number[]) => void | Promise<void>;
+// Bulk-send callback used by the MAM page + book sidebar to push
+// books into the pipeline. Returns void; errors surface as toasts.
+export type SendToPipelineFn = (bookIds: number[]) => void | Promise<void>;
 
 // ─── API response shapes ────────────────────────────────────
 // One per high-traffic endpoint. Use as the generic on api.get<T>()

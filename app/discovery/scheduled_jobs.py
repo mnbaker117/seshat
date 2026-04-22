@@ -1,8 +1,6 @@
 """
 Scheduled jobs for the discovery domain.
 
-Ported from AthenaScout v1.2.0's main.py lifespan:
-
   - `sync_all_libraries` — APScheduler interval job. For each discovered
     library, skip the sync if metadata.db mtime is unchanged, otherwise
     call the backend's sync() method. On skipped ticks, bumps the

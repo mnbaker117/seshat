@@ -10,7 +10,7 @@ import { ThemeProvider, useTheme, useThemeControls } from "./theme";
 import { Spin } from "./components/Spin";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
-// Pipeline pages (from Hermeece)
+// Pipeline pages
 import LoginPage from "./pages/LoginPage";
 import PipelineDashboard from "./pages/Dashboard";
 import ReviewPage from "./pages/ReviewPage";

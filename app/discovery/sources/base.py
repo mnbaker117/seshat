@@ -1,5 +1,5 @@
 """
-Base classes and result types for AthenaScout source plugins.
+Base classes and result types for discovery source plugins.
 
 Any new source plugin should:
 1. Subclass BaseSource
@@ -89,7 +89,7 @@ class BaseSource:
                        to avoid getting rate-limited by the source API).
         """
         self.rate_limit = rate_limit
-        self.logger = logging.getLogger(f"athenascout.{self.name}")
+        self.logger = logging.getLogger(f"seshat.discovery.{self.name}")
         self._client: Optional[httpx.AsyncClient] = None
 
     def _get_client(self) -> httpx.AsyncClient:

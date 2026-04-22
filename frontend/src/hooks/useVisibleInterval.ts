@@ -14,9 +14,6 @@
 //   useVisibleInterval(() => refresh(), 5000);
 //
 // Pass `delayMs <= 0` or a falsy callback to disable.
-//
-// Reference impl: AthenaScout commit `7858852` (Sprint 7.3) — same
-// pattern, different filename.
 import { useEffect, useRef } from "react";
 
 export function useVisibleInterval(

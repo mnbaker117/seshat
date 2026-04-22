@@ -15,9 +15,9 @@
 //
 // kinds: info | success | warn | error
 //
-// The Toaster component listens for "athenascout:toast" events and
-// renders an iOS-style banner stack at the top of the viewport that
-// auto-dismisses after ~5s and is click-to-dismiss.
+// The Toaster component listens for EVT.Toast events and renders an
+// iOS-style banner stack at the top of the viewport that auto-dismisses
+// after ~5s and is click-to-dismiss.
 
 import { EVT } from "../types";
 

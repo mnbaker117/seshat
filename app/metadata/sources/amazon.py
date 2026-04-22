@@ -57,8 +57,7 @@ _HIRES_RE = re.compile(r'"hiRes"\s*:\s*"([^"]+)"')
 # Junk-listing pre-filter — third-party seller titles, bracketed
 # format suffixes, and "By AUTHOR — Title" sham listings. These
 # slip into Amazon search results and waste a detail-page fetch
-# returning nothing useful. Pattern ported from AthenaScout's
-# Amazon source (commit 423450b on athena-dev). Examples it catches:
+# returning nothing useful. Examples it catches:
 #   "[(Kingdom's Hope )] [Author: Chuck Black] [May-2006]"
 #   "By BLACK CHUCK - SIR KENDRICK..."
 #   "By Chuck Black - Kingdom's Edge (2006-05-16) [Paperback]"

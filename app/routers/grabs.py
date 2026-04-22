@@ -1,22 +1,20 @@
 """
-AthenaScout integration endpoint.
+External grabs endpoint.
 
-    POST /api/v1/grabs/from-athenascout
+    POST /api/v1/grabs/inject-batch
 
-Accepts a batch of MAM torrent URLs (or bare IDs) from AthenaScout's
-"Send to Seshat" button. Each URL is parsed into a torrent_id and
-routed through `inject_grab`, which handles the full
+Accepts a batch of MAM torrent URLs (or bare IDs) from any external
+caller (browser bookmarklet, user script, cron job, curl) and routes
+each one through `inject_grab`, which handles the full
 filter-skip → fetch → qBit pipeline.
 
 Authors from the request are optionally auto-trained to the allow
 list if they're not already present. This covers the case where
-AthenaScout knows the author (because the user is scanning their
-library) but Seshat doesn't (because it hasn't seen that author
-in an IRC announce yet).
+the caller knows the author but Seshat hasn't seen it in an IRC
+announce yet.
 
-No MAM API key or special auth beyond the existing session cookie
-middleware — AthenaScout and Seshat are both LAN services behind
-the same auth boundary.
+Session auth (auth_secret cookie) is enforced by the global
+middleware — no separate API key.
 """
 from __future__ import annotations
 
@@ -33,9 +31,9 @@ from app.database import get_db
 from app.orchestrator.auto_train import train_author
 from app.orchestrator.dispatch import inject_grab
 
-_log = logging.getLogger("seshat.routers.athenascout")
+_log = logging.getLogger("seshat.routers.grabs")
 
-router = APIRouter(prefix="/api/v1/grabs", tags=["athenascout"])
+router = APIRouter(prefix="/api/v1/grabs", tags=["grabs"])
 
 _MAM_URL_RX = re.compile(r"/t/(\d+)")
 _BARE_ID_RX = re.compile(r"^\d+$")
@@ -44,26 +42,20 @@ _BARE_ID_RX = re.compile(r"^\d+$")
 class GrabItem(BaseModel):
     url_or_id: str
     author: Optional[str] = None
-    # Book title as AthenaScout knows it. Passed to `inject_grab`
-    # as `torrent_name` so the grab row, dashboard, review queue
-    # label, and enricher fuzzy-search all use the real title
-    # instead of the `manual_inject_<id>` placeholder. Absent from
-    # pre-v1.1.4 AthenaScout clients — in that case the placeholder
-    # still lands on the row (backward-compatible fallback).
+    # Book title as the caller knows it. Passed to `inject_grab` as
+    # `torrent_name` so the grab row, dashboard, review queue label,
+    # and enricher fuzzy-search all use the real title instead of the
+    # `manual_inject_<id>` placeholder. Optional — when omitted the
+    # placeholder still lands on the row.
     title: Optional[str] = None
-    # MAM category as AthenaScout saw it during its own MAM scan
-    # (e.g. "Ebooks - Fantasy"). Lands on the grab row's `category`
-    # field so the dashboard filter, budget-watcher category
+    # MAM category (e.g. "Ebooks - Fantasy"). Lands on the grab row's
+    # `category` field so the dashboard filter, budget-watcher category
     # reconciliation, and any cross-ref against the IRC announce
-    # category gate all have the right value. Empty string from
-    # pre-v1.1.5 AthenaScout clients — grab row then keeps the
-    # existing empty-category fallback.
+    # category gate all have the right value. Optional.
     category: Optional[str] = None
-    # Optional pre-fetched metadata bundle from AthenaScout's source
-    # scan. When present, Seshat stores the dict on the grab row
-    # and skips its own enricher chain in _prepare_book — saves
-    # 6 outbound scraper requests per book and guarantees metadata
-    # consistency between the two apps. See plan item 1.2.
+    # Optional pre-fetched metadata bundle. When present, Seshat stores
+    # the dict on the grab row and skips its own enricher chain in
+    # _prepare_book — saves 6 outbound scraper requests per book.
     #
     # Expected keys (all optional):
     #   goodreads_url, hardcover_url, kobo_url, amazon_url,
@@ -74,7 +66,7 @@ class GrabItem(BaseModel):
     metadata: Optional[dict[str, Any]] = None
 
 
-class AthenascoutRequest(BaseModel):
+class InjectBatchRequest(BaseModel):
     items: list[GrabItem] = Field(..., min_length=1, max_length=100)
 
 
@@ -85,7 +77,7 @@ class GrabResultItem(BaseModel):
     error: Optional[str] = None
 
 
-class AthenascoutResponse(BaseModel):
+class InjectBatchResponse(BaseModel):
     submitted: int
     failed: int
     results: list[GrabResultItem]
@@ -99,8 +91,8 @@ def _extract_torrent_id(url_or_id: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-@router.post("/from-athenascout", response_model=AthenascoutResponse)
-async def from_athenascout(body: AthenascoutRequest) -> AthenascoutResponse:
+@router.post("/inject-batch", response_model=InjectBatchResponse)
+async def inject_batch(body: InjectBatchRequest) -> InjectBatchResponse:
     if state.dispatcher is None:
         raise HTTPException(503, "dispatcher not initialized")
 
@@ -125,7 +117,7 @@ async def from_athenascout(body: AthenascoutRequest) -> AthenascoutResponse:
         if item.author:
             db = await get_db()
             try:
-                await train_author(db, item.author, source="athenascout")
+                await train_author(db, item.author, source="external_grab")
             except Exception:
                 pass
             finally:
@@ -138,12 +130,12 @@ async def from_athenascout(body: AthenascoutRequest) -> AthenascoutResponse:
                 torrent_name=(item.title or "").strip(),
                 category=(item.category or "").strip(),
                 author_blob=item.author or "",
-                raw_line=f"athenascout:{item.url_or_id}",
+                raw_line=f"external:{item.url_or_id}",
             )
             ok = result.action in ("submit", "queue") and result.error is None
 
-            # Persist the AthenaScout metadata bundle on the grab row
-            # so _prepare_book can use it to skip the enricher later.
+            # Persist the metadata bundle on the grab row so
+            # _prepare_book can use it to skip the enricher later.
             # Best-effort: a JSON serialization or DB failure here must
             # not flip the grab's success — the torrent was accepted;
             # we just lose the short-circuit optimization.
@@ -160,7 +152,7 @@ async def from_athenascout(body: AthenascoutRequest) -> AthenascoutResponse:
                         await db.close()
                 except Exception:
                     _log.warning(
-                        "athenascout: failed to persist metadata for grab_id=%s (non-fatal)",
+                        "inject-batch: failed to persist metadata for grab_id=%s (non-fatal)",
                         result.grab_id, exc_info=True,
                     )
 
@@ -187,9 +179,9 @@ async def from_athenascout(body: AthenascoutRequest) -> AthenascoutResponse:
             failed += 1
 
     _log.info(
-        "athenascout batch: %d submitted, %d failed out of %d",
+        "inject-batch: %d submitted, %d failed out of %d",
         submitted, failed, len(body.items),
     )
-    return AthenascoutResponse(
+    return InjectBatchResponse(
         submitted=submitted, failed=failed, results=results
     )

@@ -5,9 +5,6 @@ Simple JSON API at ibdb.dev with no auth required. Returns book metadata
 including title, authors, ISBN, cover URL, description, publisher, and
 publication date. Positioned as a supplementary source for ISBN and
 publisher backfill when primary sources miss.
-
-Adapted from Hermeece's ibdb.py for AthenaScout's author-centric model.
-Uses the scoring system for match quality evaluation.
 """
 import logging
 from typing import Optional

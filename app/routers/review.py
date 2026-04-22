@@ -60,9 +60,8 @@ class SaveRequest(BaseModel):
     """Metadata-only edit without approving or delivering.
 
     Lets the user fix a mistitled/misauthored review row (common
-    symptom: a pre-v1.1.4 AthenaScout send left a
-    `manual_inject_<id>` placeholder on the grab row that the
-    enricher then chased against garbage) and re-run enrichment
+    symptom: a `manual_inject_<id>` placeholder on the grab row that
+    the enricher then chased against garbage) and re-run enrichment
     in a separate step.
     """
     metadata: dict[str, Any]

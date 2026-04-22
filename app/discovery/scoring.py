@@ -1,9 +1,8 @@
 """
 Similarity scoring for metadata matches.
 
-Ported from Hermeece's battle-tested scoring.py (2026-04-13). Used by
-the MAM torrent matcher and the merge pipeline for confidence-based
-dedup decisions.
+Used by the MAM torrent matcher and the merge pipeline for
+confidence-based dedup decisions.
 
 Three title-matching signals combined (best wins):
   - Jaccard overlap — token intersection/union, good for word reordering

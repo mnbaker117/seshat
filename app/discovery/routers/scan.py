@@ -3,7 +3,7 @@ Scan-orchestration endpoints.
 
 Three scan kinds run through this router:
   - Library sync: imports the user's curated library (Calibre today,
-    other backends in the future) into AthenaScout's DB.
+    other backends in the future) into the discovery DB.
   - Author/source lookup: hits Goodreads/Hardcover/Kobo for each author.
   - Full re-scan: same as lookup but visits every book page to refresh
     metadata, ignoring the cache window.

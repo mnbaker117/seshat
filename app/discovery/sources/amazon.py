@@ -9,13 +9,10 @@ Two-pass flow per author:
   1. Search: amazon.com/s for books by the author name
   2. Detail: amazon.com/dp/{ASIN} for series info, metadata
 
-Ported from Hermeece's battle-tested Amazon scraper (2026-04-13) with
-the following adaptations for AthenaScout:
-  - Author-centric instead of book-centric (get_author_books)
-  - Uses httpx.AsyncClient instead of requests.Session
-  - Groups results into SeriesResult/BookResult for merge pipeline
-  - Integrates with existing_titles/owned_titles optimization
-  - Supports _on_book/_on_new_candidate progress hooks
+Author-centric (get_author_books), using httpx.AsyncClient, with results
+grouped into SeriesResult/BookResult for the merge pipeline and
+existing_titles/owned_titles optimization via _on_book/_on_new_candidate
+progress hooks.
 
 Key anti-bot measures:
   - Plain httpx with realistic Firefox headers (no cloudscraper)

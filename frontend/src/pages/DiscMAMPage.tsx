@@ -9,12 +9,9 @@
 // The unified scan widget on the Dashboard is what shows live scan
 // progress; this page just displays the latest results.
 //
-// NOTE (2026-04-23): The "Send to Hermeece" cross-container plumbing
-// (GET /discovery/hermeece/status + POST /discovery/hermeece/send) is
-// AthenaScout-era vestige. Those endpoints don't exist in Seshat's
-// merged shell, so the status call always 404s, `hermConf` stays
-// false, and the Send button never renders. Kept in the code so a
-// future "send to pipeline queue" feature has a ready mount point.
+// Found-on-MAM rows show a "Send to pipeline" button that POSTs to
+// /api/discovery/send-to-pipeline, which calls inject_grab() on the
+// pipeline dispatcher directly (no HTTP round-trip — same process).
 import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "../theme";
 import type { Theme } from "../theme";
@@ -31,7 +28,7 @@ import type {
   BookAction,
   MamStatusResponse,
   NavFn,
-  SendToHermeeceFn,
+  SendToPipelineFn,
 } from "../types";
 
 // The shape of a MAM scan progress snapshot returned by
@@ -108,13 +105,13 @@ interface BulkScanSourcesResponse {
   errors?: number;
 }
 
-// POST /discovery/hermeece/send — vestigial; see module docstring.
-interface HermeeceSendResponse {
+// POST /discovery/send-to-pipeline
+interface SendToPipelineResponse {
   sent?: number;
   skipped?: number;
   message?: string;
 }
-interface HermeeceStatusResponse {
+interface PipelineStatusResponse {
   configured?: boolean;
   reachable?: boolean;
 }
@@ -173,8 +170,8 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
 
-  // Hermeece integration — vestigial (see module docstring).
-  const [hermConf, setHermConf] = useState(false);
+  // Pipeline reachability — drives Send-to-pipeline button visibility.
+  const [pipelineReady, setPipelineReady] = useState(false);
 
   const toggleSel = (id: number) =>
     setSel((p) => {
@@ -229,8 +226,8 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
       })
       .catch(() => {});
     api
-      .get<HermeeceStatusResponse>("/discovery/hermeece/status")
-      .then((r) => setHermConf(!!r.configured && !!r.reachable))
+      .get<PipelineStatusResponse>("/discovery/pipeline/status")
+      .then((r) => setPipelineReady(!!r.configured && !!r.reachable))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -427,17 +424,17 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
     setBusy(false);
   };
 
-  const sendToHermeece: SendToHermeeceFn = async (bookIds) => {
+  const sendToPipeline: SendToPipelineFn = async (bookIds) => {
     if (!bookIds || !bookIds.length) return;
     setBusy(true);
     try {
-      const r = await api.post<HermeeceSendResponse>(
-        "/discovery/hermeece/send",
+      const r = await api.post<SendToPipelineResponse>(
+        "/discovery/send-to-pipeline",
         { book_ids: bookIds },
       );
       if ((r.sent || 0) > 0) {
         alert(
-          `Sent ${r.sent} book(s) to Hermeece!${r.skipped ? ` (${r.skipped} skipped — not Found)` : ""}`,
+          `Sent ${r.sent} book(s) to pipeline!${r.skipped ? ` (${r.skipped} skipped — not Found)` : ""}`,
         );
       } else {
         alert(r.message || "No books sent");
@@ -927,10 +924,10 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
               >
                 {busy ? "…" : ""} Scan MAM
               </Btn>
-              {hermConf && tab === "download" ? (
+              {pipelineReady && tab === "download" ? (
                 <Btn
                   size="sm"
-                  onClick={() => sendToHermeece([...sel])}
+                  onClick={() => sendToPipeline([...sel])}
                   disabled={busy}
                   style={{
                     background: t.pur + "22",
@@ -938,7 +935,7 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
                     border: `1px solid ${t.pur}44`,
                   }}
                 >
-                  {busy ? "…" : "⬇"} Send to Hermeece
+                  {busy ? "…" : "⬇"} Send to pipeline
                 </Btn>
               ) : null}
               <span
@@ -1020,8 +1017,8 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
           onBookClick={toggleSb}
           showAuthor={true}
           showMamLink={tab === "download"}
-          onSendToHermeece={
-            hermConf && tab === "download" ? sendToHermeece : undefined
+          onSendToPipeline={
+            pipelineReady && tab === "download" ? sendToPipeline : undefined
           }
           selMode={selMode}
           sel={sel}
@@ -1034,8 +1031,8 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
           onBookClick={toggleSb}
           showAuthor={true}
           showMamLink={tab === "download"}
-          onSendToHermeece={
-            hermConf && tab === "download" ? sendToHermeece : undefined
+          onSendToPipeline={
+            pipelineReady && tab === "download" ? sendToPipeline : undefined
           }
           selMode={selMode}
           sel={sel}

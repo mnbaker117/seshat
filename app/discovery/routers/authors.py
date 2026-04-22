@@ -295,7 +295,7 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
 
     Endpoints that call this return immediately with
     `{"status": "started"}`. The frontend polls `/api/scan-status`
-    (and listens for the `athenascout:scan-started` window event)
+    (and listens for the `seshat:scan-started` window event)
     to surface progress and completion.
 
     `runner` is a zero-arg async callable that returns when the work
@@ -519,7 +519,7 @@ async def scan_authors_sources(data: dict = Body(...)):
     # Runs as a background task tracked by state._lookup_task so the
     # Dashboard Stop button can cancel mid-stream. The endpoint
     # returns immediately after spawning; the frontend polls
-    # /api/scan-status and listens for athenascout:scan-started to
+    # /api/scan-status and listens for seshat:scan-started to
     # refresh the widget without polling lag.
     async def _runner():
         nonlocal_state = {"scanned": 0, "errors": 0, "new": 0}

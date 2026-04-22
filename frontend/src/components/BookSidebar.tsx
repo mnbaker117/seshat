@@ -4,7 +4,7 @@
 // when a row is clicked. Displays full metadata, supports inline edit
 // via the PUT /books/{id} endpoint, surfaces the cross-library "Also
 // Available As…" row when the book has a work sibling in a different
-// format, and exposes the MAM / Hermeece / Calibre Web action set.
+// format, and exposes the MAM / pipeline / Calibre Web action set.
 //
 // The panel mounts/unmounts in place — the `closing` prop from the
 // parent drives the slide-out animation because the parent owns the
@@ -24,6 +24,7 @@ import type {
   MamStatusResponse,
   WorkSibling,
 } from "../types";
+import { EVT } from "../types";
 
 interface BookSidebarProps {
   book: Book;
@@ -65,8 +66,12 @@ type SuggestionAction = "apply" | "ignore" | "delete";
 
 interface SettingsResponse {
   calibre_web_url?: string;
-  hermeece_url?: string;
   abs_web_url?: string;
+}
+
+interface PipelineStatusResponse {
+  configured?: boolean;
+  reachable?: boolean;
 }
 
 interface MamScanResult {
@@ -79,7 +84,7 @@ interface MamScanResponse {
   results?: MamScanResult[];
 }
 
-interface HermeeceSendResponse {
+interface SendToPipelineResponse {
   sent: number;
   message?: string;
 }
@@ -125,13 +130,13 @@ export function BookSidebar({
   });
   const [saving, setSaving] = useState(false);
   const [cwUrl, setCwUrl] = useState("");
-  const [hermeeceUrl, setHermeeceUrl] = useState("");
+  const [pipelineReady, setPipelineReady] = useState(false);
   const [absUrl, setAbsUrl] = useState("");
   const [mamScanning, setMamScanning] = useState(false);
   const [mamOn, setMamOn] = useState(false);
   const [suggestion, setSuggestion] = useState<SeriesSuggestion | null>(null);
   const [sugBusy, setSugBusy] = useState<SuggestionAction | null>(null);
-  const [hermSending, setHermSending] = useState(false);
+  const [sending, setSending] = useState(false);
 
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true));
@@ -143,9 +148,12 @@ export function BookSidebar({
       .get<SettingsResponse>("/discovery/settings")
       .then((s) => {
         setCwUrl(s.calibre_web_url || "");
-        setHermeeceUrl(s.hermeece_url || "");
         setAbsUrl(s.abs_web_url || "");
       })
+      .catch(() => {});
+    api
+      .get<PipelineStatusResponse>("/discovery/pipeline/status")
+      .then((r) => setPipelineReady(!!r.configured && !!r.reachable))
       .catch(() => {});
   }, []);
 
@@ -192,7 +200,7 @@ export function BookSidebar({
       else if (action === "delete")
         await api.del(`/discovery/series-suggestions/${suggestion.id}`);
       try {
-        window.dispatchEvent(new CustomEvent("athenascout:suggestions-changed"));
+        window.dispatchEvent(new CustomEvent(EVT.SuggestionsChanged));
       } catch {
         /* ignore */
       }
@@ -232,23 +240,23 @@ export function BookSidebar({
     setMamScanning(false);
   };
 
-  const sendToHermeece = async () => {
-    if (hermSending) return;
-    setHermSending(true);
+  const sendToPipeline = async () => {
+    if (sending) return;
+    setSending(true);
     try {
-      const r = await api.post<HermeeceSendResponse>(
-        "/discovery/hermeece/send",
+      const r = await api.post<SendToPipelineResponse>(
+        "/discovery/send-to-pipeline",
         { book_ids: [book.id] },
       );
       if (r.sent > 0) {
-        alert("Sent to Hermeece for download!");
+        alert("Sent to pipeline for download!");
       } else {
         alert(r.message || "Failed to send");
       }
     } catch (e) {
       alert(`Send failed: ${(e as Error).message || e}`);
     }
-    setHermSending(false);
+    setSending(false);
   };
 
   if (!book) return null;
@@ -930,8 +938,8 @@ export function BookSidebar({
                 active (pending or ignored) suggestion exists for this
                 book. Apply/Ignore/Delete hit the same endpoints
                 SuggestionsPage uses and dispatch the same
-                `athenascout:suggestions-changed` event so the navbar
-                badge count stays in sync. */}
+                EVT.SuggestionsChanged event so the navbar badge count
+                stays in sync. */}
             {suggestion
               ? (() => {
                   const isPending = suggestion.status === "pending";
@@ -1160,20 +1168,20 @@ export function BookSidebar({
                         {book.mam_status ? "Re-scan" : "Scan"}
                       </Btn>
                     ) : null}
-                    {hermeeceUrl &&
+                    {pipelineReady &&
                     book.mam_status === "found" &&
                     !book.mam_my_snatched ? (
                       <Btn
                         size="sm"
-                        onClick={sendToHermeece}
-                        disabled={hermSending}
+                        onClick={sendToPipeline}
+                        disabled={sending}
                         style={{
                           background: t.accent + "22",
                           color: t.accent,
                           border: `1px solid ${t.accent}44`,
                         }}
                       >
-                        {hermSending ? <Spin /> : "⬇"} Send to Hermeece
+                        {sending ? <Spin /> : "⬇"} Send to pipeline
                       </Btn>
                     ) : null}
                   </div>

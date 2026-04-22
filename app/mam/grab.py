@@ -18,8 +18,7 @@ Failure detection — the hybrid you approved:
   because MAM does not always use HTTP status codes consistently:
   they sometimes serve a 200 OK response with the HTML login page
   body, which looks like success at the transport layer but is
-  actually an auth failure. AthenaScout's register_ip handler hit the
-  same gotcha and we lift the same defensive check here.
+  actually an auth failure, so we defensively sniff the body.
 
   Decision matrix:
 

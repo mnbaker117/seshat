@@ -33,7 +33,7 @@ _KIND_LABELS = {
     "scan_complete": "Source scans",
     "new_books":     "New books discovered",
     "mam":           "MAM scans",
-    "hermeece":      "Sent to Hermeece",
+    "pipeline":      "Sent to pipeline",
     "library":       "Library syncs",
     "cookie":        "MAM cookie rotations",
 }
@@ -42,11 +42,11 @@ _KIND_LABELS = {
 def _format_digest(events: list[DigestEvent], schedule: str) -> tuple[str, str]:
     """Return (title, message) for a consolidated digest of `events`."""
     counts = Counter(e.kind for e in events)
-    title = f"AthenaScout {schedule} digest — {len(events)} event(s)"
+    title = f"Seshat {schedule} digest — {len(events)} event(s)"
 
     lines: list[str] = []
     # Section per kind in a stable preferred order
-    for kind in ("scan_complete", "new_books", "mam", "hermeece", "library", "cookie"):
+    for kind in ("scan_complete", "new_books", "mam", "pipeline", "library", "cookie"):
         kind_events = [e for e in events if e.kind == kind]
         if not kind_events:
             continue

@@ -6,11 +6,10 @@ responses with volumeInfo containing title, authors, publisher,
 publishedDate, description, ISBN identifiers, pageCount, categories,
 language, and image links.
 
-Known limitation from AthenaScout development: match quality is poor
-for niche/indie titles, and there's no native series/series_index
-field. We parse series from the title when possible and use Google
-Books primarily as a fallback for ISBN and publisher when primary
-sources (MAM, Goodreads, Hardcover) miss.
+Known limitation: match quality is poor for niche/indie titles, and
+there's no native series/series_index field. We parse series from the
+title when possible and use Google Books primarily as a fallback for
+ISBN and publisher when primary sources (MAM, Goodreads, Hardcover) miss.
 
 Cover quality is mediocre (small thumbnails); we upgrade the zoom
 parameter in the URL for the best available version.

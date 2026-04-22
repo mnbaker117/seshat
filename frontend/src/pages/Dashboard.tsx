@@ -1,7 +1,7 @@
 // Dashboard — pipeline control center.
 //
-// Modeled after AthenaScout's dashboard: hero status, stat grid,
-// pipeline health, quick actions with context, and tools sidebar.
+// Layout: hero status, stat grid, pipeline health, quick actions with
+// context, and tools sidebar.
 import { useCallback, useEffect, useState } from "react";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";

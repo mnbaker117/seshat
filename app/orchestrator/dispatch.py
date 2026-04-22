@@ -261,9 +261,10 @@ async def inject_grab(
     still counts against the snatch budget like any other.
 
     Used by:
-      - the manual-inject HTTP endpoint (Phase 1)
+      - the manual-inject HTTP endpoint
       - the cookie-rotation manual test recipe
-      - the eventual AthenaScout integration (Phase 3)
+      - the external grabs endpoint (`/api/v1/grabs/inject-batch`)
+      - the discovery domain's send-to-pipeline flow
 
     The metadata fields (`torrent_name`, `category`, `author_blob`)
     are only used for audit-log readability — the dispatcher doesn't

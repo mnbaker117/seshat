@@ -36,9 +36,8 @@ class TestBuildHeaders:
 
     def test_user_agent_is_curl_8(self):
         # The curl/8.0 UA is load-bearing — MAM has been observed to
-        # subtly reject other UAs. AthenaScout's mam.py docs the same
-        # constraint. Pin the value down so a "tidy up the headers"
-        # refactor can't quietly break production.
+        # subtly reject other UAs. Pin the value down so a "tidy up
+        # the headers" refactor can't quietly break production.
         headers = build_headers("abc123")
         assert headers["User-Agent"] == "curl/8.0"
 

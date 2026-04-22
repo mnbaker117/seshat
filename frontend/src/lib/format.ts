@@ -36,7 +36,7 @@ export function fmtRatio(n: number | null | undefined): string {
   return `${parseInt(whole).toLocaleString("en-US")}.${dec}`;
 }
 
-// ─── Discovery-domain formatters (from AthenaScout) ─────────
+// ─── Discovery-domain formatters ────────────────────────────
 
 /** Percentage: pct(50, 200) → 25, pct(0, 0) → 100 */
 export const pct = (o: number, t: number): number =>

@@ -1,5 +1,5 @@
 """
-MyAnonamouse (MAM) integration.
+MAM integration.
 
 Looks up each book in the user's library against MAM's torrent catalog so the
 UI can show what's already available, what's missing, and what would be a
@@ -7,7 +7,7 @@ useful upload.
 
 Authentication:
   MAM session tokens are IP- (or ASN-)locked. The user generates one from
-  MAM → Preferences → Security and pastes it into AthenaScout's settings.
+  MAM → Preferences → Security and pastes it into Seshat's settings.
   Before each scan we ping the dynamic-seedbox endpoint to register the
   current IP (skipped for ASN-locked sessions), then run searches with the
   token in a `mam_id` cookie.
@@ -586,8 +586,8 @@ def _get_client() -> httpx.AsyncClient:
     """Lazy-initialized module-level httpx.AsyncClient for connection reuse.
 
     MUST be called from within a running asyncio event loop — the client
-    binds to whichever loop is active at creation time. AthenaScout runs
-    one uvicorn loop for the whole process lifetime, so this is safe.
+    binds to whichever loop is active at creation time. Seshat runs one
+    uvicorn loop for the whole process lifetime, so this is safe.
     """
     global _client
     if _client is None:
@@ -977,9 +977,9 @@ def _evaluate_results(
             "author_matched": author_ok,
             "seeders": int(item.get("seeders", 0) or 0),
             "my_snatched": my_snatched,
-            # Passed through to the books row so Send-to-Hermeece can
-            # forward it as `GrabItem.category` (v1.1.5). MAM returns
-            # values like "Ebooks - Fantasy" here — passed along as-is.
+            # Passed through to the books row so Send-to-Pipeline can
+            # forward it as the grab category. MAM returns values like
+            # "Ebooks - Fantasy" here — passed along as-is.
             "category": category,
         })
 

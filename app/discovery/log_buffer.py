@@ -1,9 +1,9 @@
 """
 In-memory ring buffer for the log viewer.
 
-Captures the last N log records from the `athenascout` logger tree so
-the log viewer page can serve them instantly without reading Docker logs.
-Attached to the root `athenascout` logger at startup (main.py).
+Captures the last N log records from the `seshat.discovery` logger tree
+so the log viewer page can serve them instantly without reading Docker
+logs. Attached to the root `seshat.discovery` logger at startup (main.py).
 """
 import logging
 from collections import deque
@@ -38,7 +38,7 @@ _handler: Optional[RingBufferHandler] = None
 
 
 def init_log_buffer(capacity: int = 1000) -> RingBufferHandler:
-    """Create and attach the ring buffer handler to the athenascout logger."""
+    """Create and attach the ring buffer handler to the discovery logger."""
     global _handler
     _handler = RingBufferHandler(capacity=capacity)
     _handler.setFormatter(

@@ -1,7 +1,7 @@
 """
 Configuration loading and persistence.
 
-Two layers of config, mirroring the AthenaScout pattern:
+Two layers of config:
 
   1. **Environment variables** (read once at import time): things the
      deployment owner sets via `docker run -e ...`. These seed
@@ -31,7 +31,6 @@ _log = logging.getLogger("seshat.config")
 
 # ─── Environment variables (first-run seeds) ─────────────────
 
-# Web server bind. NOT 8787 — that's AthenaScout.
 ENV_WEBUI_HOST = os.getenv("WEBUI_HOST", "0.0.0.0")
 ENV_WEBUI_PORT = int(os.getenv("WEBUI_PORT", "8789"))
 
@@ -78,8 +77,8 @@ ENV_STAGING_PATH = os.getenv(
 # ntfy endpoint for notifications. Empty disables notifications.
 ENV_NTFY_URL = os.getenv("NTFY_URL", "")
 
-# Auth secret — for HTTP-only session cookies. Same handling as AthenaScout:
-# env var takes priority, then a file under DATA_DIR, then in-memory fallback.
+# Auth secret — for HTTP-only session cookies. Env var takes priority,
+# then a file under DATA_DIR, then in-memory fallback.
 ENV_AUTH_SECRET = os.getenv("SESHAT_AUTH_SECRET", "")
 
 # Dry-run mode: connect to real IRC and parse real announces, but never fetch
@@ -87,7 +86,7 @@ ENV_AUTH_SECRET = os.getenv("SESHAT_AUTH_SECRET", "")
 # snatch budget.
 ENV_DRY_RUN = os.getenv("SESHAT_DRY_RUN", "").lower() in ("true", "1", "yes")
 
-# ── Discovery-domain env vars (from AthenaScout) ────────────
+# ── Discovery-domain env vars ───────────────────────────────
 # Calibre library discovery paths.
 CALIBRE_PATH = os.getenv("CALIBRE_PATH", "")
 CALIBRE_EXTRA_PATHS = os.getenv("CALIBRE_EXTRA_PATHS", "")
@@ -238,8 +237,8 @@ DEFAULT_SETTINGS = {
     # Unix timestamp — grandfather line for qBit orphan adoption.
     # The download watcher only adopts torrents with
     # `added_on >= qbit_orphan_adoption_since`. Older torrents in the
-    # watch category (pre-Seshat / Hermeece-era / prior install) are
-    # treated as pre-existing and skipped, so a long-running qBit
+    # watch category (pre-existing from a prior install) are treated
+    # as pre-existing and skipped, so a long-running qBit
     # instance with thousands of seeding books doesn't get
     # mass-adopted on first tick after deploying the adopter.
     # Initialized to `time.time()` once at lifespan startup when the
@@ -545,9 +544,9 @@ def apply_logging(verbose: bool = False):
 
 
 # ─── Settings cache ──────────────────────────────────────────
-# Same pattern as AthenaScout: cache the parsed dict keyed by the
-# settings file's mtime. Any save_settings() bumps the mtime, which
-# invalidates the cache on the next load_settings() call automatically.
+# Cache the parsed dict keyed by the settings file's mtime. Any
+# save_settings() bumps the mtime, which invalidates the cache on the
+# next load_settings() call automatically.
 _settings_cache: dict = {"mtime": object(), "data": None}
 
 
@@ -649,7 +648,7 @@ def save_settings(settings: dict):
     _settings_cache["data"] = dict(settings)
 
 
-# ─── Library discovery (from AthenaScout) ────────────────────
+# ─── Library discovery ───────────────────────────────────────
 
 def slugify(name: str) -> str:
     """Convert a folder name to a safe slug for DB filenames."""

@@ -5,8 +5,7 @@ Power-user tool for inspecting and surgically editing Seshat's
 SQLite database without SSH'ing into the container. Useful for
 debugging review-queue issues, confirming author-list state,
 checking grab history, and repairing the occasional bad row
-(e.g. a `manual_inject_<id>` torrent_name leaked onto a grab row
-by a pre-v1.1.4 AthenaScout send).
+(e.g. a stray `manual_inject_<id>` torrent_name).
 
 v1.1 shipped read-only; v1.2 adds write endpoints:
 

@@ -46,93 +46,6 @@ def get_db_path(slug=None):
     return DATA_DIR / f"seshat_{effective_slug}.db"
 
 
-def _find_legacy_db():
-    """Find a legacy single-file discovery DB (from AthenaScout).
-
-    Only AthenaScout's `athenascout.db` qualifies as "legacy" here —
-    Seshat's current pipeline DB is ALSO called `seshat.db`, so
-    including it in this scan means every startup tries to read a
-    `books` table from the pipeline DB (which has `grabs`,
-    `work_links`, etc. but no `books`) and logs a spurious warning.
-    The early pre-multi-library Seshat shape that used `seshat.db`
-    for discovery content never actually shipped to users who'd
-    be upgrading, so dropping it here is safe.
-    """
-    candidate = DATA_DIR / "athenascout.db"
-    if candidate.exists():
-        return candidate
-    return None
-
-
-def migrate_legacy_db(target_slug):
-    """Rename a legacy single-file DB to the per-library filename.
-
-    Called once during startup when migrating from single-library to multi-library.
-    Only renames if the legacy file exists and the target does not.
-    Returns the slug the DB was migrated to, or None if no migration occurred.
-    """
-    legacy = _find_legacy_db()
-    if legacy is None:
-        return None
-    target = DATA_DIR / f"seshat_{target_slug}.db"
-    if not target.exists():
-        legacy.rename(target)
-        _db_logger.info(f"Migrated legacy database {legacy.name} → seshat_{target_slug}.db")
-        return target_slug
-    return None
-
-
-def match_legacy_db_to_library(libraries):
-    """Determine which discovered library a legacy single-file DB belongs to.
-
-    Counts books in the legacy DB and each Calibre metadata.db, then picks
-    the library whose book count is closest.
-
-    Returns the best-matching library slug, or the first library's slug as fallback.
-    """
-    import sqlite3
-
-    legacy = _find_legacy_db()
-    if legacy is None or len(libraries) <= 1:
-        return libraries[0]["slug"] if libraries else "default"
-
-    # Count books in the legacy AthenaScout DB
-    try:
-        conn = sqlite3.connect(f"file:{legacy}?mode=ro", uri=True)
-        legacy_count = conn.execute("SELECT COUNT(*) FROM books WHERE source='calibre'").fetchone()[0]
-        conn.close()
-    except Exception as e:
-        _db_logger.warning(f"Could not read legacy DB for migration matching: {e}")
-        return libraries[0]["slug"]
-
-    _db_logger.info(f"Legacy DB has {legacy_count} Calibre-sourced books")
-
-    # Count books in each library's source database. The lookup uses
-    # `source_db_path` (the library-agnostic key) with a fallback to
-    # the legacy `calibre_db_path` so we don't break any external
-    # caller still passing the old shape.
-    best_slug = libraries[0]["slug"]
-    best_diff = float("inf")
-    for lib in libraries:
-        db_path = lib.get("source_db_path") or lib.get("calibre_db_path")  # legacy key for backwards compat
-        if not db_path:
-            _db_logger.warning(f"  Library '{lib['name']}' has no source_db_path — skipping legacy-DB matching")
-            continue
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cal_count = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
-            conn.close()
-            diff = abs(legacy_count - cal_count)
-            _db_logger.info(f"  Library '{lib['name']}': {cal_count} books in Calibre (diff={diff})")
-            if diff < best_diff:
-                best_diff = diff
-                best_slug = lib["slug"]
-        except Exception as e:
-            _db_logger.warning(f"  Could not read Calibre DB for '{lib['name']}' at {db_path}: {e}")
-
-    _db_logger.info(f"Best match for legacy DB: '{best_slug}'")
-    return best_slug
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS authors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -407,7 +320,7 @@ MIGRATIONS = [
     # purely UX so the user can tell J.N. Chaney's co-author chain
     # ("with Christopher Hopper") apart from Arand ↔ Darren.
     "ALTER TABLE pen_name_links ADD COLUMN link_type TEXT NOT NULL DEFAULT 'pen_name'",
-    # v1.1.5: MAM category captured during scan + forwarded to Hermeece.
+    # v1.1.5: MAM category captured during scan + forwarded to the pipeline.
     # Reminder for future migrations: this list is APPEND-ONLY — the
     # runner keys on PRAGMA user_version, which is the count of entries
     # applied. Inserting anywhere except the end means the new entry's

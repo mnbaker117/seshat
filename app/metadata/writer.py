@@ -195,10 +195,10 @@ def _set_meta(md_element, name: str, content) -> bool:
     Coerces `content` to str up front — Python's XML writer raises
     `TypeError: argument of type 'float' is not iterable` in
     `_escape_attrib` if you pass a non-string attribute value.
-    The enricher yields `series_index` as a float, and the v1.1
-    metadata-handoff path from AthenaScout can land similar
-    float/int values, so stringifying here covers every caller
-    instead of forcing each to remember.
+    The enricher yields `series_index` as a float, and the source-
+    metadata handoff path can land similar float/int values, so
+    stringifying here covers every caller instead of forcing each to
+    remember.
     """
     if content is None:
         return False
