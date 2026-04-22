@@ -510,6 +510,9 @@ export default function SettingsPage() {
           <SF label="Watch Category" desc="Torrent category that Seshat manages.">
             <input value={(s.qbit_watch_category as string) || "[mam-reseed]"} onChange={e => upd("qbit_watch_category", e.target.value)} style={{ ...ist, width: 180 }} />
           </SF>
+          <SF label="Torrent Tag" desc="Comma-separated tags applied to every torrent Seshat submits. Default: seshat-seed.">
+            <input value={(s.qbit_tag as string) ?? ""} onChange={e => upd("qbit_tag", e.target.value)} placeholder="seshat-seed" style={{ ...ist, width: 260 }} />
+          </SF>
           <SF label="Download Path" desc="Base download directory as seen by the download client.">
             <input value={(s.qbit_download_path as string) || ""} onChange={e => upd("qbit_download_path", e.target.value)} placeholder="/data/[mam-complete]" style={{ ...ist, width: 260 }} />
           </SF>

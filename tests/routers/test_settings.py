@@ -4,8 +4,9 @@ HTTP-level tests for the settings router.
 Isolates settings.json to a tmp_path file per test so we don't touch
 the real data dir. Verifies:
   - GET redacts secret keys and adds _configured siblings
-  - PATCH updates whitelisted fields and persists them
-  - PATCH rejects keys outside the whitelist
+  - PATCH updates known fields and persists them
+  - PATCH rejects unknown keys (not in DEFAULT_SETTINGS)
+  - PATCH rejects runtime-state keys (written by background jobs)
   - Sparse PATCH (one key) doesn't clobber others
 """
 import json
@@ -89,19 +90,37 @@ class TestPatchSettings:
             saved = json.loads(Path(isolated_settings).read_text())
             assert saved["daily_digest_hour"] == 14
 
-    async def test_rejects_non_whitelisted_key(self, isolated_settings):
+    async def test_rejects_unknown_key(self, isolated_settings):
+        """Keys absent from DEFAULT_SETTINGS get rejected, not written."""
         async with await _client(_make_app()) as c:
             r = await c.patch(
                 "/api/v1/settings",
-                json={"mam_session_id": "INJECTED"},
+                json={"flux_capacitor_enabled": True},
             )
             assert r.status_code == 200
             body = r.json()
-            assert "mam_session_id" in body["rejected"]
+            assert "flux_capacitor_enabled" in body["rejected"]
             assert body["updated"] == []
 
             saved = json.loads(Path(isolated_settings).read_text())
-            assert saved["mam_session_id"] == "SECRET_TOKEN"  # unchanged
+            assert "flux_capacitor_enabled" not in saved
+
+    async def test_rejects_runtime_state_key(self, isolated_settings):
+        """Background-job-owned keys can't be clobbered via PATCH.
+
+        Historical incident: clobbering qbit_orphan_adoption_since with
+        0 flooded the pipeline with thousands of adopted-orphan grabs.
+        Protection lives in the `_RUNTIME_STATE_KEYS` guard.
+        """
+        async with await _client(_make_app()) as c:
+            r = await c.patch(
+                "/api/v1/settings",
+                json={"qbit_orphan_adoption_since": 0},
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert "qbit_orphan_adoption_since" in body["rejected"]
+            assert body["updated"] == []
 
     async def test_sparse_patch_preserves_other_keys(self, isolated_settings):
         async with await _client(_make_app()) as c:

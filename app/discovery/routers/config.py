@@ -65,34 +65,19 @@ async def get_settings():
 
 @router.post("/settings")
 async def update_settings(body: dict = Body(...)):
-    from app.secrets import set_secret, SECRET_KEYS
-    from app.routers.settings import _RUNTIME_STATE_KEYS
-    cur = load_settings()
-    for k, v in body.items():
-        if k not in cur:
-            continue
-        # Runtime-state keys are written by background jobs (circuit
-        # breaker, cookie validator, orphan grandfather-line, etc.)
-        # and must NEVER be overwritten from the UI. A user
-        # clobbering these has caused real footguns — see the
-        # orphan-adoption cascade incident documented in memory.
-        if k in _RUNTIME_STATE_KEYS:
-            continue
-        # Route secret keys through the encrypted store
-        if k in SECRET_KEYS:
-            if isinstance(v, str) and ("..." in v or v == "***" or v == ""):
-                continue  # masked/truncated value — don't overwrite
-            await set_secret(k, v)
-            cur[k] = ""  # blank in settings.json
-            continue
-        cur[k] = v
-    # Google Books re-enable detection moved to /v1/metadata-sources
-    # PUT — the legacy `google_books_enabled` key is gone, and the
-    # panel is now the only editor that can flip source toggles.
-    save_settings(cur)
-    reload_sources()
-    apply_logging(cur.get("verbose_logging", False))
-    return {"status": "ok"}
+    """Partial settings update — used by the setup wizard.
+
+    Delegates to `apply_settings_patch` so this endpoint shares
+    identical validation and post-save hooks with the main
+    `PATCH /api/v1/settings` endpoint.
+    """
+    from app.routers.settings import apply_settings_patch
+    result = await apply_settings_patch(body)
+    return {
+        "status": "ok",
+        "updated": result.updated,
+        "rejected": result.rejected,
+    }
 
 
 @router.post("/settings/reset")
