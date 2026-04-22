@@ -86,8 +86,11 @@ export default function UnifiedDashboard({ onNav }: Props) {
   const ignored = counts?.authors_ignored ?? 0;
   const totalGrabs = counts?.grabs ?? 0;
   const calibreAdds = counts?.calibre_additions ?? 0;
-  const cwaUrl = settings?.cwa_web_url || "";
-  const calibreUrl = settings?.calibre_web_url || "";
+  // Calibre-Web quick-launch URL. Prefer the primary setting
+  // (`cwa_web_url`) and fall back to the legacy `calibre_web_url`
+  // so upgraded installs that still have the old key populated
+  // don't lose their Dashboard button on the settings reorg.
+  const calibreWebUrl = settings?.cwa_web_url || settings?.calibre_web_url || "";
   const absWebUrl = settings?.abs_web_url || "";
 
   // Per-library stats split. Each content type picks the first library
@@ -197,8 +200,7 @@ export default function UnifiedDashboard({ onNav }: Props) {
             color={t.jade}
             accent={t.accent}
             links={[
-              cwaUrl ? { label: "CWA", color: t.ylw, href: cwaUrl } : null,
-              calibreUrl ? { label: "Calibre", color: t.jade, href: calibreUrl } : null,
+              calibreWebUrl ? { label: "Calibre-Web", color: t.jade, href: calibreWebUrl } : null,
             ].filter(Boolean) as any}
             onNavMam={() => onNav("disc-mam")}
             t={t}

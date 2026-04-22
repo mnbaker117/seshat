@@ -69,7 +69,6 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "review_queue_enabled",
     "review_staging_path",
     "metadata_review_timeout_days",
-    "review_timeout_check_interval_seconds",
     "delayed_torrents_path",
     "metadata_enrichment_enabled",
     "metadata_disabled_sources",

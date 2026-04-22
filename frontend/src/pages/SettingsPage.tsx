@@ -484,27 +484,52 @@ export default function SettingsPage() {
               {ntfyResult && <span style={{ fontSize: 11, color: ntfyResult.startsWith("✓") ? t.ok : t.err, fontWeight: 600 }}>{ntfyResult}</span>}
             </div>
           </SF>
-          <SF label="Pipeline Events" desc="Which pipeline events trigger a push notification." wide>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 32px", marginTop: 8 }}>
-              <NCheck label="New book grabbed" field="notify_on_grab" s={s} upd={upd} />
-              <NCheck label="Download completed" field="notify_on_download_complete" s={s} upd={upd} />
-              <NCheck label="Pipeline errors" field="notify_on_pipeline_error" s={s} upd={upd} />
-              <NCheck label="Daily — accepted" field="notify_daily_accepted" s={s} upd={upd} />
-              <NCheck label="Daily — tentative" field="notify_daily_tentative" s={s} upd={upd} />
-              <NCheck label="Daily — ignored" field="notify_daily_ignored" s={s} upd={upd} />
-              <NCheck label="Weekly digest" field="notify_weekly_digest" s={s} upd={upd} />
-            </div>
-          </SF>
-          <SF label="Discovery Events" desc="Which discovery events trigger a push notification." wide>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 32px", marginTop: 8 }}>
-              <NCheck label="Source scan complete" field="ntfy_on_scan_complete" s={s} upd={upd} />
-              <NCheck label="New books found" field="ntfy_on_new_books" s={s} upd={upd} />
-              <NCheck label="MAM scan complete" field="ntfy_on_mam_complete" s={s} upd={upd} />
-              <NCheck label="Sent to pipeline" field="ntfy_on_pipeline_sent" s={s} upd={upd} />
-              <NCheck label="Library sync" field="ntfy_on_library_sync" s={s} upd={upd} />
-              <NCheck label="MAM cookie rotated" field="ntfy_on_mam_cookie_rotated" s={s} upd={upd} />
-            </div>
-          </SF>
+          {/* Notification groups restructured around the master toggles
+              that already gate them backend-side — `per_event_notifications`
+              silences the three Pipeline per-event pushes, and
+              `daily_digest_enabled` governs whether any daily_* check
+                  even fires. Previously both masters were invisible in the
+              UI, so users could turn sub-toggles on and see nothing;
+              now the masters sit above their sub-toggles and the
+              dependents dim when the master is off. */}
+          {(() => {
+            const perEventOn = !!s.per_event_notifications;
+            const digestOn = !!s.daily_digest_enabled;
+            return <>
+              <SF label="Pipeline Per-Event Pushes" desc="Fire one notification per pipeline event as it happens (grab, download, error)." wide>
+                <STog on={perEventOn} onToggle={() => upd("per_event_notifications", !perEventOn)} label />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 32px", marginTop: 10, opacity: perEventOn ? 1 : 0.45, pointerEvents: perEventOn ? "auto" : "none" }}>
+                  <NCheck label="New book grabbed" field="notify_on_grab" s={s} upd={upd} />
+                  <NCheck label="Download completed" field="notify_on_download_complete" s={s} upd={upd} />
+                  <NCheck label="Pipeline errors" field="notify_on_pipeline_error" s={s} upd={upd} />
+                </div>
+              </SF>
+
+              <SF label="Daily Digest" desc="One summary push per day covering the day's pipeline activity." wide>
+                <STog on={digestOn} onToggle={() => upd("daily_digest_enabled", !digestOn)} label />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 32px", marginTop: 10, opacity: digestOn ? 1 : 0.45, pointerEvents: digestOn ? "auto" : "none" }}>
+                  <NCheck label="Accepted books" field="notify_daily_accepted" s={s} upd={upd} />
+                  <NCheck label="Tentative books" field="notify_daily_tentative" s={s} upd={upd} />
+                  <NCheck label="Ignored books" field="notify_daily_ignored" s={s} upd={upd} />
+                </div>
+              </SF>
+
+              <SF label="Weekly Digest" desc="Weekly rollup covering ignored-author reviews and longer-horizon stats.">
+                <NCheck label="Enabled" field="notify_weekly_digest" s={s} upd={upd} />
+              </SF>
+
+              <SF label="Discovery Events" desc="Which discovery-side events trigger a push notification." wide>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 32px", marginTop: 4 }}>
+                  <NCheck label="Source scan complete" field="ntfy_on_scan_complete" s={s} upd={upd} />
+                  <NCheck label="New books found" field="ntfy_on_new_books" s={s} upd={upd} />
+                  <NCheck label="MAM scan complete" field="ntfy_on_mam_complete" s={s} upd={upd} />
+                  <NCheck label="Sent to pipeline" field="ntfy_on_pipeline_sent" s={s} upd={upd} />
+                  <NCheck label="Library sync" field="ntfy_on_library_sync" s={s} upd={upd} />
+                  <NCheck label="MAM cookie rotated" field="ntfy_on_mam_cookie_rotated" s={s} upd={upd} />
+                </div>
+              </SF>
+            </>;
+          })()}
           <SF label="Digest Hour" desc="When the daily digest fires.">
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <select value={s.daily_digest_hour as number ?? 9} onChange={e => upd("daily_digest_hour", parseInt(e.target.value))}
@@ -642,14 +667,16 @@ function LibrarySection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
     <SF label="Calibre Library Path" desc="Container-local path to the Calibre library folder (contains metadata.db). Usually set via CALIBRE_LIBRARY_PATH env at startup.">
       <input value={(s.calibre_library_path as string) || ""} onChange={e => upd("calibre_library_path", e.target.value)} placeholder="/calibre" style={{ ...ist, width: 260 }} />
     </SF>
-    <SF label="Calibre-Web URL" desc="Calibre-Web (the web UI) — used by the Dashboard quick-launch link. Not required for sync.">
-      <input value={(s.calibre_web_url as string) || ""} onChange={e => upd("calibre_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
+    <SF label="Calibre-Web URL" desc="Web UI for the Dashboard quick-launch link. Works for both stock Calibre-Web and Calibre-Web Automated (CWA) — CWA is a Calibre-Web fork so most users run one instance.">
+      {/* Single input — writes to `cwa_web_url` (the preferred key).
+          Historical `calibre_web_url` stays in DEFAULT_SETTINGS for
+          back-compat but is no longer user-editable from the UI;
+          the Dashboard falls back to it when cwa_web_url is empty
+          so upgraded installs keep working without a migration. */}
+      <input value={(s.cwa_web_url as string) || ""} onChange={e => upd("cwa_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
     </SF>
     <SF label="Calibre Content Server URL" desc="Calibre's built-in Content Server API endpoint for direct library access. Different from Calibre-Web above.">
       <input value={(s.calibre_url as string) || ""} onChange={e => upd("calibre_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
-    </SF>
-    <SF label="CWA Web URL" desc="Calibre-Web Automated (CWA) web UI — used by the Dashboard quick-launch link. CWA is a fork of Calibre-Web with conversion + ingest automation.">
-      <input value={(s.cwa_web_url as string) || ""} onChange={e => upd("cwa_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
     </SF>
   </>;
 }
@@ -711,20 +738,30 @@ function AudiobookshelfSection({ s, upd, ist, nist, creds, onCredSaved }: {
       cross-library "works".
     </p>
 
-    <SF label="ABS Base URL" desc="Address Seshat's backend uses to talk to ABS's API. For most setups (ABS reachable at the same IP:port from both Seshat and your browser) this is the same as Web URL below." example="e.g. http://10.0.10.20:13378">
+    <SF label="ABS URL" desc="Address Seshat talks to ABS at — used for both the backend REST API and the Dashboard's open-in-ABS link. Leave the advanced override below blank unless your browser hits ABS at a different hostname than the Seshat container does (rare: public DNS vs. Docker network name)." example="e.g. http://10.0.10.20:13378">
       <input
         value={url}
-        onChange={e => upd("abs_url", e.target.value.trim())}
+        onChange={e => {
+          const v = e.target.value.trim();
+          upd("abs_url", v);
+          // Keep the web-URL mirror aligned by default so the
+          // Dashboard quick-launch points at the same place the
+          // backend uses. Advanced users with a split-hostname
+          // setup override below to break the mirror.
+          if (!s.abs_web_url || s.abs_web_url === url) {
+            upd("abs_web_url", v);
+          }
+        }}
         placeholder="http://10.0.10.20:13378"
         style={{ ...ist, width: 280 }}
       />
     </SF>
 
-    <SF label="ABS Web URL" desc="Address the dashboard opens in a new tab. Only differs from Base URL when the browser uses a different hostname than the Seshat container does (e.g. public DNS vs. Docker network name).">
+    <SF label="Web URL Override" desc="Advanced — only set when the browser uses a different hostname than the Seshat container does (public DNS, reverse proxy, etc.). Leaving this blank mirrors ABS URL above.">
       <input
         value={(s.abs_web_url as string) || ""}
         onChange={e => upd("abs_web_url", e.target.value.trim())}
-        placeholder="http://10.0.10.20:13378"
+        placeholder="(leave blank to mirror ABS URL)"
         style={{ ...ist, width: 280 }}
       />
     </SF>
@@ -904,7 +941,7 @@ function DiscMamSection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
   };
 
   return <>
-    <SF label="MAM Search Enabled" desc="Enable searching MyAnonamouse for books your library is missing.">
+    <SF label="MAM Search Enabled" desc="Master toggle for searching MyAnonamouse from Discovery. Must be on for manual scans, scheduled scans, and the MAM-search page.">
       <STog on={(s.mam_enabled as boolean) ?? false} onToggle={() => upd("mam_enabled", !(s.mam_enabled ?? false))} label />
     </SF>
     <SF label="Validate Connection" desc="Test that the MAM session cookie is valid and can search.">
@@ -913,28 +950,38 @@ function DiscMamSection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
         {valResult && <span style={{ fontSize: 12, color: valResult.startsWith("✓") ? t.ok : t.err, fontWeight: 600 }}>{valResult}</span>}
       </div>
     </SF>
-    <SF label="Auto-scan Enabled" desc="Periodically batch-scan unscanned books against MAM.">
+    <SF label="Scheduled Auto-Scan" desc="Periodically batch-scan unscanned books against MAM on the interval below. Manual scans work regardless — this only gates the background scheduler.">
       <STog on={(s.mam_scanning_enabled as boolean) ?? true} onToggle={() => upd("mam_scanning_enabled", !(s.mam_scanning_enabled ?? true))} label />
     </SF>
-    <SF label="Scan Interval" desc="How often the MAM batch scanner runs.">
+    <SF label="Auto-Scan Interval" desc="Cadence for the scheduled auto-scan above. Ignored when auto-scan is off.">
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <input type="number" min={0} value={s.mam_scan_interval_minutes as number ?? 360} onChange={e => upd("mam_scan_interval_minutes", parseInt(e.target.value) || 360)} style={nist} />
         <span style={{ fontSize: 13, color: t.textDim }}>min</span>
       </div>
     </SF>
-    <SF label="Ebook Format Priority" desc="Drag formats to reorder. Highest priority format is preferred when multiple are available." wide>
-      <FormatPriority formats={(s.mam_format_priority as string[]) ?? ["epub", "azw", "azw3", "pdf", "djvu", "azw4"]} onChange={(v: string[]) => upd("mam_format_priority", v)} />
-    </SF>
-    <SF
-      label="Audiobook Format Priority"
-      desc="When a torrent contains multiple audio formats (rare), the pipeline picks the primary file from the format listed earliest. Drag to reorder."
-      example="m4b = chapterized single-file · m4a = single-file no chapters · mp3 = multi-part legacy"
-      wide
-    >
-      <FormatPriorityList
-        value={(s.audiobook_format_priority as string[]) || ["m4b", "m4a", "mp3"]}
-        onChange={(next) => upd("audiobook_format_priority", next)}
-      />
+    {/* Format priorities side-by-side — both lists are short (6-7
+        rows) so stacking them wastes vertical space. Wrapped in
+        a 2-column grid with a vertical separator for visual
+        grouping. Collapses to single-column via flex wrap on
+        narrow widths. */}
+    <SF label="Format Priorities" desc="Priority order for matching torrents when multiple formats are available." wide>
+      <div style={{ display: "flex", gap: 24, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px", minWidth: 240 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: t.textDim, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Ebook</div>
+          <FormatPriority formats={(s.mam_format_priority as string[]) ?? ["epub", "azw", "azw3", "pdf", "djvu", "azw4"]} onChange={(v: string[]) => upd("mam_format_priority", v)} />
+        </div>
+        <div style={{ width: 1, alignSelf: "stretch", background: t.borderL }} />
+        <div style={{ flex: "1 1 260px", minWidth: 240 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: t.textDim, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Audiobook</div>
+          <FormatPriorityList
+            value={(s.audiobook_format_priority as string[]) || ["m4b", "m4a", "mp3"]}
+            onChange={(next) => upd("audiobook_format_priority", next)}
+          />
+          <div style={{ fontSize: 11, fontStyle: "italic", color: t.tg, marginTop: 6 }}>
+            m4b = chapterized single-file · m4a = single-file no chapters · mp3 = multi-part legacy
+          </div>
+        </div>
+      </div>
     </SF>
     <SF label="Test Scan" desc="Run a quick test scan on 10 books to verify MAM integration.">
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
