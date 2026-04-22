@@ -77,7 +77,6 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     # Sinks
     "default_sink",
     "staging_path",
-    "monthly_download_folders",
     # Notifications
     "ntfy_topic",
     "daily_digest_enabled",

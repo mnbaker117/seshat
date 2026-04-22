@@ -131,7 +131,6 @@ class DispatcherDeps:
 
     # Download folder organization.
     qbit_download_path: str = ""
-    monthly_download_folders: bool = True  # legacy; overridden by download_folder_structure
     download_folder_structure: str = "monthly"  # "monthly" | "yearly" | "author" | "flat"
 
     # Path translation between qBit and Seshat containers.

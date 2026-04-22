@@ -337,7 +337,6 @@ async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> Di
         dry_run=bool(settings.get("dry_run", False)),
         excluded_uploaders=excluded_uploaders,
         qbit_download_path=settings.get("qbit_download_path", ""),
-        monthly_download_folders=bool(settings.get("monthly_download_folders", True)),
         download_folder_structure=settings.get("download_folder_structure", "monthly") or "monthly",
         qbit_path_prefix=settings.get("qbit_path_prefix", "/data"),
         local_path_prefix=settings.get("local_path_prefix", "/downloads"),

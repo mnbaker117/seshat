@@ -216,10 +216,6 @@ DEFAULT_SETTINGS = {
     # Skip non-free torrents if the user's ratio is below this value.
     # 0 = disable ratio checking (grab regardless of ratio).
     "policy_ratio_floor": 0.0,
-    # Whether to look up the torrent's VIP/FL status via the MAM
-    # search API when the IRC announce alone isn't enough. Adds one
-    # HTTP round-trip per announce that passes the filter.
-    "policy_lookup_torrent_info": True,
 
     # ── Snatch budget (rate limit) ──────────────────────────
     # MAM caps active snatches. New users get 30, OP currently has 200.
@@ -256,11 +252,11 @@ DEFAULT_SETTINGS = {
     # which client added what is visible at a glance in the qBit
     # WebUI. Empty string disables tagging.
     "qbit_tag": "seshat-seed",
-    # Base download directory for qBit. When monthly_download_folders is
-    # True, Seshat creates [YYYY-MM]/ subfolders here and tells qBit
-    # to save each download in the current month's folder.
-    # This should match the path AS SEEN BY QBIT (inside qBit's container
-    # if using Docker). E.g. "/data/[mam-complete]".
+    # Base download directory for qBit. Seshat creates subfolders
+    # under this root based on `download_folder_structure` below
+    # (monthly/yearly/author/flat). Path is AS SEEN BY QBIT inside
+    # its container; if Docker, use qBit's mount path, not Seshat's.
+    # E.g. "/data/[mam-complete]".
     "qbit_download_path": "",
     # Path translation between qBit's container and Seshat's container.
     # qBit reports save_path using ITS mount paths (e.g. "/data/...").
@@ -271,8 +267,6 @@ DEFAULT_SETTINGS = {
     # when reading files, and does the reverse when passing save_path to qBit.
     "qbit_path_prefix": "/data",
     "local_path_prefix": "/downloads",
-    # Organize downloads into monthly subfolders ([2026-04]/, [2026-05]/).
-    "monthly_download_folders": True,
     # How often to poll qBit for completed torrents and seedtime updates.
     "qbit_poll_interval_seconds": 60,
 
