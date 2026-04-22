@@ -1,13 +1,15 @@
 <div align="center">
 
-# 𓋹 Seshat
+<img src="icon.png" width="96" alt="Seshat" />
+
+# Seshat
 
 **Self-hosted book discovery and acquisition platform.**
 
 Scans your Calibre library against multiple metadata sources, searches
-MyAnonamouse for missing titles, and automates the full pipeline from
-IRC announce monitoring through torrent management, metadata enrichment,
-and Calibre delivery — all from a single unified interface.
+a private tracker for missing titles, and automates the full pipeline
+from IRC announce monitoring through torrent management, metadata
+enrichment, and Calibre delivery — all from a single unified interface.
 
 *Named after the Egyptian goddess of writing, libraries, and record-keeping.*
 
@@ -27,8 +29,8 @@ and Calibre delivery — all from a single unified interface.
 
 Sync your Calibre library and find every book you're missing across
 7 metadata sources (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google
-Books, MyAnonamouse). Manage authors, series, and pen-name aliases.
-Search MAM for matches and see which titles are available.
+Books, MAM). Manage authors, series, and pen-name aliases. Search MAM
+for matches and see which titles are available.
 
 ### Pipeline
 
@@ -56,6 +58,16 @@ MAM scans respect the preference automatically.
 Discovery stats, pipeline stats, and per-library sync rows (Calibre +
 ABS side-by-side) all live on a single three-column dashboard. Stats
 rail on the right, Quick Actions across the bottom.
+
+---
+
+## Screenshots
+
+<div align="center">
+
+<img src="docs/images/dashboard.png" alt="Seshat Dashboard" width="900" />
+
+</div>
 
 ---
 
@@ -104,27 +116,11 @@ as the file lands.
 
 ---
 
-## Migration from AthenaScout + Hermeece
-
-If you're running both apps separately, use the migration script:
-
-```bash
-python tools/migrate_from_legacy.py \
-    --as-data /path/to/athenascout/data \
-    --hm-data /path/to/hermeece/data \
-    --seshat-data /path/to/seshat/data
-```
-
-This copies database files and merges settings. Run it before the first
-Seshat boot. Safe to re-run — skips files that already exist.
-
----
-
 ## Requirements
 
 - **Docker** (recommended) or Python 3.12+ for development
 - A **Calibre library** (mounted read-only for discovery sync)
-- A **MyAnonamouse** account with IRC credentials + session cookie
+- A **MAM** account with IRC credentials + session cookie
 - A **torrent client** (qBittorrent, Transmission, Deluge, or rTorrent)
 - *Optional:* **Audiobookshelf** (URL + API key) for audiobook support,
   Hardcover API key, ntfy server for notifications
@@ -139,6 +135,6 @@ Seshat boot. Safe to re-run — skips files that already exist.
 
 <div align="center">
 
-*𓋹 Seshat finds the books. Seshat gets the books.*
+*Seshat finds the books. Seshat gets the books.*
 
 </div>

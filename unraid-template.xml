@@ -12,7 +12,7 @@
   <Support>https://github.com/mnbaker117/seshat/issues</Support>
   <Project>https://github.com/mnbaker117/seshat</Project>
   <Overview>
-    Seshat is a self-hosted book discovery and acquisition platform. It scans your Calibre library against multiple metadata sources, searches MyAnonamouse for missing titles, and automates the full pipeline from IRC announce monitoring through torrent management, metadata enrichment, and Calibre delivery — all from a single unified interface.
+    Seshat is a self-hosted book discovery and acquisition platform. It scans your Calibre library against multiple metadata sources, searches a private tracker for missing titles, and automates the full pipeline from IRC announce monitoring through torrent management, metadata enrichment, and Calibre delivery — all from a single unified interface.
 
     Discovery: Sync Calibre libraries, scan 7 metadata sources (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google Books, MAM), manage authors and series, find missing books.
 
@@ -36,7 +36,7 @@
     Target="8789"
     Default="8789"
     Mode="tcp"
-    Description="Host port for the Seshat web interface. Default 8789 (avoids AthenaScout's 8787)."
+    Description="Host port for the Seshat web interface. Default 8789."
     Type="Port"
     Display="always"
     Required="true"
