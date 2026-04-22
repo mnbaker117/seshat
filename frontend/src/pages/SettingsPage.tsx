@@ -444,7 +444,6 @@ export default function SettingsPage() {
         </>}
 
         {section === "sinks" && <>
-          {apiCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Bearer token from hardcover.app → Account → API." />)}
           <SF label="Default Sink" desc="Where approved books are delivered after review.">
             <select value={(s.default_sink as string) || "cwa"} onChange={e => upd("default_sink", e.target.value)}
               style={{ ...ist, width: 260, cursor: "pointer", appearance: "auto" }}>
@@ -454,11 +453,17 @@ export default function SettingsPage() {
               <option value="audiobookshelf">Audiobookshelf — library folder</option>
             </select>
           </SF>
-          <SF label="CWA Web URL" desc="Calibre-Web Automated web interface URL.">
-            <input value={(s.cwa_web_url as string) || ""} onChange={e => upd("cwa_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
+          <SF label="CWA Ingest Path" desc="Folder CWA watches for auto-import. Ebooks dropped here flow through CWA's conversion + ingest pipeline.">
+            <input value={(s.cwa_ingest_path as string) || ""} onChange={e => upd("cwa_ingest_path", e.target.value)} placeholder="/cwa-ingest" style={{ ...ist, width: 260 }} />
           </SF>
-          <SF label="Calibre Web URL" desc="Calibre Content Server web interface URL.">
-            <input value={(s.calibre_web_url as string) || ""} onChange={e => upd("calibre_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
+          <SF label="Folder Sink Path" desc="Destination when Default Sink is set to Folder.">
+            <input value={(s.folder_sink_path as string) || ""} onChange={e => upd("folder_sink_path", e.target.value)} placeholder="/books" style={{ ...ist, width: 260 }} />
+          </SF>
+          <SF label="Staging Path" desc="Intermediate folder where newly-grabbed files are copied before review or direct delivery.">
+            <input value={(s.staging_path as string) || ""} onChange={e => upd("staging_path", e.target.value)} placeholder="/staging" style={{ ...ist, width: 260 }} />
+          </SF>
+          <SF label="Review Staging Path" desc="Folder that holds books awaiting manual review. Cleared on approval or rejection.">
+            <input value={(s.review_staging_path as string) || ""} onChange={e => upd("review_staging_path", e.target.value)} placeholder="/review-staging" style={{ ...ist, width: 260 }} />
           </SF>
           <SF label="Emergency Export Path" desc="Fallback folder when sink is unreachable.">
             <input value={(s.emergency_export_path as string) || ""} onChange={e => upd("emergency_export_path", e.target.value)} placeholder="/emergency-books" style={{ ...ist, width: 220 }} />
@@ -511,7 +516,15 @@ export default function SettingsPage() {
           </SF>
         </>}
 
-        {section === "sources" && <MetadataSourcesPanel />}
+        {section === "sources" && <>
+          {/* Hardcover API key — lives with the other provider
+              credentials now that the unified Metadata Sources panel
+              is the authoritative editor for enable/rate settings.
+              Was misplaced under Sinks & Delivery where only sink-
+              specific config belongs. */}
+          {apiCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Bearer token from hardcover.app → Account → API." />)}
+          <MetadataSourcesPanel />
+        </>}
 
         {section === "scanning" && <>
           <SF label="Auto-scan Enabled" desc="Periodically scan all authors against enabled sources.">
@@ -626,11 +639,17 @@ function LibrarySection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
     <SF label="Languages" desc="Comma-separated language filter for source scans." wide>
       <input value={((s.languages as string[]) ?? []).join(", ")} onChange={e => upd("languages", e.target.value.split(",").map((x: string) => x.trim()).filter(Boolean))} placeholder="English" style={{ ...ist, width: "100%" }} />
     </SF>
-    <SF label="Calibre Web URL" desc="Calibre-Web interface for dashboard quick-launch.">
+    <SF label="Calibre Library Path" desc="Container-local path to the Calibre library folder (contains metadata.db). Usually set via CALIBRE_LIBRARY_PATH env at startup.">
+      <input value={(s.calibre_library_path as string) || ""} onChange={e => upd("calibre_library_path", e.target.value)} placeholder="/calibre" style={{ ...ist, width: 260 }} />
+    </SF>
+    <SF label="Calibre-Web URL" desc="Calibre-Web (the web UI) — used by the Dashboard quick-launch link. Not required for sync.">
       <input value={(s.calibre_web_url as string) || ""} onChange={e => upd("calibre_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
     </SF>
-    <SF label="Calibre Content Server URL" desc="Calibre Content Server for direct library access.">
+    <SF label="Calibre Content Server URL" desc="Calibre's built-in Content Server API endpoint for direct library access. Different from Calibre-Web above.">
       <input value={(s.calibre_url as string) || ""} onChange={e => upd("calibre_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
+    </SF>
+    <SF label="CWA Web URL" desc="Calibre-Web Automated (CWA) web UI — used by the Dashboard quick-launch link. CWA is a fork of Calibre-Web with conversion + ingest automation.">
+      <input value={(s.cwa_web_url as string) || ""} onChange={e => upd("cwa_web_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
     </SF>
   </>;
 }
