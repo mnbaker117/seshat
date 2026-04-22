@@ -126,17 +126,6 @@ async def list_works(
     return WorksListResponse(total=total, items=items)
 
 
-@router.get("/{work_id}", response_model=WorkSummary)
-async def get_work(work_id: str = Path(...)) -> WorkSummary:
-    links = await storage.get_work_members(work_id)
-    if not links:
-        raise HTTPException(status_code=404, detail="work not found")
-    return WorkSummary(
-        work_id=work_id,
-        links=await _hydrate_links(links),
-    )
-
-
 @router.post("/rebuild", response_model=RebuildResult)
 async def rebuild_works() -> RebuildResult:
     """Re-run the auto-matcher across every discovered library.
@@ -281,6 +270,20 @@ async def clear_author_pref(
 ) -> SimpleOk:
     removed = await preferences.clear_preference(author_name)
     return SimpleOk(ok=removed)
+
+
+# Must come AFTER every static-prefix route ("/rebuild", "/link/...",
+# "/author-preferences/...") so FastAPI's first-match semantics don't
+# silently swallow them as `work_id` values.
+@router.get("/{work_id}", response_model=WorkSummary)
+async def get_work(work_id: str = Path(...)) -> WorkSummary:
+    links = await storage.get_work_members(work_id)
+    if not links:
+        raise HTTPException(status_code=404, detail="work not found")
+    return WorkSummary(
+        work_id=work_id,
+        links=await _hydrate_links(links),
+    )
 
 
 # ─── Helpers ──────────────────────────────────────────────────
