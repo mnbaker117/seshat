@@ -66,9 +66,17 @@ async def get_settings():
 @router.post("/settings")
 async def update_settings(body: dict = Body(...)):
     from app.secrets import set_secret, SECRET_KEYS
+    from app.routers.settings import _RUNTIME_STATE_KEYS
     cur = load_settings()
     for k, v in body.items():
         if k not in cur:
+            continue
+        # Runtime-state keys are written by background jobs (circuit
+        # breaker, cookie validator, orphan grandfather-line, etc.)
+        # and must NEVER be overwritten from the UI. A user
+        # clobbering these has caused real footguns — see the
+        # orphan-adoption cascade incident documented in memory.
+        if k in _RUNTIME_STATE_KEYS:
             continue
         # Route secret keys through the encrypted store
         if k in SECRET_KEYS:

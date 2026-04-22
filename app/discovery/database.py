@@ -47,11 +47,20 @@ def get_db_path(slug=None):
 
 
 def _find_legacy_db():
-    """Find a legacy single-file discovery DB (from AthenaScout or earlier Seshat)."""
-    for name in ("athenascout.db", "seshat.db"):
-        candidate = DATA_DIR / name
-        if candidate.exists():
-            return candidate
+    """Find a legacy single-file discovery DB (from AthenaScout).
+
+    Only AthenaScout's `athenascout.db` qualifies as "legacy" here —
+    Seshat's current pipeline DB is ALSO called `seshat.db`, so
+    including it in this scan means every startup tries to read a
+    `books` table from the pipeline DB (which has `grabs`,
+    `work_links`, etc. but no `books`) and logs a spurious warning.
+    The early pre-multi-library Seshat shape that used `seshat.db`
+    for discovery content never actually shipped to users who'd
+    be upgrading, so dropping it here is safe.
+    """
+    candidate = DATA_DIR / "athenascout.db"
+    if candidate.exists():
+        return candidate
     return None
 
 

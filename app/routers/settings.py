@@ -127,11 +127,27 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
 
 # Keys we redact entirely from the GET response. The UI gets a
 # `_configured` boolean for each so it can render "Set" / "Not set"
-# without ever seeing the value.
-_SECRET_KEYS: frozenset[str] = frozenset({
-    "mam_session_id",
-    "mam_irc_password",
-    "qbit_password",
+# without ever seeing the value. Derived from the SECRET_KEYS dict
+# in app.secrets to stay in sync automatically — we had a drift
+# here where hardcover_api_key + abs_api_key were encrypted-store
+# secrets but NOT in this redact list, so any lingering
+# settings.json value (pre-migration or manual edit) would leak
+# via GET /api/v1/settings.
+from app.secrets import SECRET_KEYS as _APP_SECRET_KEYS  # noqa: E402
+_SECRET_KEYS: frozenset[str] = frozenset(_APP_SECRET_KEYS.keys())
+
+# Runtime-state keys that live in settings.json because they need
+# to persist across restarts, but are WRITTEN by background jobs
+# (circuit breakers, validation loops, grandfather-line stamps)
+# and should NEVER be overwritten by a PATCH from the UI. A user
+# clobbering `qbit_orphan_adoption_since` with 0 would flood the
+# pipeline with thousands of adopted-orphan grabs.
+_RUNTIME_STATE_KEYS: frozenset[str] = frozenset({
+    "google_books_auto_disabled_at",
+    "mam_validation_ok",
+    "mam_last_validated_at",
+    "last_mam_validated_at",
+    "qbit_orphan_adoption_since",
 })
 
 

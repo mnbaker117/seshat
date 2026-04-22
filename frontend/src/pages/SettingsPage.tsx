@@ -376,9 +376,10 @@ export default function SettingsPage() {
               Each cell has a short label on the left and its control
               on the right; the full desc tooltip is elided in favor
               of a single shared subtitle for the section. */}
-          <SF label="Grab Policy" desc="VIP-always-grab + Free-only + wedge use together define which torrents actually land. Ratio floor is a ceiling check — skip non-free grabs when your ratio drops below it." wide>
+          <SF label="Grab Policy" desc="These toggles + numbers all feed the policy engine that decides whether each torrent actually gets grabbed. VIP-only + Free-only are mutually nested modes; ratio floor + min wedges reserved are guardrails." wide>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "12px 28px", width: "100%", marginTop: 8 }}>
               <PolicyRow label="Always grab VIP" on={(s.policy_vip_always_grab as boolean) ?? true} onToggle={() => upd("policy_vip_always_grab", !(s.policy_vip_always_grab ?? true))} hint="VIP bypasses other checks" />
+              <PolicyRow label="VIP only" on={!!s.policy_vip_only} onToggle={() => upd("policy_vip_only", !s.policy_vip_only)} hint="Skip everything non-VIP" />
               <PolicyRow label="Free only" on={!!s.policy_free_only} onToggle={() => upd("policy_free_only", !s.policy_free_only)} hint="Requires VIP/FL/wedge" />
               <PolicyRow label="Use freeleech wedges" on={!!s.policy_use_wedge} onToggle={() => upd("policy_use_wedge", !s.policy_use_wedge)} hint="Spend a wedge to make non-free free" />
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "6px 12px", background: t.bg3, borderRadius: 6 }}>
@@ -387,6 +388,13 @@ export default function SettingsPage() {
                   <span style={{ fontSize: 11, color: t.textDim }}>0 = disabled</span>
                 </div>
                 <input type="number" min={0} step={0.1} value={s.policy_ratio_floor as number ?? 0} onChange={e => upd("policy_ratio_floor", parseFloat(e.target.value) || 0)} style={{ ...nist, width: 70 }} />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "6px 12px", background: t.bg3, borderRadius: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>Min wedges reserved</span>
+                  <span style={{ fontSize: 11, color: t.textDim }}>Don't auto-spend below this</span>
+                </div>
+                <input type="number" min={0} value={s.policy_min_wedges_reserved as number ?? 0} onChange={e => upd("policy_min_wedges_reserved", parseInt(e.target.value) || 0)} style={{ ...nist, width: 70 }} />
               </div>
             </div>
           </SF>
@@ -561,10 +569,10 @@ export default function SettingsPage() {
               </SF>
             </>;
           })()}
-          <SF label="Digest Hour" desc="When the daily digest fires.">
+          <SF label="Digest Time" desc="When the daily digest fires, on the hour. Minute granularity isn't available — the backend scheduler runs at :00.">
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <select value={s.daily_digest_hour as number ?? 9} onChange={e => upd("daily_digest_hour", parseInt(e.target.value))}
-                style={{ ...ist, width: use12h ? 120 : 70, cursor: "pointer", appearance: "auto" }}>
+                style={{ ...ist, width: use12h ? 110 : 70, cursor: "pointer", appearance: "auto" }}>
                 {HOURS_24.map(h => <option key={h} value={h}>{use12h ? fmt12(h) : `${String(h).padStart(2, "0")}:00`}</option>)}
               </select>
               <button onClick={() => setUse12h(!use12h)} style={{ background: "none", border: "none", color: t.accent, cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{use12h ? "24h" : "12h"}</button>
