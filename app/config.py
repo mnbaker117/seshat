@@ -458,8 +458,6 @@ DEFAULT_SETTINGS = {
     # is a no-op when there are no failed grabs, so this mostly affects
     # latency between cookie rotation and automatic retry.
     "cookie_retry_interval_seconds": 300,
-    "weekly_audit_day": "sunday",
-    "weekly_audit_hour": 3,
 
     # ── Pipeline enable/disable toggles ──────────────────────
     # Master switches for each stage of the pipeline. Disabling a

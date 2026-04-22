@@ -31,6 +31,22 @@ function SF({ label, desc, example, children, warn, wide }: {
   );
 }
 
+function PolicyRow({ label, hint, on, onToggle }: { label: string; hint?: string; on: boolean; onToggle: () => void }) {
+  // Compact toggle row used in the Policy grid. Label + optional
+  // one-line hint on the left, toggle right-aligned. Sits inside
+  // a wide SF that renders these four in a 2x2 grid.
+  const t = useTheme();
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "6px 12px", background: t.bg3, borderRadius: 6 }}>
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{label}</span>
+        {hint && <span style={{ fontSize: 11, color: t.textDim }}>{hint}</span>}
+      </div>
+      <STog on={on} onToggle={onToggle} />
+    </div>
+  );
+}
+
 function STog({ on, onToggle, disabled, label }: { on: boolean; onToggle: () => void; disabled?: boolean; label?: boolean }) {
   const t = useTheme();
   return (
@@ -355,17 +371,24 @@ export default function SettingsPage() {
         </>}
 
         {section === "policy" && <>
-          <SF label="Always Grab VIP" desc="VIP torrents bypass all other policy checks.">
-            <STog on={(s.policy_vip_always_grab as boolean) ?? true} onToggle={() => upd("policy_vip_always_grab", !(s.policy_vip_always_grab ?? true))} label />
-          </SF>
-          <SF label="Free Only" desc="Only grab free torrents (VIP, global FL, personal FL, or wedge-applied).">
-            <STog on={!!s.policy_free_only} onToggle={() => upd("policy_free_only", !s.policy_free_only)} label />
-          </SF>
-          <SF label="Use Freeleech Wedges" desc="Spend a wedge to make a non-free torrent free.">
-            <STog on={!!s.policy_use_wedge} onToggle={() => upd("policy_use_wedge", !s.policy_use_wedge)} label />
-          </SF>
-          <SF label="Ratio Floor" desc="Skip non-free torrents when your ratio drops below this. 0 = disabled.">
-            <input type="number" min={0} step={0.1} value={s.policy_ratio_floor as number ?? 0} onChange={e => upd("policy_ratio_floor", parseFloat(e.target.value) || 0)} style={nist} />
+          {/* Three independent toggles + one number fit much nicer
+              as a single compact grid row than four stacked SFs.
+              Each cell has a short label on the left and its control
+              on the right; the full desc tooltip is elided in favor
+              of a single shared subtitle for the section. */}
+          <SF label="Grab Policy" desc="VIP-always-grab + Free-only + wedge use together define which torrents actually land. Ratio floor is a ceiling check — skip non-free grabs when your ratio drops below it." wide>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "12px 28px", width: "100%", marginTop: 8 }}>
+              <PolicyRow label="Always grab VIP" on={(s.policy_vip_always_grab as boolean) ?? true} onToggle={() => upd("policy_vip_always_grab", !(s.policy_vip_always_grab ?? true))} hint="VIP bypasses other checks" />
+              <PolicyRow label="Free only" on={!!s.policy_free_only} onToggle={() => upd("policy_free_only", !s.policy_free_only)} hint="Requires VIP/FL/wedge" />
+              <PolicyRow label="Use freeleech wedges" on={!!s.policy_use_wedge} onToggle={() => upd("policy_use_wedge", !s.policy_use_wedge)} hint="Spend a wedge to make non-free free" />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "6px 12px", background: t.bg3, borderRadius: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>Ratio floor</span>
+                  <span style={{ fontSize: 11, color: t.textDim }}>0 = disabled</span>
+                </div>
+                <input type="number" min={0} step={0.1} value={s.policy_ratio_floor as number ?? 0} onChange={e => upd("policy_ratio_floor", parseFloat(e.target.value) || 0)} style={{ ...nist, width: 70 }} />
+              </div>
+            </div>
           </SF>
         </>}
 
@@ -471,14 +494,17 @@ export default function SettingsPage() {
         </>}
 
         {section === "notifications" && <>
-          <SF label="ntfy Server URL" desc="URL of your ntfy server.">
-            <input value={(s.ntfy_url as string) || ""} onChange={e => upd("ntfy_url", e.target.value)} placeholder="https://ntfy.sh" style={{ ...ist, width: 300 }} />
-          </SF>
-          <SF label="ntfy Topic" desc="Topic name to publish to.">
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input value={(s.ntfy_topic as string) || "seshat"} onChange={e => upd("ntfy_topic", e.target.value)} style={{ ...ist, width: 140 }} />
+          {/* ntfy endpoint — server URL + topic collapsed into one
+              row since they always move together, plus an inline
+              test button so the configured-vs-working distinction
+              is checkable without scrolling. */}
+          <SF label="ntfy Endpoint" desc="Seshat publishes to &lt;Server URL&gt;/&lt;Topic&gt;. Use the Test button to fire a sample push." wide>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <input value={(s.ntfy_url as string) || ""} onChange={e => upd("ntfy_url", e.target.value)} placeholder="https://ntfy.sh" style={{ ...ist, flex: "1 1 260px", minWidth: 200 }} />
+              <span style={{ color: t.textDim, fontSize: 16 }}>/</span>
+              <input value={(s.ntfy_topic as string) || "seshat"} onChange={e => upd("ntfy_topic", e.target.value)} placeholder="topic" style={{ ...ist, flex: "0 0 160px" }} />
               <Btn variant="ghost" onClick={testNtfy} disabled={testingNtfy}>{testingNtfy ? <Spin size={14} /> : "Test"}</Btn>
-              {ntfyResult && <span style={{ fontSize: 11, color: ntfyResult.startsWith("✓") ? t.ok : t.err, fontWeight: 600 }}>{ntfyResult}</span>}
+              {ntfyResult && <span style={{ fontSize: 12, color: ntfyResult.startsWith("✓") ? t.ok : t.err, fontWeight: 600 }}>{ntfyResult}</span>}
             </div>
           </SF>
           {/* Notification groups restructured around the master toggles
