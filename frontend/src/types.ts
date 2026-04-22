@@ -229,6 +229,11 @@ export interface PenNameLink {
 }
 
 // Unified scan-status entry (one per kind: lookup / mam / library).
+// `extra` is a grab-bag of counters the scan emits for progress /
+// summary lines (found, possible, not_found, books_new, etc.) plus
+// the nested `source_timeouts` map keyed by source name → author
+// count. Typed as `unknown` so callers narrow per-field rather than
+// claiming every value is a number.
 export interface ScanProgress {
   kind: "lookup" | "mam" | "library";
   type: string;
@@ -240,7 +245,7 @@ export interface ScanProgress {
   current_book?: string | null;
   status: string;
   completed_at?: number | null;
-  extra?: Record<string, number | null | undefined>;
+  extra?: Record<string, unknown>;
 }
 
 // ─── App-level event names ──────────────────────────────────
