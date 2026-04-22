@@ -174,6 +174,26 @@ export interface Book {
   library_slug?: string;
   library_name?: string;
   content_type?: "ebook" | "audiobook" | string;
+  // Cross-library "work" linkage stamped by the authors + series
+  // endpoints when `get_siblings_for_books` finds paired rows in
+  // another library. `work_siblings` is a non-empty array for books
+  // whose work has at least one member in a different library; the
+  // entries describe the sibling's library + content_type so the UI
+  // can render the "also available as audiobook" hint.
+  work_id?: string;
+  work_siblings?: WorkSibling[];
+  // Catalog extras carried through from the source library. Strings
+  // rather than enums because Calibre tags + format lists are free-
+  // form — the UI renders them as pill chips.
+  tags?: string | null;
+  formats?: string | null;
+  rating?: number | null;
+}
+
+export interface WorkSibling {
+  library_slug: string;
+  book_id: number;
+  content_type: string;
 }
 
 export interface Series {
