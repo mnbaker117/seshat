@@ -533,7 +533,7 @@ export default function SettingsPage() {
 
         {section === "library" && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} />}
 
-        {section === "audiobookshelf" && <AudiobookshelfSection s={s} upd={upd} ist={ist} creds={absCreds} onCredSaved={loadCreds} />}
+        {section === "audiobookshelf" && <AudiobookshelfSection s={s} upd={upd} ist={ist} nist={nist} creds={absCreds} onCredSaved={loadCreds} />}
 
         {section === "discmam" && <DiscMamSection s={s} upd={upd} ist={ist} nist={nist} />}
 
@@ -639,8 +639,8 @@ function LibrarySection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
 
 interface AbsLibrary { id: string; name: string; mediaType?: string; folders?: { fullPath: string }[]; lastUpdate?: number; }
 
-function AudiobookshelfSection({ s, upd, ist, creds, onCredSaved }: {
-  s: S; upd: (k: string, v: unknown) => void; ist: any;
+function AudiobookshelfSection({ s, upd, ist, nist, creds, onCredSaved }: {
+  s: S; upd: (k: string, v: unknown) => void; ist: any; nist: any;
   creds: CredItem[]; onCredSaved: () => void;
 }) {
   const t = useTheme();
