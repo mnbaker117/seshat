@@ -64,6 +64,14 @@ async def sync_all_libraries() -> None:
     st = load_settings()
     mtimes = st.get("library_mtimes", {})
     any_synced = False
+    # Per-library interval config. The APScheduler job fires every
+    # library_sync_interval_minutes (the minimum cadence), but each
+    # library can opt into a less-frequent cadence via its own
+    # setting. Right now only ABS gets this override; new app_types
+    # can be added here when they want their own cadence knob.
+    default_interval = int(st.get("library_sync_interval_minutes", 60) or 60)
+    abs_interval_override = int(st.get("abs_sync_interval_minutes", 0) or 0)
+    now = time.time()
     # Signal background writers (MAM scanner, etc.) that a bulk sync
     # is in flight so they yield. try/finally ensures the flag clears
     # even if a sync crashes mid-run.
@@ -71,8 +79,24 @@ async def sync_all_libraries() -> None:
     try:
         for lib in state._discovered_libraries:
             try:
-                set_active_library(lib["slug"])
-                lib_app = get_app(lib.get("app_type", "calibre"))
+                slug = lib["slug"]
+                app_type = lib.get("app_type", "calibre")
+                # Resolve effective interval for this library.
+                if app_type == "audiobookshelf" and abs_interval_override > 0:
+                    effective_interval = abs_interval_override
+                else:
+                    effective_interval = default_interval
+                last_at = state._library_last_sync_at.get(slug, 0.0)
+                elapsed_min = (now - last_at) / 60 if last_at else float("inf")
+                if last_at and elapsed_min < effective_interval:
+                    logger.debug(
+                        "Scheduled sync: '%s' interval not elapsed "
+                        "(%.1fm < %dm), skipping tick",
+                        lib["name"], elapsed_min, effective_interval,
+                    )
+                    continue
+                set_active_library(slug)
+                lib_app = get_app(app_type)
                 # Pull current mtime via the app so API-based sources
                 # (ABS `lastUpdate`) route through the same change-detection
                 # path that Calibre's file mtime uses.
@@ -86,6 +110,13 @@ async def sync_all_libraries() -> None:
                     logger.debug(
                         f"Scheduled sync: '{lib['name']}' source unchanged, skipping"
                     )
+                    # Count the mtime-unchanged skip as a "checked"
+                    # tick so the per-library interval gate doesn't
+                    # re-check on every scheduler fire. Without this,
+                    # a library whose mtime never changes would be
+                    # re-checked every default_interval minutes
+                    # regardless of its own override.
+                    state._library_last_sync_at[slug] = time.time()
                     continue
                 logger.info(
                     f"Scheduled sync: '{lib['name']}' "
@@ -100,6 +131,7 @@ async def sync_all_libraries() -> None:
                 mtimes[lib["slug"]] = current_mtime
                 st["library_mtimes"] = mtimes
                 save_settings(st)
+                state._library_last_sync_at[slug] = time.time()
                 any_synced = True
                 try:
                     await notify_library_sync(

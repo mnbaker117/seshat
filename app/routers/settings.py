@@ -115,6 +115,7 @@ _PATCHABLE_KEYS: frozenset[str] = frozenset({
     "abs_url",
     "abs_web_url",
     "abs_sink_library_id",
+    "abs_sync_interval_minutes",
     "audiobookshelf_library_path",
     "audiobook_tracking_mode",
     "audiobook_format_priority",

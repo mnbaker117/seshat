@@ -195,6 +195,15 @@ def get_active_library_content_type() -> str:
 # Updated after every successful library sync.
 _last_library_sync_check: Dict[str, Any] = {"at": None, "synced": False}
 
+# Per-library last-sync timestamps. Used by the scheduler to gate
+# individual libraries on their own configured interval — e.g.
+# abs_sync_interval_minutes=180 while library_sync_interval_minutes=60
+# means the scheduler fires every hour but only actually syncs the
+# ABS library on every third tick. Keys are library slugs, values
+# are `time.time()` timestamps of the last successful sync (or
+# mtime-skip — either counts as "checked").
+_library_last_sync_at: Dict[str, float] = {}
+
 # True while any library sync is running. Pipeline tasks check this
 # flag before grabbing the DB write lock so they yield cleanly.
 _library_sync_in_progress: bool = False

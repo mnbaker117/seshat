@@ -18,7 +18,7 @@
 // Everything is buffered client-side until the user clicks Save —
 // PUT /v1/metadata-sources replaces the whole state atomically and
 // rebuilds the dispatcher so changes apply live without a restart.
-import { useEffect, useState, type DragEvent } from "react";
+import { useEffect, useState } from "react";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 import { api } from "../api";
@@ -211,8 +211,6 @@ function SourceList({ tab, draft, setDraft, known }: {
   known: SourceMetadata[];
 }) {
   const t = useTheme();
-  const [dragName, setDragName] = useState<string | null>(null);
-  const [hoverName, setHoverName] = useState<string | null>(null);
 
   const priority = draft.priority[tab] ?? [];
   const enrichKey = tab === "ebook" ? "ebook_enrich" : "audiobook_enrich";
@@ -237,50 +235,23 @@ function SourceList({ tab, draft, setDraft, known }: {
   }
 
   function commitReorder(newOrder: string[]) {
-    // MAM always rank 0 regardless of what the drop produced.
+    // MAM always rank 0 regardless of what the reorder produced.
     const withoutMam = newOrder.filter(n => n !== "mam");
     const withMam = ["mam", ...withoutMam];
     setDraft({ ...draft, priority: { ...draft.priority, [tab]: withMam } });
   }
 
-  function onDragStart(e: DragEvent<HTMLDivElement>, name: string) {
-    if (name === "mam") return;  // MAM locked
-    setDragName(name);
-    e.dataTransfer.effectAllowed = "move";
-    // Firefox requires setData to trigger the drag.
-    e.dataTransfer.setData("text/plain", name);
-  }
-
-  function onDragOver(e: DragEvent<HTMLDivElement>, name: string) {
-    if (!dragName || dragName === name || name === "mam") return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    setHoverName(name);
-  }
-
-  function onDragLeave() {
-    setHoverName(null);
-  }
-
-  function onDrop(e: DragEvent<HTMLDivElement>, targetName: string) {
-    e.preventDefault();
-    setHoverName(null);
-    if (!dragName || dragName === targetName || targetName === "mam") {
-      setDragName(null);
-      return;
-    }
-    // Reorder: remove dragName from wherever it was, insert before
-    // targetName. Unknown MAM position is preserved by commitReorder.
-    const next = ordered.filter(n => n !== dragName);
-    const idx = next.indexOf(targetName);
-    next.splice(idx, 0, dragName);
+  // Arrow-button reorder — up/down swap the row with its neighbor.
+  // MAM is locked at rank 0; the arrow buttons are hidden on that
+  // row and the surrounding rows' "up" / "down" are bounded so they
+  // can't swap INTO position 0.
+  function move(i: number, dir: -1 | 1) {
+    const j = i + dir;
+    if (j < 1 || j >= ordered.length) return;  // j < 1 keeps MAM (i=0) immovable
+    if (ordered[i] === "mam" || ordered[j] === "mam") return;
+    const next = [...ordered];
+    [next[i], next[j]] = [next[j], next[i]];
     commitReorder(next);
-    setDragName(null);
-  }
-
-  function onDragEnd() {
-    setDragName(null);
-    setHoverName(null);
   }
 
   return (
@@ -309,17 +280,15 @@ function SourceList({ tab, draft, setDraft, known }: {
         const entry = draft.sources[name];
         if (!entry) return null;
         const locked = name === "mam";
-        const isDragging = dragName === name;
-        const isHover = hoverName === name;
+        // Arrow buttons are bounded so they can't swap INTO slot 0
+        // (MAM is pinned there). The "up" button on row 1 (first
+        // non-MAM) is disabled because moving it up would collide
+        // with MAM.
+        const canUp = !locked && i > 1;
+        const canDown = !locked && i < ordered.length - 1;
         return (
           <div
             key={name}
-            draggable={!locked}
-            onDragStart={(e) => onDragStart(e, name)}
-            onDragOver={(e) => onDragOver(e, name)}
-            onDragLeave={onDragLeave}
-            onDrop={(e) => onDrop(e, name)}
-            onDragEnd={onDragEnd}
             style={{
               display: "grid",
               gridTemplateColumns: "24px 24px 1fr 80px 80px 110px",
@@ -327,20 +296,34 @@ function SourceList({ tab, draft, setDraft, known }: {
               gap: "8px 12px",
               padding: "8px 4px",
               borderBottom: `1px solid ${t.borderL}`,
-              borderTop: isHover ? `2px solid ${t.accent}` : "2px solid transparent",
               background: locked ? t.bg3 : "transparent",
-              opacity: isDragging ? 0.4 : 1,
-              cursor: locked ? "default" : "grab",
             }}
           >
-            {/* Drag handle (6-dot grip) */}
+            {/* Up/down arrows — replaces the HTML5 drag-grip. MAM
+                row shows no arrows since it's pinned. */}
             <div style={{
-              fontSize: 14, color: locked ? t.borderL : t.textDim,
-              textAlign: "center", userSelect: "none",
-              cursor: locked ? "not-allowed" : "grab",
+              display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center",
               lineHeight: 1,
             }}>
-              ⋮⋮
+              {!locked && (
+                <>
+                  <button onClick={() => move(i, -1)} disabled={!canUp} style={{
+                    background: "none", border: "none",
+                    cursor: canUp ? "pointer" : "default",
+                    color: canUp ? t.textDim : t.borderL,
+                    fontSize: 11, padding: "0 2px",
+                    opacity: canUp ? 1 : 0.4,
+                  }}>▲</button>
+                  <button onClick={() => move(i, 1)} disabled={!canDown} style={{
+                    background: "none", border: "none",
+                    cursor: canDown ? "pointer" : "default",
+                    color: canDown ? t.textDim : t.borderL,
+                    fontSize: 11, padding: "0 2px",
+                    opacity: canDown ? 1 : 0.4,
+                  }}>▼</button>
+                </>
+              )}
             </div>
 
             {/* Rank */}

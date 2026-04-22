@@ -489,6 +489,13 @@ DEFAULT_SETTINGS = {
     "languages": ["English"],
     "lookup_interval_days": 3,
     "library_sync_interval_minutes": 60,
+    # Per-library override — when > 0, audiobookshelf libraries
+    # sync on this interval independently of the global one above.
+    # 0 (default) inherits library_sync_interval_minutes. The
+    # scheduler still fires every library_sync_interval_minutes;
+    # per-library gates inside sync_all_libraries skip individual
+    # libraries until their own interval has elapsed.
+    "abs_sync_interval_minutes": 0,
     "rate_goodreads": 2,
     "rate_hardcover": 1,
     "rate_kobo": 3,

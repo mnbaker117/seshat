@@ -55,50 +55,37 @@ function FormatPriorityList({ value, onChange }: {
   onChange: (next: string[]) => void;
 }) {
   const t = useTheme();
-  const [dragItem, setDragItem] = useState<string | null>(null);
-  const [hoverItem, setHoverItem] = useState<string | null>(null);
-
-  const move = (item: string, target: string) => {
-    if (item === target) return;
-    const next = value.filter(v => v !== item);
-    const idx = next.indexOf(target);
-    next.splice(idx, 0, item);
+  // Up/down arrow reorder — mirrors the ebook FormatPriority
+  // component below. Keyboard-accessible by default and avoids
+  // the HTML5 drag-handle hunt the previous implementation used.
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= value.length) return;
+    const next = [...value];
+    [next[i], next[j]] = [next[j], next[i]];
     onChange(next);
   };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, width: 280 }}>
-      {value.map((fmt, i) => {
-        const isDragging = dragItem === fmt;
-        const isHover = hoverItem === fmt;
-        return (
-          <div
-            key={fmt}
-            draggable
-            onDragStart={(e) => { setDragItem(fmt); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", fmt); }}
-            onDragOver={(e) => { if (dragItem && dragItem !== fmt) { e.preventDefault(); setHoverItem(fmt); } }}
-            onDragLeave={() => setHoverItem(null)}
-            onDrop={(e) => { e.preventDefault(); if (dragItem) move(dragItem, fmt); setDragItem(null); setHoverItem(null); }}
-            onDragEnd={() => { setDragItem(null); setHoverItem(null); }}
-            style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "8px 12px",
-              background: t.bg3,
-              border: `1px solid ${t.borderL}`,
-              borderTop: isHover ? `2px solid ${t.accent}` : `1px solid ${t.borderL}`,
-              borderRadius: 6,
-              cursor: "grab",
-              opacity: isDragging ? 0.4 : 1,
-            }}
-          >
-            <span style={{ color: t.textDim, fontSize: 14, lineHeight: 1 }}>⋮⋮</span>
-            <span style={{ fontSize: 12, color: t.textDim, fontWeight: 600, width: 16, textAlign: "right" }}>{i + 1}</span>
-            <span style={{ fontSize: 14, color: t.text, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>
-              {fmt}
-            </span>
-          </div>
-        );
-      })}
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+      {value.map((fmt, i) => (
+        <div key={fmt} style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "6px 12px", borderRadius: 6,
+          background: i === 0 ? t.abg : t.bg3,
+          border: `1px solid ${i === 0 ? t.abr : t.borderL}`,
+        }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: i === 0 ? t.accent : t.td, width: 20 }}>{i + 1}.</span>
+          <span style={{ fontSize: 14, fontWeight: 500, color: i === 0 ? t.accent : t.text2, flex: 1, textTransform: "uppercase", letterSpacing: 0.4 }}>{fmt}</span>
+          <button onClick={() => move(i, -1)} disabled={i === 0} style={{
+            background: "none", border: "none", cursor: i === 0 ? "default" : "pointer",
+            color: i === 0 ? t.tg : t.td, fontSize: 14, padding: "0 4px", opacity: i === 0 ? 0.3 : 1,
+          }}>▲</button>
+          <button onClick={() => move(i, 1)} disabled={i === value.length - 1} style={{
+            background: "none", border: "none", cursor: i === value.length - 1 ? "default" : "pointer",
+            color: i === value.length - 1 ? t.tg : t.td, fontSize: 14, padding: "0 4px", opacity: i === value.length - 1 ? 0.3 : 1,
+          }}>▼</button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -818,15 +805,13 @@ function AudiobookshelfSection({ s, upd, ist, creds, onCredSaved }: {
     </SF>
 
     <SF
-      label="Audiobook Format Priority"
-      desc="When a torrent contains multiple audio formats (rare), the pipeline picks the primary file from the format listed earliest. Drag to reorder."
-      example="m4b = chapterized single-file · m4a = single-file no chapters · mp3 = multi-part legacy"
-      wide
+      label="ABS Sync Interval"
+      desc="How often the scheduled library-sync loop checks Audiobookshelf for new audiobooks. 0 inherits the global Library Sync Interval (above in the Libraries section)."
     >
-      <FormatPriorityList
-        value={(s.audiobook_format_priority as string[]) || ["m4b", "m4a", "mp3"]}
-        onChange={(next) => upd("audiobook_format_priority", next)}
-      />
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <input type="number" min={0} value={s.abs_sync_interval_minutes as number ?? 0} onChange={e => upd("abs_sync_interval_minutes", parseInt(e.target.value) || 0)} style={nist} />
+        <span style={{ fontSize: 13, color: t.textDim }}>min</span>
+      </div>
     </SF>
 
     <SF
@@ -924,8 +909,19 @@ function DiscMamSection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
         <span style={{ fontSize: 13, color: t.textDim }}>min</span>
       </div>
     </SF>
-    <SF label="Format Priority" desc="Drag formats to reorder. Highest priority format is preferred when multiple are available." wide>
+    <SF label="Ebook Format Priority" desc="Drag formats to reorder. Highest priority format is preferred when multiple are available." wide>
       <FormatPriority formats={(s.mam_format_priority as string[]) ?? ["epub", "azw", "azw3", "pdf", "djvu", "azw4"]} onChange={(v: string[]) => upd("mam_format_priority", v)} />
+    </SF>
+    <SF
+      label="Audiobook Format Priority"
+      desc="When a torrent contains multiple audio formats (rare), the pipeline picks the primary file from the format listed earliest. Drag to reorder."
+      example="m4b = chapterized single-file · m4a = single-file no chapters · mp3 = multi-part legacy"
+      wide
+    >
+      <FormatPriorityList
+        value={(s.audiobook_format_priority as string[]) || ["m4b", "m4a", "mp3"]}
+        onChange={(next) => upd("audiobook_format_priority", next)}
+      />
     </SF>
     <SF label="Test Scan" desc="Run a quick test scan on 10 books to verify MAM integration.">
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
