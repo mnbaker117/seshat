@@ -149,6 +149,33 @@ class TestConfigRoundTrip:
         resp = await client.put("/api/v1/mam/economy/config", json={})
         assert resp.status_code == 400
 
+    async def test_put_delegates_to_apply_settings_patch(
+        self, client, temp_db, isolated_settings, monkeypatch
+    ):
+        """Regression guard: toggling `mam_economy_buffer_gate_enabled`
+        via MamPage has to rebuild the dispatcher (PolicyConfig is
+        snapshotted at startup). If someone "simplifies" this back to
+        a plain save_settings call, the buffer gate flag would persist
+        to disk but stay at False in memory until the next container
+        restart — exactly the bug that reached UAT on 2026-04-23.
+        """
+        from app.routers import settings as settings_router
+        called_with: dict = {}
+
+        async def fake_apply(body):
+            called_with.update(body)
+            from app.routers.settings import PatchResponse
+            return PatchResponse(ok=True, updated=list(body), rejected=[])
+
+        monkeypatch.setattr(settings_router, "apply_settings_patch", fake_apply)
+        _write_settings(isolated_settings, {})
+        resp = await client.put(
+            "/api/v1/mam/economy/config",
+            json={"mam_economy_buffer_gate_enabled": True},
+        )
+        assert resp.status_code == 200
+        assert called_with == {"mam_economy_buffer_gate_enabled": True}
+
 
 # ─── VIP buy ────────────────────────────────────────────────
 

@@ -115,8 +115,14 @@ async def put_config(updates: dict) -> dict:
     programmatic upload-credit buys under `MIN_UPLOAD_GB`, so a
     sub-50 chunk would just produce a silent no_trigger skip every
     interval. Reject at write time with a clear message instead.
+
+    Delegates the actual save + post-save hooks to
+    `apply_settings_patch()` — this ensures the live dispatcher gets
+    rebuilt after changes like `mam_economy_buffer_gate_enabled`,
+    which would otherwise silently no-op because the in-memory
+    `PolicyConfig.buffer_gate_enabled` stays at its startup value
+    until the next container restart.
     """
-    s = dict(load_settings())
     allowed = {k: v for k, v in updates.items() if k in _CONFIG_KEYS}
     if not allowed:
         raise HTTPException(400, "No recognized economy keys in request body")
@@ -135,8 +141,16 @@ async def put_config(updates: dict) -> dict:
                     f"{chunk_key} must be >= {MIN_UPLOAD_GB} — MAM rejects "
                     f"programmatic upload buys below that floor (got {chunk_gb})",
                 )
-    s.update(allowed)
-    save_settings(s)
+
+    # Hand off to the shared patch routine so the dispatcher rebuild
+    # + metadata-source reload + logging-reapplication hooks all fire.
+    # apply_settings_patch itself re-validates against DEFAULT_SETTINGS,
+    # which is a superset of _CONFIG_KEYS so nothing gets rejected at
+    # this layer.
+    from app.routers.settings import apply_settings_patch
+    await apply_settings_patch(allowed)
+
+    s = load_settings()
     return {k: s.get(k) for k in (_CONFIG_KEYS + _CONFIG_READONLY_KEYS)}
 
 
