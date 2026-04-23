@@ -124,9 +124,13 @@ Needs an unowned book that's "Found" on MAM.
 **BP-free testing approach**: you don't need a 10 GB+ torrent or
 lots of BP. Two tricks:
 
-- Set the safety margin to something absurd (e.g. `5000` GB). That
-  guarantees ANY non-free torrent triggers the gate regardless of
-  real size. Testing just the banner math + dispatch path.
+- Set the safety margin to a value **larger than your current MAM
+  upload buffer** (check your current buffer on MamPage). The gate
+  fires when `torrent_size + margin > buffer`, so the margin alone
+  has to exceed the buffer for every torrent to trigger. 10 TB
+  (`10000` GB) works for most accounts; bump proportionally if
+  your buffer is bigger. A too-small margin lets small torrents
+  through silently — confusing, not a bug.
 - Turn on Dry-run mode before doing step 21. The fake buy succeeds,
   the retry's preflight still sees the unchanged real buffer, so it
   re-blocks. That's expected — you're verifying the button fires +
@@ -134,8 +138,10 @@ lots of BP. Two tricks:
   run. (In real mode with a reasonable margin, the retry succeeds.)
 
 19. On MamPage, enable **Buffer gate** toggle under Auto-buy: Upload
-    credit → "Buffer gate (pre-download)". Set safety margin to
-    `5000` GB. Turn Dry-run mode on under Operator / testing.
+    credit → "Buffer gate (pre-download)". Set safety margin to a
+    value larger than your current buffer (e.g. `10000` GB if your
+    buffer is under 10 TB). Turn Dry-run mode on under Operator /
+    testing.
 20. Pick any non-free book via BookSidebar that's `mam_status=found`
     and click Send to pipeline. Expected: the send does NOT complete
     — the **BufferInsufficientBanner** renders at the bottom of the
@@ -151,8 +157,8 @@ lots of BP. Two tricks:
 22. Turn Buffer gate back off AND safety margin back to `1` AND
     Dry-run mode back off when done.
 23. **IRC autograb block (optional, requires IRC to be receiving)**:
-    temporarily set the safety margin to `5000` again with dry-run
-    OFF. Wait for an IRC announce for a non-free torrent. Check
+    temporarily re-set the safety margin above your buffer with
+    dry-run OFF. Wait for an IRC announce for a non-free torrent. Check
     Auto-buy history — you should see a `buffer_gate_block,
     irc_autograb, buffer_gate_block` row with a message like
     "Would need X GB; buffer is Y GB". If you have ntfy configured
