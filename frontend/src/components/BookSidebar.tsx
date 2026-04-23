@@ -1225,20 +1225,83 @@ export function BookSidebar({
                     {pipelineReady &&
                     book.mam_status === "found" &&
                     !book.mam_my_snatched ? (
-                      <SendToPipelineControl
-                        t={t}
-                        offerWedge={offerWedge}
-                        offerFl={offerFl}
-                        useWedgeChecked={useWedgeChecked}
-                        buyFlChecked={buyFlChecked}
-                        setUseWedgeChecked={setUseWedgeChecked}
-                        setBuyFlChecked={setBuyFlChecked}
-                        sending={sending}
-                        onSend={sendToPipeline}
-                      />
+                      <Btn
+                        size="sm"
+                        onClick={sendToPipeline}
+                        disabled={sending}
+                        style={{
+                          background: t.accent + "22",
+                          color: t.accent,
+                          border: `1px solid ${t.accent}44`,
+                        }}
+                      >
+                        {sending ? <Spin /> : "⬇"} Send to pipeline
+                      </Btn>
                     ) : null}
                   </div>
                 </div>
+
+                {/* Per-grab offer checkboxes (commit 7). On their
+                    own row so narrow sidebar widths don't wrap the
+                    Found/Re-scan/Send buttons around them. Only
+                    renders when the user has enabled one of the
+                    offers under MamPage → Auto-buy → Per-grab offers
+                    AND the send-to-pipeline button would actually
+                    show up on the row above. */}
+                {pipelineReady &&
+                book.mam_status === "found" &&
+                !book.mam_my_snatched &&
+                (offerWedge || offerFl) ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "flex-end",
+                      gap: 14,
+                      marginTop: 4,
+                      fontSize: 11,
+                      color: t.tg,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    {offerWedge && (
+                      <label
+                        style={{
+                          display: "flex",
+                          gap: 4,
+                          alignItems: "center",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={useWedgeChecked}
+                          onChange={(e) =>
+                            setUseWedgeChecked(e.target.checked)
+                          }
+                        />
+                        Use wedge
+                      </label>
+                    )}
+                    {offerFl && (
+                      <label
+                        style={{
+                          display: "flex",
+                          gap: 4,
+                          alignItems: "center",
+                          cursor: "pointer",
+                        }}
+                        title="Spend 50,000 BP to flag this torrent as personal freeleech on MAM"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={buyFlChecked}
+                          onChange={(e) => setBuyFlChecked(e.target.checked)}
+                        />
+                        Buy personal FL (50k BP)
+                      </label>
+                    )}
+                  </div>
+                ) : null}
 
                 {book.mam_url &&
                 (book.mam_formats ||
@@ -1581,103 +1644,3 @@ export function BookSidebar({
 }
 
 
-// ─── Send-to-pipeline control (commit 7) ──────────────────
-//
-// Renders the Send-to-pipeline button, plus an inline row of
-// checkboxes when the user has enabled the per-grab offers in
-// MamPage. Kept local to this file (rather than a top-level
-// component) because every piece of state it needs already lives
-// on the surrounding BookSidebar component — lifting it out would
-// mean a prop bundle of 8 fields to save maybe 40 lines of JSX.
-
-function SendToPipelineControl({
-  t,
-  offerWedge,
-  offerFl,
-  useWedgeChecked,
-  buyFlChecked,
-  setUseWedgeChecked,
-  setBuyFlChecked,
-  sending,
-  onSend,
-}: {
-  t: ReturnType<typeof useTheme>;
-  offerWedge: boolean;
-  offerFl: boolean;
-  useWedgeChecked: boolean;
-  buyFlChecked: boolean;
-  setUseWedgeChecked: (v: boolean) => void;
-  setBuyFlChecked: (v: boolean) => void;
-  sending: boolean;
-  onSend: () => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "flex-end",
-        gap: 4,
-      }}
-    >
-      {(offerWedge || offerFl) && (
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            fontSize: 11,
-            color: t.textDim,
-          }}
-        >
-          {offerWedge && (
-            <label
-              style={{
-                display: "flex",
-                gap: 4,
-                alignItems: "center",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={useWedgeChecked}
-                onChange={(e) => setUseWedgeChecked(e.target.checked)}
-              />
-              Use wedge
-            </label>
-          )}
-          {offerFl && (
-            <label
-              style={{
-                display: "flex",
-                gap: 4,
-                alignItems: "center",
-                cursor: "pointer",
-              }}
-              title="Spend 50,000 BP to flag this torrent as personal freeleech on MAM"
-            >
-              <input
-                type="checkbox"
-                checked={buyFlChecked}
-                onChange={(e) => setBuyFlChecked(e.target.checked)}
-              />
-              Buy personal FL (50k BP)
-            </label>
-          )}
-        </div>
-      )}
-      <Btn
-        size="sm"
-        onClick={onSend}
-        disabled={sending}
-        style={{
-          background: t.accent + "22",
-          color: t.accent,
-          border: `1px solid ${t.accent}44`,
-        }}
-      >
-        {sending ? <Spin /> : "⬇"} Send to pipeline
-      </Btn>
-    </div>
-  );
-}

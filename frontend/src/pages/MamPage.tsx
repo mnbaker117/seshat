@@ -653,11 +653,11 @@ function EconomySections() {
         subtitle="Three independent triggers — ratio, buffer, bonus excess. The first to fire wins each interval tick."
         right={
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {/* MAM rejects programmatic upload buys under 50 GB
-                with a log-spam error — preset buttons start at the
-                floor. Chunk minimums are also enforced at config
-                PUT time on the backend. */}
-            {[50, 100, 250, 500].map((gb) => (
+            {/* MAM exposes 50 GB and 100 GB as the two fixed-price
+                upload presets; anything else goes through "Max
+                affordable". Chunk minimums are also enforced at
+                config PUT time and at the decision engine. */}
+            {[50, 100].map((gb) => (
               <Btn
                 key={gb}
                 variant="ghost"
