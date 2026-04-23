@@ -306,3 +306,166 @@ class TestAdoptOrphanTorrents:
             assert events[0].torrent_name == "Finished Manual Add"
         finally:
             await db.close()
+
+
+class TestFileRaceRetry:
+    """The qBit file-move race: pipeline ran before files landed in
+    save_path, `_prepare_book` emitted "no file matching", run was
+    marked PIPE_FAILED. Auto-retry picks these up on the next tick
+    after a cooldown so recovery doesn't require manual DB surgery.
+    Reproduces the grab 2779 (Super Sales on Super Heroes) incident
+    from Tier 1 UAT.
+    """
+
+    async def _setup_failed_run(
+        self, db, torrent_id: str, qbit_hash: str,
+        error: str = (
+            "torrent files unavailable from client; "
+            "no file matching 'Test Book' in /downloads/"
+        ),
+    ) -> tuple[int, int]:
+        """Insert a grab in DOWNLOADED state + a failed pipeline_run."""
+        grab_id = await _insert_submitted_grab(db, torrent_id, qbit_hash)
+        await grabs_storage.set_state(
+            db, grab_id, grabs_storage.STATE_DOWNLOADED, qbit_hash=qbit_hash,
+        )
+        run_id = await pipeline_storage.create_run(
+            db, grab_id=grab_id, qbit_hash=qbit_hash, source_path="/dl/x",
+        )
+        await pipeline_storage.set_state(
+            db, run_id, pipeline_storage.PIPE_FAILED, error=error,
+        )
+        return grab_id, run_id
+
+    async def _backdate_run(self, db, run_id: int, seconds_ago: int) -> None:
+        """Rewrite `state_updated_at` to an earlier UTC timestamp so
+        the cooldown gate treats the failure as old enough to retry."""
+        import datetime as _dt
+        past = (
+            _dt.datetime.now(tz=_dt.timezone.utc)
+            - _dt.timedelta(seconds=seconds_ago)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        await db.execute(
+            "UPDATE pipeline_runs SET state_updated_at = ? WHERE id = ?",
+            (past, run_id),
+        )
+        await db.commit()
+
+    async def _clear_retry_counts(self):
+        """Reset the module-level retry-count dict between tests."""
+        from app.orchestrator import download_watcher
+        download_watcher._file_race_retry_counts.clear()
+
+    async def test_retries_after_cooldown(self, temp_db):
+        await self._clear_retry_counts()
+        db = await get_db()
+        try:
+            grab_id, old_run_id = await self._setup_failed_run(
+                db, "555", "hash_race"
+            )
+            await self._backdate_run(db, old_run_id, seconds_ago=60)
+            snapshot = {
+                "hash_race": TorrentSnap(
+                    state="uploading", save_path="/dl/book"
+                )
+            }
+
+            events = await check_for_completions(db, snapshot)
+
+            assert len(events) == 1
+            assert events[0].grab_id == grab_id
+            # Old failed run deleted, fresh one created.
+            run = await pipeline_storage.find_by_grab_id(db, grab_id)
+            assert run is not None
+            assert run.id != old_run_id
+            assert run.state == pipeline_storage.PIPE_STAGED
+        finally:
+            await db.close()
+
+    async def test_skipped_within_cooldown(self, temp_db):
+        """Failure timestamp < cooldown → no retry this tick."""
+        await self._clear_retry_counts()
+        db = await get_db()
+        try:
+            _, old_run_id = await self._setup_failed_run(
+                db, "556", "hash_fresh"
+            )
+            # default state_updated_at is "just now" — within cooldown
+            snapshot = {
+                "hash_fresh": TorrentSnap(
+                    state="uploading", save_path="/dl/book"
+                )
+            }
+
+            events = await check_for_completions(db, snapshot)
+
+            assert events == []
+            # Old run still present, untouched.
+            run = await pipeline_storage.get_run(db, old_run_id)
+            assert run is not None
+            assert run.state == pipeline_storage.PIPE_FAILED
+        finally:
+            await db.close()
+
+    async def test_respects_max_retry_count(self, temp_db):
+        """After MAX_RETRIES, stop retrying even if cooldown has elapsed."""
+        from app.orchestrator import download_watcher
+        await self._clear_retry_counts()
+        db = await get_db()
+        try:
+            grab_id, _ = await self._setup_failed_run(
+                db, "557", "hash_maxed"
+            )
+            # Simulate already-at-limit counter.
+            download_watcher._file_race_retry_counts[grab_id] = (
+                download_watcher._FILE_RACE_MAX_RETRIES
+            )
+            snapshot = {
+                "hash_maxed": TorrentSnap(
+                    state="uploading", save_path="/dl/book"
+                )
+            }
+
+            # Cooldown eligible but retry-count exhausted.
+            events = await check_for_completions(db, snapshot)
+            assert events == []
+        finally:
+            await db.close()
+
+    async def test_skipped_when_torrent_missing_from_qbit(self, temp_db):
+        await self._clear_retry_counts()
+        db = await get_db()
+        try:
+            _, old_run_id = await self._setup_failed_run(
+                db, "558", "hash_gone"
+            )
+            await self._backdate_run(db, old_run_id, seconds_ago=60)
+
+            snapshot = {}  # torrent absent from qBit
+
+            events = await check_for_completions(db, snapshot)
+            assert events == []
+        finally:
+            await db.close()
+
+    async def test_non_file_race_failures_not_retried(self, temp_db):
+        """Other pipeline-fail errors (e.g. "no book files found in")
+        are NOT file-race; they stay failed for operator review."""
+        await self._clear_retry_counts()
+        db = await get_db()
+        try:
+            _, old_run_id = await self._setup_failed_run(
+                db, "559", "hash_other",
+                error="no book files found in /dl/book",
+            )
+            await self._backdate_run(db, old_run_id, seconds_ago=60)
+            snapshot = {
+                "hash_other": TorrentSnap(
+                    state="uploading", save_path="/dl/book"
+                )
+            }
+
+            events = await check_for_completions(db, snapshot)
+            assert events == []
+        finally:
+            await db.close()

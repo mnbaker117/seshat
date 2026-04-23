@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import aiosqlite
 
@@ -49,6 +50,31 @@ _DOWNLOADING_STATES = frozenset({
     # qBit v5+ uses "stopped" generically
     "stoppedDL",
 })
+
+
+# ─── File-race auto-retry state ───────────────────────────────
+#
+# Race: qBit reports `seeding` (file transfer done) before it has
+# finished moving the torrent into `save_path`. The pipeline runs,
+# `_prepare_book` can't locate the expected filename, and
+# `_fail()` marks the pipeline_run as failed with
+# `"torrent files unavailable from client; no file matching ..."`.
+# Seconds later qBit finishes the move, but the failed pipeline_run
+# row is what `check_for_completions` sees — its existence is the
+# gate that prevents reprocessing.
+#
+# Auto-retry: on each watcher tick, scan for pipeline_runs in that
+# exact failure shape and past a short cooldown, delete the old
+# failed run and re-create a fresh one so the pipeline re-tries
+# against the now-moved files. A module-level counter keeps us from
+# runaway-retrying a grab when the underlying issue isn't transient
+# (e.g. torrent actually missing from qBit's mount). The counter
+# resets on process restart by design — at that point an operator
+# has restarted the container and is presumably watching for the
+# next attempt anyway.
+_FILE_RACE_RETRY_COOLDOWN_SECONDS = 30
+_FILE_RACE_MAX_RETRIES = 2
+_file_race_retry_counts: dict[int, int] = {}  # grab_id → count, process-local
 
 
 @dataclass(frozen=True)
@@ -225,6 +251,104 @@ async def check_for_completions(
             grab.id, grab.torrent_name, grab.qbit_hash, snap.save_path,
         )
 
+    # Second pass: retry pipeline runs stuck on the qBit file-move
+    # race. Returns fresh CompletionEvents so the budget watcher
+    # processes them in the same loop as new completions.
+    retry_events = await _collect_file_race_retries(db, qbit_snapshot)
+    events.extend(retry_events)
+
+    return events
+
+
+async def _collect_file_race_retries(
+    db: aiosqlite.Connection,
+    qbit_snapshot: dict[str, "TorrentSnap"],
+) -> list[CompletionEvent]:
+    """Scan for pipeline_runs that failed with the 'no file matching'
+    error and re-queue them for another attempt.
+
+    Gates: cooldown elapsed since the failure (>30s), retry count
+    under limit (≤2), and qBit still has the torrent in a non-
+    downloading state. Each eligible row has its failed pipeline_run
+    deleted, a fresh one created, and a CompletionEvent emitted.
+
+    The grab's state is unchanged — it's already in STATE_DOWNLOADED
+    from the first attempt and stays there through the retry.
+    """
+    cursor = await db.execute(
+        """
+        SELECT g.id AS grab_id, g.qbit_hash, g.torrent_name,
+               pr.id AS pr_id, pr.state_updated_at AS failed_at
+        FROM grabs g
+        JOIN pipeline_runs pr ON pr.grab_id = g.id
+        WHERE g.state = ?
+          AND pr.state = ?
+          AND pr.error LIKE '%no file matching%'
+        """,
+        (grabs_storage.STATE_DOWNLOADED, pipeline_storage.PIPE_FAILED),
+    )
+    rows = await cursor.fetchall()
+    events: list[CompletionEvent] = []
+    if not rows:
+        return events
+
+    now = datetime.now(tz=timezone.utc)
+    for row in rows:
+        grab_id = row["grab_id"]
+        qbit_hash = row["qbit_hash"]
+        if not qbit_hash:
+            continue
+
+        # Cooldown check. SQLite's `datetime('now')` is UTC; parse
+        # the stored `YYYY-MM-DD HH:MM:SS` string as UTC too.
+        try:
+            failed_at = datetime.fromisoformat(
+                str(row["failed_at"]).replace(" ", "T")
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue  # malformed timestamp, skip defensively
+        if (now - failed_at).total_seconds() < _FILE_RACE_RETRY_COOLDOWN_SECONDS:
+            continue
+
+        # Retry-count gate. Resets on process restart; see module
+        # comment for the rationale.
+        if _file_race_retry_counts.get(grab_id, 0) >= _FILE_RACE_MAX_RETRIES:
+            continue
+
+        # qBit snapshot gate. If qBit doesn't have the torrent any
+        # more (deleted, moved, re-adding) there's nothing to retry
+        # against. Also skip if it's somehow back in a downloading
+        # state.
+        snap = qbit_snapshot.get(qbit_hash)
+        if snap is None or snap.state in _DOWNLOADING_STATES:
+            continue
+
+        # Eligible — bump counter, delete the failed run, emit a
+        # fresh CompletionEvent. Log at INFO so operators can see
+        # the retry happening during a file-race episode.
+        _file_race_retry_counts[grab_id] = (
+            _file_race_retry_counts.get(grab_id, 0) + 1
+        )
+        await pipeline_storage.delete_run(db, row["pr_id"])
+        run_id = await pipeline_storage.create_run(
+            db,
+            grab_id=grab_id,
+            qbit_hash=qbit_hash,
+            source_path=snap.save_path,
+        )
+        events.append(CompletionEvent(
+            grab_id=grab_id,
+            qbit_hash=qbit_hash,
+            torrent_name=row["torrent_name"],
+            save_path=snap.save_path,
+            pipeline_run_id=run_id,
+        ))
+        _log.info(
+            "download watcher: retrying file-race failure grab_id=%d "
+            "(attempt %d of %d, cooldown %.0fs elapsed)",
+            grab_id, _file_race_retry_counts[grab_id],
+            _FILE_RACE_MAX_RETRIES, (now - failed_at).total_seconds(),
+        )
     return events
 
 

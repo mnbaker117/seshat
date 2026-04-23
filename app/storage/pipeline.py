@@ -158,6 +158,24 @@ async def find_by_grab_id(
     return _row_to_pipeline(row) if row else None
 
 
+async def delete_run(
+    db: aiosqlite.Connection, run_id: int,
+) -> None:
+    """Delete a pipeline_run row.
+
+    Used by the download watcher's auto-retry flow: when a
+    `no file matching` failure is detected and eligible for retry
+    (cooldown elapsed, under retry limit, qBit still has the
+    torrent), the old failed run is deleted so `check_for_completions`
+    can recreate a fresh one on the same grab. The FK cascade in
+    `book_review_queue.pipeline_run_id` uses ON DELETE SET NULL,
+    so approval rows aren't orphaned — though in practice a failed
+    run never produces a review row anyway.
+    """
+    await db.execute("DELETE FROM pipeline_runs WHERE id = ?", (run_id,))
+    await db.commit()
+
+
 async def find_by_state(
     db: aiosqlite.Connection, state: str
 ) -> list[PipelineRow]:
