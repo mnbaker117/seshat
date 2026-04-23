@@ -1,12 +1,38 @@
 # Tier 1 (MouseSearch port) — Frontend test plan
 
-Manual UAT plan for the MAM economy bundle shipped in the
-`tier1-mam-economy` branch. Backend is covered by 1016 automated
-tests; this plan exercises the user-visible paths that can't be
-unit-tested.
+Manual UAT plan for the MAM economy bundle. Backend is covered by
+automated tests; this plan exercises the user-visible paths that
+can't be unit-tested.
 
-Total test time ~20–30 min if everything works; add buffer for
-any real-BP spends in Section B.
+Total test time ~20–30 min if everything works; add buffer for any
+real-BP spends in Section B.
+
+## Dry-run mode (BP-free testing)
+
+On MamPage, Auto-buy: Upload credit → **Operator / testing** →
+"Dry-run mode (simulate buys, spend no BP)". When on:
+
+- All three bonusBuy wrappers return a synthetic success without
+  hitting MAM.
+- Audit rows are tagged `[DRY RUN]` so the history tile visibly
+  separates them from real activity.
+- Scheduler/router skip the shared-timestamp bump so flipping
+  dry-run off later doesn't leave a phantom "just bought" lockout.
+
+Run through Section B once with dry-run ON first to verify the UI
+flow without spending BP. Then flip it off and do ONE real buy to
+confirm end-to-end MAM integration. Sections C and D can stay in
+dry-run mode the whole time (with the caveats noted in each
+section).
+
+## Capture real MAM responses (for future fidelity)
+
+If you set `verbose_logging=true` in Settings, every real bonusBuy
+response body is logged at DEBUG. Any live buy you do produces a
+`seshat.mam.bonus_buy — bonus buy <label> raw response: {...}` line
+in `docker compose logs seshat`. Paste those back and I'll update
+the dry-run synthetic responses to match reality exactly — makes
+future dry-run testing indistinguishable from a real MAM round-trip.
 
 ## Setup (once)
 

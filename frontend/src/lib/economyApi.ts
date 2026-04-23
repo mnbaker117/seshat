@@ -26,6 +26,7 @@ export interface EconomyConfig {
   mam_economy_manual_wedge_offer_enabled: boolean;
   mam_economy_fl_wedge_offer_enabled: boolean;
   mam_economy_intro_dismissed: boolean;
+  mam_economy_dry_run: boolean;
   // Read-only timestamps.
   mam_economy_last_vip_buy_at: number;
   mam_economy_last_upload_buy_at: number;

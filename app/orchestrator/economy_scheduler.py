@@ -57,7 +57,6 @@ from app.mam.economy import (
     decide_vip_buy,
 )
 from app.mam.user_status import (
-    UserStatus,
     UserStatusError,
     get_user_status,
 )
@@ -403,6 +402,12 @@ async def _record_buy_outcome(
         cost_points=cost,
         user_bonus_after=result.new_seedbonus,
     )
+
+    # Dry-run simulated buys skip the timestamp bump — otherwise
+    # toggling dry-run off would leave a phantom lockout where the
+    # scheduler thinks we "just bought" 10 minutes ago.
+    if result.dry_run:
+        return outcome
 
     # Bump the shared timestamp so the next scheduler tick AND any
     # manual Buy Now click within the interval window both see the

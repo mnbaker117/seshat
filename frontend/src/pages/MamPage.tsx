@@ -524,6 +524,27 @@ function EconomySections() {
 
   return (
     <>
+      {config.mam_economy_dry_run && (
+        <div
+          style={{
+            background: theme.warn + "28",
+            border: `1px solid ${theme.warn}`,
+            borderRadius: 10,
+            padding: "10px 14px",
+            marginBottom: 16,
+            fontSize: 13,
+            color: theme.warn,
+            fontWeight: 600,
+          }}
+        >
+          Dry-run mode is ON — bonus-point buys are simulated
+          (no BP spent, no MAM round-trips). Audit rows are tagged
+          <code style={{ margin: "0 4px" }}>[DRY RUN]</code>.
+          Scheduler timestamps are NOT bumped, so you can flip this
+          off later without leaving a phantom lockout.
+        </div>
+      )}
+
       {!config.mam_economy_intro_dismissed && (
         <div
           style={{
@@ -797,6 +818,17 @@ function EconomySections() {
             onChange={(v) =>
               patchConfig({ mam_economy_fl_wedge_offer_enabled: v })
             }
+          />
+        </KV>
+
+        <div style={{ marginTop: 14 }}>
+          <SubHeader>Operator / testing</SubHeader>
+        </div>
+        <KV label="Dry-run mode (simulate buys, spend no BP)">
+          <Toggle
+            on={config.mam_economy_dry_run}
+            disabled={configBusy}
+            onChange={(v) => patchConfig({ mam_economy_dry_run: v })}
           />
         </KV>
       </Section>

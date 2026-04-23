@@ -491,6 +491,16 @@ DEFAULT_SETTINGS = {
     # Settings UI and never shown again.
     "mam_economy_intro_dismissed": False,
 
+    # Dry-run / preview mode. When true, bonusBuy.php wrappers short-
+    # circuit to a canned BuyResult(success=True) without hitting MAM,
+    # audit rows get a `[DRY RUN]` prefix so the history tile shows
+    # simulated rows distinctly, and the scheduler/router skip bumping
+    # the shared `mam_economy_last_*_buy_at` timestamps (so toggling
+    # back off doesn't leave phantom lockouts). Useful for: demoing
+    # the UI without burning BP, practicing operator workflows, and
+    # catching UI regressions in the config -> buy -> audit chain.
+    "mam_economy_dry_run": False,
+
     # ── Cron / scheduled jobs ───────────────────────────────
     # MAM keeps a session cookie alive as long as we make at least one
     # API call within a 15-day window. Seshat's cookie auto-rotation

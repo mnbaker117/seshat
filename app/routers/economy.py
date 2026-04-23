@@ -87,6 +87,7 @@ _CONFIG_KEYS = (
     "mam_economy_manual_wedge_offer_enabled",
     "mam_economy_fl_wedge_offer_enabled",
     "mam_economy_intro_dismissed",
+    "mam_economy_dry_run",
 )
 
 # Read-only surface — timestamps the user can't edit directly.
@@ -392,7 +393,10 @@ async def _persist_manual_buy_result(
         finally:
             await db.close()
 
-        if timestamp_key is not None:
+        # Dry-run simulated buys skip the timestamp bump — otherwise
+        # toggling dry-run off would leave a phantom lockout where
+        # the scheduler thinks we "just bought" a moment ago.
+        if timestamp_key is not None and not result.dry_run:
             s = dict(load_settings())
             s[timestamp_key] = time.time()
             save_settings(s)

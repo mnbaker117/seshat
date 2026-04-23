@@ -82,6 +82,12 @@ class BuyResult:
     the response — mostly useful for assertions ("yes, MAM actually
     processed 50 GB, not 5"). `raw` is the full decoded JSON payload,
     preserved so audit rows can store an error code verbatim.
+
+    `dry_run=True` marks a simulated success produced by the
+    `mam_economy_dry_run` settings toggle — no HTTP request was
+    made. Callers use this to suppress the shared-timestamp bump
+    (otherwise a simulated buy would lock out the next scheduler
+    tick as if it were real).
     """
 
     success: bool
@@ -92,6 +98,48 @@ class BuyResult:
     new_ratio: Optional[float] = None
     amount_echo: Optional[Union[int, float, str]] = None
     raw: Optional[dict] = None
+    dry_run: bool = False
+
+
+# ─── Dry-run mode ────────────────────────────────────────────
+
+
+def _is_dry_run() -> bool:
+    """True when the mam_economy_dry_run toggle is set.
+
+    Reads lazily from settings.json (mtime-cached inside
+    load_settings, so the file isn't re-parsed on every call). If
+    settings can't be loaded at all — e.g. during a test that
+    didn't set up DATA_DIR — default to False so real code paths
+    stay exercised.
+    """
+    try:
+        from app.config import load_settings
+        return bool(load_settings().get("mam_economy_dry_run", False))
+    except Exception:
+        return False
+
+
+def _dry_run_result(label: str, expected_cost_bp: Optional[int]) -> BuyResult:
+    """Synthesize a plausible success for dry-run mode.
+
+    Deliberately minimal: `new_*` fields stay None so the audit row
+    shows no real balance change, `cost_points` derives as None in
+    the caller (prev − None = nothing written). The message prefix
+    `[DRY RUN]` is what the MamPage history tile surfaces to the
+    operator so simulated rows don't visually blend with real ones.
+    """
+    cost_note = (
+        f"~{expected_cost_bp:,} BP"
+        if expected_cost_bp is not None
+        else "unknown BP"
+    )
+    return BuyResult(
+        success=True,
+        message=f"[DRY RUN] would spend {cost_note} on {label}",
+        raw={"dry_run": True, "expected_cost_bp": expected_cost_bp},
+        dry_run=True,
+    )
 
 
 # ─── Public surface ──────────────────────────────────────────
@@ -113,6 +161,9 @@ async def buy_vip(
         raise ValueError(
             f"buy_vip weeks must be 4, 8, 12, or 'max' (got {weeks!r})"
         )
+    if _is_dry_run():
+        cost = weeks * BP_PER_VIP_WEEK if isinstance(weeks, int) else None
+        return _dry_run_result(f"VIP {weeks}w", cost)
     # MAM's VIP endpoint uses `duration=` as the query param, NOT
     # `amount=` — despite the parallel upload endpoint using `amount=`.
     # Passing `amount=` to VIP silently returns HTTP 404. The response
@@ -138,6 +189,10 @@ async def buy_upload_credit(
     """
     if not isinstance(gb, (int, float)) or gb <= 0:
         raise ValueError(f"buy_upload_credit gb must be positive number (got {gb!r})")
+    if _is_dry_run():
+        return _dry_run_result(
+            f"upload {gb} GB", int(round(gb * BP_PER_UPLOAD_GB)),
+        )
     return await _do_buy(
         spendtype="upload",
         extra_params={"amount": str(gb)},
@@ -165,6 +220,11 @@ async def buy_personal_freeleech(
     """
     if not torrent_id or not str(torrent_id).strip():
         raise ValueError("buy_personal_freeleech requires a non-empty torrent_id")
+
+    if _is_dry_run():
+        return _dry_run_result(
+            f"personalFL tid={torrent_id}", BP_PER_PERSONAL_FL,
+        )
 
     ts_ms = _epoch_ms()
     query = urlencode({
@@ -283,6 +343,12 @@ async def _execute(
         log_label,
         new_seedbonus if new_seedbonus is not None else "?",
     )
+    # Full response body at DEBUG — when the user flips on
+    # `verbose_logging`, this gives them a ground-truth capture they
+    # can paste back for future dry-run fidelity work. Don't log at
+    # INFO: the payload includes current ratio/uploaded/downloaded
+    # totals which the operator may not want in a shipped log bundle.
+    _log.debug("bonus buy %s raw response: %s", log_label, data)
     return BuyResult(
         success=True,
         message="ok",

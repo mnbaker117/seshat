@@ -353,3 +353,90 @@ class TestNeverRaises:
         result = await buy_vip(4, token="tok")
         assert result.success is False
         assert "connection refused" in result.message
+
+
+# ─── Dry-run mode ──────────────────────────────────────────
+
+
+@pytest.fixture
+def dry_run_enabled(monkeypatch):
+    """Flip the dry-run module flag via monkeypatch.
+
+    Simpler than wiring an isolated settings.json for these tests —
+    the production path reads `mam_economy_dry_run` through
+    `load_settings()`, but the private `_is_dry_run` helper is the
+    single choke point, so patching it directly exercises the same
+    branches in the buy_* functions without pulling in settings
+    infrastructure.
+    """
+    monkeypatch.setattr(bonus_buy, "_is_dry_run", lambda: True)
+
+
+class TestDryRun:
+    async def test_vip_returns_dry_run_result_no_http(
+        self, fake_mam, dry_run_enabled
+    ):
+        result = await buy_vip(4, token="tok")
+        assert result.success is True
+        assert result.dry_run is True
+        assert "[DRY RUN]" in result.message
+        # Dry-run must NOT hit the fake MAM at all — that's the
+        # whole point of the flag.
+        assert _bonus_requests(fake_mam) == []
+
+    async def test_vip_dry_run_includes_expected_cost(
+        self, fake_mam, dry_run_enabled
+    ):
+        result = await buy_vip(8, token="tok")
+        # 8 weeks × 1250 BP = 10,000 BP
+        assert f"{8 * BP_PER_VIP_WEEK:,}" in result.message
+
+    async def test_vip_dry_run_max_weeks_has_unknown_cost(
+        self, fake_mam, dry_run_enabled
+    ):
+        # "max" can't be priced client-side, so the cost note reflects that.
+        result = await buy_vip("max", token="tok")
+        assert result.success is True
+        assert "unknown BP" in result.message
+
+    async def test_upload_returns_dry_run_result(
+        self, fake_mam, dry_run_enabled
+    ):
+        result = await buy_upload_credit(50, token="tok")
+        assert result.success is True
+        assert result.dry_run is True
+        # 50 GB × 500 BP = 25,000 BP
+        assert f"{50 * BP_PER_UPLOAD_GB:,}" in result.message
+        assert _bonus_requests(fake_mam) == []
+
+    async def test_personal_fl_returns_dry_run_result(
+        self, fake_mam, dry_run_enabled
+    ):
+        result = await buy_personal_freeleech("123", token="tok")
+        assert result.success is True
+        assert result.dry_run is True
+        assert f"{BP_PER_PERSONAL_FL:,}" in result.message
+        assert _bonus_requests(fake_mam) == []
+
+    async def test_dry_run_still_validates_inputs(
+        self, fake_mam, dry_run_enabled
+    ):
+        # Input validation runs BEFORE the dry-run check — a bad
+        # caller argument is still a programming error regardless
+        # of whether we'd have hit MAM.
+        with pytest.raises(ValueError):
+            await buy_vip(7, token="tok")
+        with pytest.raises(ValueError):
+            await buy_upload_credit(-1, token="tok")
+        with pytest.raises(ValueError):
+            await buy_personal_freeleech("", token="tok")
+
+    async def test_dry_run_result_leaves_new_fields_none(
+        self, fake_mam, dry_run_enabled
+    ):
+        # Audit rows rely on new_seedbonus=None to compute cost=None
+        # so dry-run rows don't show a bogus cost in the history.
+        result = await buy_vip(4, token="tok")
+        assert result.new_seedbonus is None
+        assert result.new_uploaded_bytes is None
+        assert result.new_ratio is None
