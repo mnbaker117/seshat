@@ -87,15 +87,19 @@ class TestEnricher:
         assert second.call_count == 0  # short-circuited
 
     async def test_merges_nulls_from_later_sources(self):
-        # accept_confidence 1.01 ensures neither fake record short-circuits
-        # the loop, so the enricher visits every source and merges their
-        # outputs. (Real sources would score <1 and merge naturally.)
-        cfg = EnrichmentConfig(enabled=True, accept_confidence=1.01)
+        # Exercise merge behavior across multiple sources. The first
+        # source returns a pinned `confidence=1.0` so it's treated as
+        # exact-ID (like MAM with a torrent_id). Exact-ID lookups
+        # merge AND suppress the short-circuit break (`have_exact_id`
+        # becomes True), so the second source also runs and gets a
+        # chance to fill in nulls.
+        cfg = EnrichmentConfig(enabled=True, accept_confidence=0.6)
         first_rec = MetaRecord(
             title="Book",
             authors=["Author"],
             cover_url="first-cover.jpg",
             source="first",
+            confidence=1.0,  # exact-ID: merges without short-circuiting
         )
         second_rec = MetaRecord(
             title="Book",
@@ -115,6 +119,53 @@ class TestEnricher:
         assert result.page_count == 500
         assert result.isbn == "9781234567890"
         assert result.cover_url == "first-cover.jpg"  # first wins
+
+    async def test_below_threshold_merge_is_skipped(self):
+        """A source that returns a wrong-book match (rescored below
+        accept_confidence) must NOT contribute any fields to the
+        accumulated record. Before this guard, Kobo was returning
+        "Mercy Temple Chronicles: Collection 2" at confidence 0.44
+        when Mark searched "Monster's Mercy 2", and its junk
+        description leaked into the review card via the merge.
+        """
+        cfg = EnrichmentConfig(enabled=True, accept_confidence=0.8)
+        # First source is exact-ID (like MAM with torrent_id) so the
+        # loop doesn't short-circuit and the second source gets a turn.
+        exact_rec = MetaRecord(
+            title="Monster's Mercy 2",
+            authors=["Randi Darren"],
+            source="mam",
+            confidence=1.0,
+        )
+        # Second source returns a completely different book at a
+        # score_match confidence of ~0.44 (verified by hand:
+        # tokens {mercy, 2} intersect with {monster's, mercy, 2};
+        # no author overlap → 0.7 * 0.63 + 0.3 * 0 ≈ 0.44).
+        wrong_rec = MetaRecord(
+            title="Mercy Temple Chronicles Collection 2",
+            authors=["Someone Else"],
+            description="Junk description from the wrong book",
+            source="kobo",
+        )
+        mam_src = _FakeSource(name="mam", result=exact_rec)
+        kobo_src = _FakeSource(name="kobo", result=wrong_rec)
+        enricher = MetadataEnricher(cfg, sources=[mam_src, kobo_src])
+
+        result = await enricher.enrich(
+            title="Monster's Mercy 2", author="Randi Darren",
+        )
+        assert result is not None
+        # Kobo's junk description did NOT leak.
+        assert result.description is None
+        assert result.title == "Monster's Mercy 2"
+        # source_log surfaces the skip so the UI can render it
+        # distinctly from accepted contributions.
+        source_log = getattr(result, "_source_log", [])
+        kobo_entry = next(
+            (e for e in source_log if e["source"] == "kobo"), None
+        )
+        assert kobo_entry is not None
+        assert kobo_entry["status"] == "below_threshold"
 
     async def test_timeout_falls_through(self, accept_low_cfg):
         cfg = EnrichmentConfig(

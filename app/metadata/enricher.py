@@ -334,6 +334,32 @@ class MetadataEnricher:
                 "status": "matched",
                 "cover_url": result.cover_url or None,
             })
+            # Reject below-threshold fuzzy matches from the merge. A
+            # result under `accept_confidence` from a non-exact source
+            # means the scraper returned a different book — its fields
+            # are presumptively wrong, and merging them would
+            # contaminate the accumulated record. Exact-ID lookups
+            # (MAM with torrent_id, confidence pinned to 1.0 at the
+            # source) bypass this because they're by definition the
+            # right book regardless of fuzzy scoring.
+            #
+            # Caught by Tier 1 UAT: Kobo returned "Mercy Temple
+            # Chronicles: Collection 2" at confidence 0.44 when we
+            # searched "Monster's Mercy 2", and its junk description
+            # leaked into the review record because the merge fired
+            # unconditionally.
+            if (
+                not is_exact
+                and result.confidence < self.config.accept_confidence
+            ):
+                _log.info(
+                    "enricher: %s → skip merge "
+                    "(confidence %.2f < threshold %.2f)",
+                    src.name, result.confidence,
+                    self.config.accept_confidence,
+                )
+                source_log[-1]["status"] = "below_threshold"
+                continue
             merged = _merge_records(merged, result)
             if is_exact:
                 have_exact_id = True
