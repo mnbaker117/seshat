@@ -161,6 +161,22 @@ async def send_to_pipeline(data: dict = Body(...)):
                     metadata["series_name"] = r["series_name"]
                 if r["series_index"]:
                     metadata["series_index"] = r["series_index"]
+                # Include which discovery-side sources contributed to
+                # this book's record. `books.source_url` is a JSON
+                # dict `{"goodreads": "https://...", "hardcover":
+                # "https://...", ...}` populated as sources respond
+                # during lookup. The pipeline uses the keys to render
+                # "via discovery (goodreads, hardcover)" on the review
+                # card instead of the opaque "via source_metadata".
+                if r["source_url"]:
+                    try:
+                        src_map = json.loads(r["source_url"])
+                        if isinstance(src_map, dict) and src_map:
+                            metadata["sources_used"] = sorted(
+                                k for k in src_map if k
+                            )
+                    except (ValueError, TypeError):
+                        pass
                 if metadata:
                     try:
                         pdb = await get_pipeline_db()

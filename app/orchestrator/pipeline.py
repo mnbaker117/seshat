@@ -589,6 +589,22 @@ async def _prepare_book(
     if prebaked_raw:
         try:
             prebaked = json.loads(prebaked_raw)
+            # Surface which discovery-side sources contributed to this
+            # record (set by `/discovery/send-to-pipeline` when packing
+            # the bundle). Renders on the review card as
+            # "via discovery (goodreads, hardcover) · 100%" instead of
+            # the opaque "via source_metadata". Falls back to plain
+            # "discovery" when the bundle predates the sources_used
+            # field or couldn't be populated.
+            sources_used = prebaked.get("sources_used")
+            if (
+                isinstance(sources_used, list)
+                and all(isinstance(s, str) for s in sources_used)
+                and sources_used
+            ):
+                source_label = f"discovery ({', '.join(sources_used)})"
+            else:
+                source_label = "discovery"
             enriched = MetaRecord(
                 title=prebaked.get("title") or "",
                 authors=[prebaked.get("author")] if prebaked.get("author") else [],
@@ -600,7 +616,7 @@ async def _prepare_book(
                 description=prebaked.get("description"),
                 cover_url=prebaked.get("cover_url"),
                 page_count=prebaked.get("page_count"),
-                source="source_metadata",
+                source=source_label,
                 confidence=1.0,  # submitter vouched for this metadata; trust it
             )
             _log.debug(
