@@ -52,7 +52,7 @@ class MamStatusResponse(BaseModel):
     classname: Optional[str] = None
     ratio: Optional[float] = None
     wedges: Optional[int] = None
-    seedbonus: Optional[int] = None
+    seedbonus: Optional[float] = None
     uploaded_bytes: Optional[int] = None
     downloaded_bytes: Optional[int] = None
     error: Optional[str] = None

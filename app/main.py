@@ -67,6 +67,7 @@ from app.routers.credentials import router as credentials_router
 from app.routers.data_management import router as data_mgmt_router
 from app.routers.db_editor import router as db_editor_router
 from app.routers.delayed import router as delayed_router
+from app.routers.economy import router as economy_router
 from app.routers.enums import router as enums_router
 from app.routers.inject import router as inject_router
 from app.routers.logs import router as logs_router, install_log_handler
@@ -322,6 +323,13 @@ async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> Di
             use_wedge=bool(settings.get("policy_use_wedge", False)),
             min_wedges_reserved=int(settings.get("policy_min_wedges_reserved", 0)),
             ratio_floor=float(settings.get("policy_ratio_floor", 0.0)),
+            buffer_gate_enabled=bool(
+                settings.get("mam_economy_buffer_gate_enabled", False)
+            ),
+            buffer_safety_margin_bytes=int(
+                float(settings.get("mam_economy_buffer_gate_safety_margin_gb", 1))
+                * 1_000_000_000
+            ),
         ),
         mam_token=rs.get("mam_session_id") or settings.get("mam_session_id", ""),
         qbit_category=settings.get("qbit_watch_category", "[mam-reseed]"),
@@ -798,6 +806,10 @@ async def lifespan(app: FastAPI):
         mam_scheduler_loop,
     )
     from app.discovery.digest import run_digest_scheduler
+    from app.orchestrator.economy_scheduler import (
+        upload_autobuy_loop,
+        vip_autobuy_loop,
+    )
     add_discovery_jobs(scheduler, settings)
     scheduler.start()
     state.scheduler = scheduler
@@ -808,7 +820,18 @@ async def lifespan(app: FastAPI):
     state._digest_scheduler_task = state.supervised_task(
         run_digest_scheduler, name="digest-scheduler"
     )
-    _log.info("MAM scheduler + digest scheduler tasks started")
+    # MAM economy auto-buy loops. Both default-disabled via settings;
+    # the tick short-circuits with no audit write when the feature
+    # flag is off, so they're cheap to leave running unconditionally.
+    state._economy_vip_task = state.supervised_task(
+        vip_autobuy_loop, name="economy-vip-autobuy"
+    )
+    state._economy_upload_task = state.supervised_task(
+        upload_autobuy_loop, name="economy-upload-autobuy"
+    )
+    _log.info(
+        "MAM scheduler + digest scheduler + economy auto-buy tasks started"
+    )
 
     try:
         yield
@@ -881,6 +904,8 @@ async def lifespan(app: FastAPI):
             "_review_timeout_task",
             "_mam_scheduler_task",
             "_digest_scheduler_task",
+            "_economy_vip_task",
+            "_economy_upload_task",
         ):
             task = getattr(state, task_attr, None)
             if task is not None and not task.done():
@@ -1005,6 +1030,7 @@ app.include_router(data_mgmt_router)
 app.include_router(db_editor_router)
 app.include_router(delayed_router)
 app.include_router(enums_router)
+app.include_router(economy_router)
 app.include_router(inject_router)
 app.include_router(logs_router)
 app.include_router(mam_router)

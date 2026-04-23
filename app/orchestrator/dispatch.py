@@ -62,10 +62,21 @@ from app.policy.engine import (
 from app.rate_limit import decide_grab_action
 from app.rate_limit import ledger as ledger_mod
 from app.rate_limit import queue as queue_mod
+from app.storage import economy_audit
 from app.storage import grabs as grabs_storage
 from app.storage import tentative as tentative_storage
 
 _log = logging.getLogger("seshat.orchestrator.dispatch")
+
+
+# Rolling-6h-window ntfy throttle for buffer-gate blocks, keyed by
+# trigger (IRC autograb vs user grab). In-memory, resets on process
+# restart — a restart right after a notify doesn't cost anything
+# worse than one extra message if the buffer is still tight. Writing
+# this to the DB would persist it across restarts but isn't worth
+# the complexity for a soft "don't spam" throttle.
+_BUFFER_GATE_NOTIFY_WINDOW_SECONDS = 6 * 3600
+_last_buffer_gate_notify_at: dict[str, float] = {}
 
 
 # ─── Dependency container ────────────────────────────────────
@@ -215,6 +226,10 @@ class DispatchResult:
 async def handle_announce(
     deps: DispatcherDeps, announce: Announce, *, raw_line: str = ""
 ) -> DispatchResult:
+    # IRC announces never force a wedge — that decision is scoped to
+    # the manual-inject router's "use a wedge for this one" checkbox,
+    # and `force_fl_wedge=False` here preserves whatever the policy
+    # engine decided.
     """Process one announce end-to-end.
 
     Called by the IRC listener's `on_announce` callback. Runs the
@@ -242,6 +257,7 @@ async def handle_announce(
         raw_line=raw_line,
         filter_decision=decision,
         skip_filter=False,
+        force_fl_wedge=False,
     )
 
 
@@ -253,6 +269,7 @@ async def inject_grab(
     category: str = "",
     author_blob: str = "",
     raw_line: str = "manual_inject",
+    force_fl_wedge: bool = False,
 ) -> DispatchResult:
     """Manually queue a grab by torrent ID.
 
@@ -271,6 +288,12 @@ async def inject_grab(
     need them to operate. Callers that have the data should pass it;
     the inject endpoint passes them as empty strings when called
     with just a torrent ID.
+
+    `force_fl_wedge=True` forces `&fl=1` on the download URL
+    regardless of what the policy engine decided. Used by the
+    manual-inject router when the user checks "use a wedge for this
+    one" — drains one wedge from the pool for this single grab
+    without needing to flip the global `policy_use_wedge` setting.
     """
     fake_announce = Announce(
         torrent_id=torrent_id,
@@ -292,6 +315,7 @@ async def inject_grab(
         raw_line=raw_line,
         filter_decision=fake_decision,
         skip_filter=True,
+        force_fl_wedge=force_fl_wedge,
     )
 
 
@@ -305,6 +329,7 @@ async def _dispatch_with_decision(
     raw_line: str,
     filter_decision: Decision,
     skip_filter: bool,
+    force_fl_wedge: bool = False,
 ) -> DispatchResult:
     """The shared pipeline body used by both handle_announce and
     inject_grab. The only thing they differ on is whether the filter
@@ -450,6 +475,19 @@ async def _dispatch_with_decision(
                     "tier": policy_decision.tier,
                 },
             )
+            # Buffer-gate blocks are the one policy-skip outcome that
+            # users have asked to be visible — they represent "I
+            # would have grabbed this but can't afford it right now",
+            # which is an actionable signal. Write an audit row and
+            # (throttled) fire a ntfy so the user knows the feed went
+            # quiet on purpose, not because Seshat crashed.
+            if policy_decision.tier == "buffer_insufficient":
+                await _record_buffer_gate_block(
+                    db, deps,
+                    announce=announce,
+                    eco_ctx=eco_ctx,
+                    from_user_grab=skip_filter,
+                )
             return DispatchResult(
                 action="skip",
                 reason=f"policy:{policy_decision.tier}",
@@ -548,9 +586,13 @@ async def _dispatch_with_decision(
             state=initial_state,
         )
 
+        # `force_fl_wedge` is the manual-inject override — the user
+        # explicitly asked for `&fl=1` on this grab, irrespective of
+        # what the policy engine decided. Either path alone is
+        # enough to flip the wedge on.
         fetch_result = await deps.fetch_torrent(
             announce.torrent_id, deps.mam_token,
-            use_fl_wedge=policy_decision.use_wedge,
+            use_fl_wedge=policy_decision.use_wedge or force_fl_wedge,
         )
 
         if not fetch_result.success:
@@ -758,10 +800,13 @@ async def _build_economic_context(
     """Build the EconomicContext for the policy engine.
 
     Always starts with the announce VIP flag (reliable, free). Then
-    enriches with two MAM API calls if enabled in policy_config:
+    enriches with two MAM API calls when the policy config requires
+    them:
 
       1. torrent_info (search by ID) — gives vip/free/fl_vip/personal_fl
-      2. user_status (jsonLoad.php) — gives ratio + wedge balance
+         PLUS the size in bytes (for the buffer gate).
+      2. user_status (jsonLoad.php) — gives ratio, wedges, AND the
+         upload buffer (for the buffer gate).
 
     Both are cached and fail-safe — if either errors out, the policy
     engine just runs with whatever data is available. The announce
@@ -769,8 +814,8 @@ async def _build_economic_context(
     """
     ctx_kwargs: dict = {"announce_vip": announce.vip}
 
-    # Torrent-info lookup (only if the user enabled it AND we have a token).
-    # We always do this if there's a possibility wedge/free/ratio matter.
+    # Torrent-info is needed when any gate branches on per-torrent
+    # economics OR when the buffer gate needs the torrent size.
     needs_torrent_info = (
         deps.mam_token
         and announce.torrent_id
@@ -778,6 +823,7 @@ async def _build_economic_context(
             deps.policy_config.free_only
             or deps.policy_config.use_wedge
             or deps.policy_config.ratio_floor > 0
+            or deps.policy_config.buffer_gate_enabled
         )
     )
     if needs_torrent_info:
@@ -787,16 +833,26 @@ async def _build_economic_context(
             ctx_kwargs["torrent_free"] = info.free
             ctx_kwargs["torrent_fl_vip"] = info.fl_vip
             ctx_kwargs["personal_freeleech"] = info.personal_freeleech
+            # info.size is a string of bytes — parse defensively
+            # because MAM has been known to send an empty string on
+            # edge cases. Malformed values fall through to None so
+            # the policy engine fails open on the buffer gate.
+            try:
+                ctx_kwargs["torrent_size_bytes"] = int(info.size) if info.size else None
+            except (TypeError, ValueError):
+                ctx_kwargs["torrent_size_bytes"] = None
         except TorrentInfoError as e:
             _log.debug("torrent_info lookup failed for tid=%s: %s",
                          announce.torrent_id, e)
 
-    # User-status lookup (only if the policy actually needs ratio/wedges).
+    # User-status is needed when any gate branches on ratio/wedges
+    # OR when the buffer gate needs the upload_buffer.
     needs_user_status = (
         deps.mam_token
         and (
             deps.policy_config.use_wedge
             or deps.policy_config.ratio_floor > 0
+            or deps.policy_config.buffer_gate_enabled
         )
     )
     if needs_user_status:
@@ -804,10 +860,85 @@ async def _build_economic_context(
             status = await get_user_status(token=deps.mam_token)
             ctx_kwargs["user_ratio"] = status.ratio
             ctx_kwargs["user_wedges"] = status.wedges
+            ctx_kwargs["user_upload_buffer_bytes"] = status.upload_buffer_bytes
         except UserStatusError as e:
             _log.debug("user_status lookup failed: %s", e)
 
     return EconomicContext(**ctx_kwargs)
+
+
+async def _record_buffer_gate_block(
+    db: aiosqlite.Connection,
+    deps: DispatcherDeps,
+    *,
+    announce: Announce,
+    eco_ctx: EconomicContext,
+    from_user_grab: bool,
+) -> None:
+    """Audit a buffer-gate block and (throttled) fire a ntfy.
+
+    `from_user_grab` distinguishes a manual-inject block from an
+    IRC autograb block — the audit table stores the trigger so the
+    MamPage history view can show "your click was blocked" vs "the
+    IRC feed autograb was blocked", and the ntfy throttle keeps a
+    separate 6h window per trigger.
+    """
+    trigger = (
+        economy_audit.TRIGGER_USER_GRAB
+        if from_user_grab
+        else economy_audit.TRIGGER_IRC_AUTOGRAB
+    )
+
+    # Compose a human-readable message with the size + buffer figures
+    # so the audit row is self-explanatory without joining back to
+    # the torrent_info cache (which may have expired by the time the
+    # user reviews the history).
+    size_bytes = eco_ctx.torrent_size_bytes or 0
+    buffer_bytes = eco_ctx.user_upload_buffer_bytes or 0
+    size_gb = size_bytes / 1_000_000_000.0
+    buffer_gb = buffer_bytes / 1_000_000_000.0
+    message = (
+        f"Would need {size_gb:.2f} GB; buffer is {buffer_gb:.2f} GB"
+    )
+
+    try:
+        await economy_audit.record(
+            db,
+            action=economy_audit.ACTION_BUFFER_GATE_BLOCK,
+            trigger=trigger,
+            outcome=economy_audit.OUTCOME_BUFFER_GATE_BLOCK,
+            torrent_id=announce.torrent_id,
+            message=message,
+        )
+    except Exception:
+        # Audit failures must not take down the dispatch loop. Log
+        # and move on — the skip itself already returned cleanly.
+        _log.exception(
+            "failed to record buffer_gate_block audit row tid=%s",
+            announce.torrent_id,
+        )
+
+    # ntfy throttle: fire at most once per rolling 6h window per
+    # trigger type. The first block after a restart always notifies
+    # (sentinel 0), because "feed went quiet" after a restart is
+    # exactly the case we want the user to see.
+    if not deps.ntfy_url:
+        return
+    import time as _time
+    now = _time.time()
+    last = _last_buffer_gate_notify_at.get(trigger, 0.0)
+    if (now - last) < _BUFFER_GATE_NOTIFY_WINDOW_SECONDS:
+        return
+    _last_buffer_gate_notify_at[trigger] = now
+    try:
+        from app.notify import ntfy as _ntfy
+        await _ntfy.notify_buffer_gate_block(
+            deps.ntfy_url, deps.ntfy_topic,
+            announce.torrent_name or f"tid={announce.torrent_id}",
+            size_gb, buffer_gb,
+        )
+    except Exception:
+        _log.exception("buffer-gate ntfy failed (non-fatal)")
 
 
 def _grab_failure_state(result: GrabResult) -> str:

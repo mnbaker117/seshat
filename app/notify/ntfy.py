@@ -149,6 +149,32 @@ async def notify_grab(
     )
 
 
+async def notify_buffer_gate_block(
+    url: str, topic: str, torrent_name: str, size_gb: float, buffer_gb: float
+) -> bool:
+    """Notify that an auto-grab was refused by the buffer gate.
+
+    Fired at most once per rolling 6h window per trigger type (IRC
+    autograb vs user manual grab) — the dispatcher throttles
+    upstream of this call. Wording emphasizes "feed went quiet"
+    because silent rejections are the scarier failure mode: the user
+    needs to know at least one announce was blocked, without getting
+    hammered when the buffer stays low for days.
+    """
+    return await send(
+        url=url,
+        topic=topic,
+        title="Buffer gate blocked a grab",
+        message=(
+            f"{torrent_name}\n"
+            f"Size {size_gb:.1f} GB exceeds available buffer "
+            f"({buffer_gb:.1f} GB). Further blocks suppressed for 6h."
+        ),
+        priority=4,
+        tags=["no_entry_sign"],
+    )
+
+
 async def notify_download_complete(
     url: str, topic: str, torrent_name: str, author: str
 ) -> bool:

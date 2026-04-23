@@ -235,3 +235,134 @@ class TestInjectEndpoint:
             assert resp.status_code == 422  # validation error
         finally:
             state.dispatcher = None
+
+
+# ─── Commit 6: per-grab wedge / personal-FL flags ──────────
+
+
+class TestInjectWedgeFlags:
+    """Covers the two per-grab flags on the manual-inject dialog:
+
+      - `use_wedge_override=True` — forces `&fl=1` on the fetch
+        irrespective of the policy engine's decision.
+      - `buy_personal_fl=True` — spends 50k BP via bonusBuy.php
+        BEFORE the inject, flagging the torrent as personal FL on
+        MAM's side so the subsequent grab picks up the free tier.
+    """
+
+    async def test_use_wedge_override_forces_fl_on_fetch(self, temp_db):
+        # Capture the kwargs the fetcher was called with so we can
+        # assert `use_fl_wedge=True` reached it.
+        captured: dict = {}
+
+        async def capturing_fetch(torrent_id, token, **kwargs):
+            captured.update(kwargs)
+            return GrabResult(success=True, torrent_bytes=MINIMAL_BENCODED_TORRENT)
+
+        deps = _make_deps()
+        deps.fetch_torrent = capturing_fetch
+        state.dispatcher = deps
+        try:
+            async with _client(_make_app()) as client:
+                resp = await client.post(
+                    "/api/v1/grabs/inject",
+                    json={
+                        "torrent_id": "1234",
+                        "use_wedge_override": True,
+                    },
+                )
+            assert resp.status_code == 200
+            assert captured.get("use_fl_wedge") is True
+        finally:
+            state.dispatcher = None
+
+    async def test_use_wedge_override_false_does_not_force_fl(self, temp_db):
+        captured: dict = {}
+
+        async def capturing_fetch(torrent_id, token, **kwargs):
+            captured.update(kwargs)
+            return GrabResult(success=True, torrent_bytes=MINIMAL_BENCODED_TORRENT)
+
+        deps = _make_deps()
+        deps.fetch_torrent = capturing_fetch
+        state.dispatcher = deps
+        try:
+            async with _client(_make_app()) as client:
+                resp = await client.post(
+                    "/api/v1/grabs/inject",
+                    json={"torrent_id": "5555"},
+                )
+            assert resp.status_code == 200
+            # Default PolicyConfig has use_wedge=False; override is
+            # False; so the fetcher sees use_fl_wedge=False.
+            assert captured.get("use_fl_wedge") is False
+        finally:
+            state.dispatcher = None
+
+    async def test_buy_personal_fl_writes_audit_then_injects(
+        self, temp_db, fake_mam
+    ):
+        # buy_personal_freeleech hits fake_mam's bonusBuy endpoint
+        # (default: success). We verify a personal_fl audit row is
+        # recorded and the inject still completes normally.
+        from app.storage import economy_audit
+
+        state.dispatcher = _make_deps()
+        try:
+            async with _client(_make_app()) as client:
+                resp = await client.post(
+                    "/api/v1/grabs/inject",
+                    json={
+                        "torrent_id": "777",
+                        "buy_personal_fl": True,
+                    },
+                )
+            assert resp.status_code == 200
+            assert resp.json()["ok"] is True
+
+            db = await get_db()
+            try:
+                rows = await economy_audit.list_recent(
+                    db, action=economy_audit.ACTION_PERSONAL_FL,
+                )
+            finally:
+                await db.close()
+            assert len(rows) == 1
+            assert rows[0].torrent_id == "777"
+            assert rows[0].trigger == economy_audit.TRIGGER_USER_GRAB
+            assert rows[0].outcome == economy_audit.OUTCOME_SUCCESS
+        finally:
+            state.dispatcher = None
+
+    async def test_buy_personal_fl_failure_still_proceeds_with_inject(
+        self, temp_db, fake_mam
+    ):
+        from app.storage import economy_audit
+
+        fake_mam.bonus_buy.body = (
+            b'{"success":false,"error":"Not enough bonus, s1"}'
+        )
+        state.dispatcher = _make_deps()
+        try:
+            async with _client(_make_app()) as client:
+                resp = await client.post(
+                    "/api/v1/grabs/inject",
+                    json={
+                        "torrent_id": "888",
+                        "buy_personal_fl": True,
+                    },
+                )
+            # Inject still completes — the PFL buy is best-effort.
+            assert resp.status_code == 200
+            assert resp.json()["ok"] is True
+
+            db = await get_db()
+            try:
+                rows = await economy_audit.list_recent(
+                    db, action=economy_audit.ACTION_PERSONAL_FL,
+                )
+            finally:
+                await db.close()
+            assert rows[0].outcome == economy_audit.OUTCOME_FAILURE
+        finally:
+            state.dispatcher = None

@@ -13,13 +13,15 @@ constructs an instance, tweaks the fields it cares about, and the
 `fake_mam` pytest fixture wires it into `cookie._client` for the
 duration of the test. After the test the original client is restored.
 
-Four endpoints are simulated, matching the real MAM surface:
+Five endpoints are simulated, matching the real MAM surface:
 
   - loadSearchJSONbasic.php   — search probe (cookie.verify_session)
                                 AND torrent-by-id lookup (torrent_info)
   - dynamicSeedbox.php        — IP register     (cookie.register_ip)
   - download.php              — .torrent fetch  (grab.fetch_torrent)
   - jsonLoad.php              — user status      (user_status)
+  - bonusBuy.php              — VIP / upload / personalFL purchases
+                                (bonus_buy)
 
 Each endpoint has independently configurable status code, body, and
 headers, plus a request log for assertions ("did the code under test
@@ -61,6 +63,17 @@ DEFAULT_USER_STATUS_BODY = (
     b'"downloaded_bytes":96160650,"ratio":91184.8,"seedbonus":71088,'
     b'"uid":224285,"uploaded":"7.975 TiB",'
     b'"uploaded_bytes":8768386723586,"username":"Turtles81","wedges":462}'
+)
+
+# Default bonusBuy.php success response — realistic post-buy user state.
+# `seedbonus` is a float here on purpose (MAM returns fractional values
+# on this endpoint even though jsonLoad.php reports integers).
+DEFAULT_BONUS_BUY_BODY = (
+    b'{"success":true,"type":"upload","amount":50,'
+    b'"seedbonus":26512.091,"uploaded":9094496082151,'
+    b'"downloaded":96557899,"uploadFancy":"8.271 TiB",'
+    b'"downloadFancy":"92.08 MiB",'
+    b'"ratio":{"source":"94186.97","parsedValue":94186.97}}'
 )
 
 # Default search-by-id response — a single torrent result with
@@ -137,6 +150,13 @@ class FakeMAM:
             headers={"content-type": "application/json"},
         )
     )
+    bonus_buy: _EndpointConfig = field(
+        default_factory=lambda: _EndpointConfig(
+            status=200,
+            body=DEFAULT_BONUS_BUY_BODY,
+            headers={"content-type": "application/json"},
+        )
+    )
 
     # If set, every response produced by the fake includes a
     # `Set-Cookie: mam_id=<value>` header. Tests use this to
@@ -151,6 +171,8 @@ class FakeMAM:
 
         if "jsonLoad.php" in url:
             cfg = self.user_status
+        elif "bonusBuy.php" in url:
+            cfg = self.bonus_buy
         elif "loadSearchJSONbasic.php" in url:
             cfg = self.search
         elif "dynamicSeedbox.php" in url:
@@ -192,7 +214,10 @@ class FakeMAM:
     def simulate_cookie_expired_html(self) -> None:
         """All endpoints return 200 + HTML login page (MAM's typical
         response when a cookie has been rotated or expired)."""
-        for cfg in (self.search, self.dynip, self.download, self.user_status):
+        for cfg in (
+            self.search, self.dynip, self.download,
+            self.user_status, self.bonus_buy,
+        ):
             cfg.status = 200
             cfg.body = HTML_LOGIN_PAGE
             cfg.headers = {"content-type": "text/html"}
@@ -200,7 +225,10 @@ class FakeMAM:
     def simulate_cookie_rejected_403(self) -> None:
         """All endpoints return 403 Forbidden — what MAM does when
         the auth header is wrong but they bother to use a real status code."""
-        for cfg in (self.search, self.dynip, self.download, self.user_status):
+        for cfg in (
+            self.search, self.dynip, self.download,
+            self.user_status, self.bonus_buy,
+        ):
             cfg.status = 403
             cfg.body = b"forbidden"
             cfg.headers = {"content-type": "text/plain"}

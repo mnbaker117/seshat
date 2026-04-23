@@ -38,16 +38,31 @@ _CACHE_TTL = 300
 
 @dataclass(frozen=True)
 class UserStatus:
-    """Snapshot of the authenticated MAM user's account status."""
+    """Snapshot of the authenticated MAM user's account status.
+
+    `seedbonus` is a float because `bonusBuy.php` returns fractional
+    values (e.g. 26512.091) — widening the type keeps the cache that
+    gets warmed from a buy response representable without lossy
+    rounding. `jsonLoad.php` always returns an int; `float(...)`
+    handles both sources transparently.
+    """
 
     ratio: float
     wedges: int
-    seedbonus: int
+    seedbonus: float
     classname: str
     username: str
     uid: int
     uploaded_bytes: int
     downloaded_bytes: int
+    # Account upload buffer in bytes — MAM exposes this directly in
+    # `jsonLoad.php` when available (e.g. when the account has
+    # gift-buffer beyond simple uploaded−downloaded), and we fall back
+    # to the raw difference when the field is absent. Consumed by the
+    # buffer-floor auto-buy trigger and the pre-download buffer gate.
+    # Default 0 keeps unrelated UserStatus constructors (tests,
+    # fixtures) from needing to care about this field.
+    upload_buffer_bytes: int = 0
 
 
 # ─── In-memory cache ────────────────────────────────────────
@@ -63,6 +78,51 @@ def _cache_key(token: str) -> str:
 def invalidate_cache() -> None:
     """Clear the user-status cache (e.g. after a cookie rotation)."""
     _cache.clear()
+
+
+def update_cache_from_buy(
+    token: Optional[str],
+    *,
+    seedbonus: float,
+    uploaded_bytes: int,
+    downloaded_bytes: int,
+    ratio: float,
+) -> None:
+    """Merge fresh economic fields from a bonusBuy response into the cache.
+
+    A successful bonusBuy.php call echoes back the user's brand-new
+    seedbonus, ratio, and upload/download totals — exactly the subset
+    of UserStatus that changes when BP is spent. Warming the cache
+    directly from that payload saves a redundant `jsonLoad.php` round
+    trip on the next dashboard poll or policy check.
+
+    The cache entry is only updated when a baseline already exists
+    for this token; wedges/classname/username/uid are preserved from
+    that baseline. If the token has never been fetched, we can't
+    synthesize a full UserStatus (those immutable fields aren't in
+    the buy response), so this is a no-op and the next
+    `get_user_status` call will populate normally.
+    """
+    key = _cache_key(token or "")
+    prev = _cache.get(key)
+    if prev is None:
+        return
+    _, prev_status = prev
+    merged = UserStatus(
+        ratio=ratio,
+        wedges=prev_status.wedges,
+        seedbonus=seedbonus,
+        classname=prev_status.classname,
+        username=prev_status.username,
+        uid=prev_status.uid,
+        uploaded_bytes=uploaded_bytes,
+        downloaded_bytes=downloaded_bytes,
+        # The buy response doesn't echo upload_buffer, but we can
+        # derive the same fallback the parser uses. Good enough for
+        # downstream triggers until the next real jsonLoad.php read.
+        upload_buffer_bytes=max(0, uploaded_bytes - downloaded_bytes),
+    )
+    _cache[key] = (time.monotonic(), merged)
 
 
 # ─── Public API ─────────────────────────────────────────────
@@ -115,15 +175,27 @@ async def get_user_status(
         raise UserStatusError(f"unexpected response shape: {type(data).__name__}")
 
     try:
+        uploaded = int(data.get("uploaded_bytes", 0))
+        downloaded = int(data.get("downloaded_bytes", 0))
+        # MAM exposes `upload_buffer` when it's richer than the raw
+        # difference (gift buffer, promotional credit); when absent
+        # we fall back to uploaded − downloaded so every user has a
+        # meaningful buffer figure for the buffer-trigger auto-buy.
+        raw_buffer = data.get("upload_buffer")
+        if raw_buffer is None:
+            upload_buffer = max(0, uploaded - downloaded)
+        else:
+            upload_buffer = int(raw_buffer)
         status = UserStatus(
             ratio=float(data.get("ratio", 0)),
             wedges=int(data.get("wedges", 0)),
-            seedbonus=int(data.get("seedbonus", 0)),
+            seedbonus=float(data.get("seedbonus", 0)),
             classname=str(data.get("classname", "")),
             username=str(data.get("username", "")),
             uid=int(data.get("uid", 0)),
-            uploaded_bytes=int(data.get("uploaded_bytes", 0)),
-            downloaded_bytes=int(data.get("downloaded_bytes", 0)),
+            uploaded_bytes=uploaded,
+            downloaded_bytes=downloaded,
+            upload_buffer_bytes=upload_buffer,
         )
     except (ValueError, TypeError) as exc:
         raise UserStatusError(f"failed to parse user status fields: {exc}") from exc

@@ -31,6 +31,7 @@ from app.orchestrator.dispatch import (
     handle_announce,
     inject_grab,
 )
+from app.policy.engine import PolicyConfig
 from app.rate_limit import ledger as ledger_mod
 from app.rate_limit import queue as queue_mod
 from app.storage import grabs as grabs_storage
@@ -663,3 +664,160 @@ class TestDryRun:
         result = await handle_announce(deps, _make_announce())
 
         assert result.grab_id is None
+
+
+# ─── Buffer gate (commit 5 — MouseSearch Tier 1) ────────────
+
+
+class TestBufferGate:
+    """Integration tests for the dispatcher wiring the buffer gate.
+
+    Policy-engine logic is covered exhaustively in
+    `tests/policy/test_buffer_gate.py`. These tests verify three
+    dispatcher-level contracts:
+
+      - `_build_economic_context` fetches torrent_size_bytes and
+        user_upload_buffer_bytes when `buffer_gate_enabled=True`.
+      - A `buffer_insufficient` policy decision produces an
+        `economy_audit` row with the right `action` + `trigger`.
+      - The trigger distinguishes IRC autograbs from user-inject
+        grabs (the MamPage history filters on this).
+    """
+
+    @staticmethod
+    def _buffer_gate_config(buffer_bytes: int) -> bytes:
+        # A custom user_status body exposing a specific upload_buffer
+        # value so the test can drive the gate into skip territory.
+        import json
+        return json.dumps({
+            "classname": "Power User",
+            "ratio": 2.0,
+            "seedbonus": 100,
+            "uid": 1,
+            "username": "tester",
+            "uploaded_bytes": 1_000_000_000_000,
+            "downloaded_bytes": 500_000_000_000,
+            "upload_buffer": buffer_bytes,
+            "wedges": 5,
+        }).encode()
+
+    @staticmethod
+    def _torrent_info_body(size_bytes: int) -> bytes:
+        # Matches the search-by-id response shape.
+        import json
+        return json.dumps({
+            "perpage": 1, "start": 0, "found": 1,
+            "data": [{
+                "id": "1234", "language": "1", "main_cat": "14",
+                "category": "63", "catname": "Ebooks - Fantasy",
+                "size": str(size_bytes), "numfiles": "1",
+                "vip": "0", "free": "0", "fl_vip": "0",
+                "personal_freeleech": "0",
+                "title": "Test Book", "name": "Test Book",
+                "author_info": '{"1": "Brandon Sanderson"}',
+                "seeders": "5", "leechers": "0", "times_completed": "1",
+            }],
+        }).encode()
+
+    async def test_irc_autograb_block_writes_audit_row(
+        self, temp_db, fake_mam
+    ):
+        from app.mam import torrent_info as ti
+        from app.mam import user_status as us
+        from app.storage import economy_audit
+
+        ti.invalidate_cache()
+        us.invalidate_cache()
+
+        # 50 GB torrent vs 10 GB buffer — gate blocks.
+        fake_mam.search.body = self._torrent_info_body(50_000_000_000)
+        fake_mam.user_status.body = self._buffer_gate_config(10_000_000_000)
+
+        deps = _make_deps(
+            filter_config=_make_filter_config(allowed=["Brandon Sanderson"]),
+        )
+        deps.policy_config = PolicyConfig(buffer_gate_enabled=True)
+
+        result = await handle_announce(deps, _make_announce())
+
+        assert result.action == "skip"
+        assert result.reason == "policy:buffer_insufficient"
+
+        db = await get_db()
+        try:
+            rows = await economy_audit.list_recent(
+                db, action=economy_audit.ACTION_BUFFER_GATE_BLOCK,
+            )
+        finally:
+            await db.close()
+        assert len(rows) == 1
+        assert rows[0].trigger == economy_audit.TRIGGER_IRC_AUTOGRAB
+        assert rows[0].torrent_id == "1234"
+        assert "50.00 GB" in (rows[0].message or "")
+        assert "10.00 GB" in (rows[0].message or "")
+
+    async def test_user_inject_block_writes_user_trigger(
+        self, temp_db, fake_mam
+    ):
+        from app.mam import torrent_info as ti
+        from app.mam import user_status as us
+        from app.orchestrator.dispatch import inject_grab
+        from app.storage import economy_audit
+
+        ti.invalidate_cache()
+        us.invalidate_cache()
+
+        fake_mam.search.body = self._torrent_info_body(50_000_000_000)
+        fake_mam.user_status.body = self._buffer_gate_config(10_000_000_000)
+
+        deps = _make_deps()
+        deps.policy_config = PolicyConfig(buffer_gate_enabled=True)
+
+        result = await inject_grab(deps, torrent_id="1234")
+
+        assert result.action == "skip"
+        assert result.reason == "policy:buffer_insufficient"
+
+        db = await get_db()
+        try:
+            rows = await economy_audit.list_recent(
+                db, action=economy_audit.ACTION_BUFFER_GATE_BLOCK,
+            )
+        finally:
+            await db.close()
+        assert len(rows) == 1
+        assert rows[0].trigger == economy_audit.TRIGGER_USER_GRAB
+
+    async def test_sufficient_buffer_allows_grab(
+        self, temp_db, fake_mam
+    ):
+        # Same wiring, but a 2 GB torrent against a 20 GB buffer — gate
+        # stays quiet and the normal submit path runs through.
+        from app.mam import torrent_info as ti
+        from app.mam import user_status as us
+        from app.storage import economy_audit
+
+        ti.invalidate_cache()
+        us.invalidate_cache()
+
+        fake_mam.search.body = self._torrent_info_body(2_000_000_000)
+        fake_mam.user_status.body = self._buffer_gate_config(
+            20_000_000_000
+        )
+
+        deps = _make_deps(
+            filter_config=_make_filter_config(allowed=["Brandon Sanderson"]),
+        )
+        deps.policy_config = PolicyConfig(buffer_gate_enabled=True)
+
+        result = await handle_announce(deps, _make_announce())
+        assert result.action == "submit"
+
+        db = await get_db()
+        try:
+            rows = await economy_audit.list_recent(
+                db, action=economy_audit.ACTION_BUFFER_GATE_BLOCK,
+            )
+        finally:
+            await db.close()
+        assert rows == []  # no block row when the grab went through

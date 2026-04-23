@@ -269,6 +269,37 @@ CREATE TABLE IF NOT EXISTS author_format_preferences (
     tracking_mode   TEXT NOT NULL,
     updated_at      REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
+
+-- ── MAM economy audit trail ────────────────────────────────
+-- One row per economy decision: scheduled VIP/upload purchases
+-- (success OR skip — skips are load-bearing for "why didn't you
+-- buy last tick?" UI), manual buy-now clicks, personal-FL buys
+-- attached to grabs, and buffer-gate blocks. The scheduler, the
+-- router, and the dispatch buffer-gate all write here through
+-- `app/storage/economy_audit.py`.
+--
+-- `amount` is TEXT on purpose — it holds "50" (GB) for upload,
+-- "4" or "max" for VIP, NULL for personal-FL. Storing as a string
+-- lets the UI echo the same value the user selected without
+-- guessing numeric scale.
+-- `cost_points` and `user_bonus_after` are REAL because the
+-- bonusBuy.php response returns fractional seedbonus values.
+CREATE TABLE IF NOT EXISTS economy_audit (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    action             TEXT NOT NULL,       -- 'vip' | 'upload' | 'personal_fl' | 'buffer_gate_block'
+    trigger            TEXT NOT NULL,       -- 'scheduled' | 'manual' | 'irc_autograb' | 'user_grab'
+    mode               TEXT,                -- 'ratio' | 'buffer' | 'bonus' | NULL
+    amount             TEXT,
+    torrent_id         TEXT,
+    outcome            TEXT NOT NULL,       -- 'success' | 'failure' | 'skip_*' | 'buffer_gate_block'
+    tier               TEXT,                -- 'trigger:ratio' etc.; NULL for skips
+    message            TEXT,
+    cost_points        REAL,
+    user_bonus_after   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_economy_audit_occurred ON economy_audit (occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_economy_audit_action ON economy_audit (action, occurred_at DESC);
 """
 
 
@@ -310,6 +341,25 @@ MIGRATIONS: list[str] = [
         tracking_mode   TEXT NOT NULL,
         updated_at      REAL NOT NULL DEFAULT (strftime('%s', 'now'))
     )""",
+    # v1.3 — MAM economy audit trail (Tier 1 MouseSearch port). Mirrors
+    # the CREATE block in SCHEMA above so new DBs pick it up on init
+    # and legacy DBs get it applied here on next startup.
+    """CREATE TABLE IF NOT EXISTS economy_audit (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        occurred_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        action             TEXT NOT NULL,
+        trigger            TEXT NOT NULL,
+        mode               TEXT,
+        amount             TEXT,
+        torrent_id         TEXT,
+        outcome            TEXT NOT NULL,
+        tier               TEXT,
+        message            TEXT,
+        cost_points        REAL,
+        user_bonus_after   REAL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_economy_audit_occurred ON economy_audit (occurred_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_economy_audit_action ON economy_audit (action, occurred_at DESC)",
 ]
 
 

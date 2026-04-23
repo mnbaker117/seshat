@@ -17,6 +17,7 @@ import { fmtDate } from "../lib/format";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 import { SBRow } from "./SBRow";
+import { BufferInsufficientBanner } from "./BufferInsufficientBanner";
 import type {
   Book,
   BookAction,
@@ -138,6 +139,19 @@ export function BookSidebar({
   const [sugBusy, setSugBusy] = useState<SuggestionAction | null>(null);
   const [sending, setSending] = useState(false);
 
+  // Economy offers — the "use wedge" / "buy personal FL" checkboxes
+  // only render when the user has opted into those offers via
+  // MamPage. `preflight` caches the result of the most recent buffer
+  // gate check for this book so the BufferInsufficientBanner has
+  // something to render.
+  const [offerWedge, setOfferWedge] = useState(false);
+  const [offerFl, setOfferFl] = useState(false);
+  const [bufferGateOn, setBufferGateOn] = useState(false);
+  const [useWedgeChecked, setUseWedgeChecked] = useState(false);
+  const [buyFlChecked, setBuyFlChecked] = useState(false);
+  const [preflight, setPreflight] =
+    useState<import("../lib/economyApi").PreflightResponse | null>(null);
+
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true));
     return () => setMounted(false);
@@ -155,6 +169,20 @@ export function BookSidebar({
       .get<PipelineStatusResponse>("/discovery/pipeline/status")
       .then((r) => setPipelineReady(!!r.configured && !!r.reachable))
       .catch(() => {});
+
+    // Economy offers config — cheap one-shot fetch. Failures are
+    // non-blocking (the checkboxes just stay hidden, matching the
+    // pre-commit-7 UX).
+    import("../lib/economyApi").then(({ economyApi }) =>
+      economyApi
+        .getConfig()
+        .then((cfg) => {
+          setOfferWedge(!!cfg.mam_economy_manual_wedge_offer_enabled);
+          setOfferFl(!!cfg.mam_economy_fl_wedge_offer_enabled);
+          setBufferGateOn(!!cfg.mam_economy_buffer_gate_enabled);
+        })
+        .catch(() => {}),
+    );
   }, []);
 
   useEffect(() => {
@@ -243,13 +271,42 @@ export function BookSidebar({
   const sendToPipeline = async () => {
     if (sending) return;
     setSending(true);
+    setPreflight(null);
+
+    // Buffer-gate preflight: only when the gate is enabled AND the
+    // book has a MAM torrent ID we can probe. A failed preflight
+    // (no torrent ID, MAM offline, etc.) falls through to the
+    // normal grab — the server-side gate is authoritative.
+    if (bufferGateOn && book.mam_torrent_id) {
+      try {
+        const { economyApi } = await import("../lib/economyApi");
+        const match = /(\d+)/.exec(String(book.mam_torrent_id));
+        if (match) {
+          const pf = await economyApi.preflight(match[1]);
+          if (!pf.sufficient) {
+            setPreflight(pf);
+            setSending(false);
+            return;
+          }
+        }
+      } catch {
+        /* preflight is best-effort — let the server decide */
+      }
+    }
+
     try {
       const r = await api.post<SendToPipelineResponse>(
         "/discovery/send-to-pipeline",
-        { book_ids: [book.id] },
+        {
+          book_ids: [book.id],
+          buy_personal_fl: buyFlChecked,
+          use_wedge_override: useWedgeChecked,
+        },
       );
       if (r.sent > 0) {
         alert("Sent to pipeline for download!");
+        setUseWedgeChecked(false);
+        setBuyFlChecked(false);
       } else {
         alert(r.message || "Failed to send");
       }
@@ -1171,18 +1228,17 @@ export function BookSidebar({
                     {pipelineReady &&
                     book.mam_status === "found" &&
                     !book.mam_my_snatched ? (
-                      <Btn
-                        size="sm"
-                        onClick={sendToPipeline}
-                        disabled={sending}
-                        style={{
-                          background: t.accent + "22",
-                          color: t.accent,
-                          border: `1px solid ${t.accent}44`,
-                        }}
-                      >
-                        {sending ? <Spin /> : "⬇"} Send to pipeline
-                      </Btn>
+                      <SendToPipelineControl
+                        t={t}
+                        offerWedge={offerWedge}
+                        offerFl={offerFl}
+                        useWedgeChecked={useWedgeChecked}
+                        buyFlChecked={buyFlChecked}
+                        setUseWedgeChecked={setUseWedgeChecked}
+                        setBuyFlChecked={setBuyFlChecked}
+                        sending={sending}
+                        onSend={sendToPipeline}
+                      />
                     ) : null}
                   </div>
                 </div>
@@ -1510,6 +1566,126 @@ export function BookSidebar({
           </Btn>
         </div>
       ) : null}
+
+      {preflight && (
+        <div style={{ margin: "12px 14px 0" }}>
+          <BufferInsufficientBanner
+            preflight={preflight}
+            onBufferReady={() => {
+              setPreflight(null);
+              sendToPipeline();
+            }}
+            onCancel={() => setPreflight(null)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ─── Send-to-pipeline control (commit 7) ──────────────────
+//
+// Renders the Send-to-pipeline button, plus an inline row of
+// checkboxes when the user has enabled the per-grab offers in
+// MamPage. Kept local to this file (rather than a top-level
+// component) because every piece of state it needs already lives
+// on the surrounding BookSidebar component — lifting it out would
+// mean a prop bundle of 8 fields to save maybe 40 lines of JSX.
+
+function SendToPipelineControl({
+  t,
+  offerWedge,
+  offerFl,
+  useWedgeChecked,
+  buyFlChecked,
+  setUseWedgeChecked,
+  setBuyFlChecked,
+  sending,
+  onSend,
+}: {
+  t: {
+    accent: string;
+    text2: string;
+    textDim: string;
+    [k: string]: string;
+  };
+  offerWedge: boolean;
+  offerFl: boolean;
+  useWedgeChecked: boolean;
+  buyFlChecked: boolean;
+  setUseWedgeChecked: (v: boolean) => void;
+  setBuyFlChecked: (v: boolean) => void;
+  sending: boolean;
+  onSend: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-end",
+        gap: 4,
+      }}
+    >
+      {(offerWedge || offerFl) && (
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            fontSize: 11,
+            color: t.textDim,
+          }}
+        >
+          {offerWedge && (
+            <label
+              style={{
+                display: "flex",
+                gap: 4,
+                alignItems: "center",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={useWedgeChecked}
+                onChange={(e) => setUseWedgeChecked(e.target.checked)}
+              />
+              Use wedge
+            </label>
+          )}
+          {offerFl && (
+            <label
+              style={{
+                display: "flex",
+                gap: 4,
+                alignItems: "center",
+                cursor: "pointer",
+              }}
+              title="Spend 50,000 BP to flag this torrent as personal freeleech on MAM"
+            >
+              <input
+                type="checkbox"
+                checked={buyFlChecked}
+                onChange={(e) => setBuyFlChecked(e.target.checked)}
+              />
+              Buy personal FL (50k BP)
+            </label>
+          )}
+        </div>
+      )}
+      <Btn
+        size="sm"
+        onClick={onSend}
+        disabled={sending}
+        style={{
+          background: t.accent + "22",
+          color: t.accent,
+          border: `1px solid ${t.accent}44`,
+        }}
+      >
+        {sending ? <Spin /> : "⬇"} Send to pipeline
+      </Btn>
     </div>
   );
 }

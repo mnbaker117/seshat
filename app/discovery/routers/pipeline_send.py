@@ -43,10 +43,23 @@ async def send_to_pipeline(data: dict = Body(...)):
 
     Accepts a list of book IDs. Only books with mam_status="found"
     are sent — others are silently skipped.
+
+    Two optional per-batch flags line up with the manual-inject
+    confirm dialog's per-grab knobs:
+
+      - `buy_personal_fl=True` — before each grab, spend 50k BP to
+        flag that specific torrent as personal freeleech on MAM.
+        Best-effort: a failed buy doesn't block the grab, it's just
+        audited. Applies to EVERY torrent in the batch, so the UI
+        typically only exposes this when sending one book at a time.
+      - `use_wedge_override=True` — forces `&fl=1` on every grab in
+        the batch, draining one wedge from the pool per torrent.
     """
     book_ids = data.get("book_ids", [])
     if not book_ids:
         raise HTTPException(400, "No books specified")
+    buy_personal_fl = bool(data.get("buy_personal_fl", False))
+    use_wedge_override = bool(data.get("use_wedge_override", False))
 
     if state.dispatcher is None:
         raise HTTPException(503, "Pipeline dispatcher not initialized")
@@ -105,6 +118,22 @@ async def send_to_pipeline(data: dict = Body(...)):
             finally:
                 await pdb.close()
 
+        # F4 path: spend 50k BP to flag this torrent as personal
+        # freeleech BEFORE the inject. Best-effort — a failed buy is
+        # audited and the grab proceeds anyway. Calls the same helper
+        # the manual-inject router uses so the audit row shape stays
+        # consistent between the two entry points.
+        if buy_personal_fl:
+            try:
+                from app.routers.inject import _buy_personal_fl_for_inject
+                await _buy_personal_fl_for_inject(
+                    tid, state.dispatcher.mam_token or "",
+                )
+            except Exception:
+                logger.exception(
+                    "personal-FL buy raised for tid=%s (non-fatal)", tid
+                )
+
         try:
             result = await inject_grab(
                 state.dispatcher,
@@ -113,6 +142,7 @@ async def send_to_pipeline(data: dict = Body(...)):
                 category=(r["mam_category"] or "").strip(),
                 author_blob=author,
                 raw_line=f"discovery:{r['mam_torrent_id']}",
+                force_fl_wedge=use_wedge_override,
             )
             ok = result.action in ("submit", "queue") and result.error is None
 

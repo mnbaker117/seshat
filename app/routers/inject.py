@@ -24,6 +24,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app import state
+from app.mam.bonus_buy import buy_personal_freeleech
+from app.mam.torrent_info import invalidate_cache as invalidate_torrent_info
 from app.orchestrator.dispatch import inject_grab
 
 router = APIRouter(prefix="/api/v1/grabs", tags=["grabs"])
@@ -35,6 +37,22 @@ class InjectRequest(BaseModel):
     Only `torrent_id` is required. The metadata fields exist for
     audit-log readability (so the UI shows a name + author instead
     of just an ID), but the dispatcher doesn't need them to operate.
+
+    `use_wedge_override` and `buy_personal_fl` are two mutually
+    independent per-grab checkboxes on the manual-inject dialog:
+
+      - `use_wedge_override=True` forces `&fl=1` on the download
+        URL for this one grab, draining one wedge from the user's
+        pool. Overrides the global `policy_use_wedge` setting on a
+        per-grab basis.
+      - `buy_personal_fl=True` spends 50k BP via `bonusBuy.php?
+        spendtype=personalFL` BEFORE the inject. MAM then flags the
+        torrent as personal freeleech on the user's account, and
+        the existing grab path picks up `torrent_free=True` via
+        torrent_info — no `&fl=1` override needed.
+
+    Both can be set together (cheap + BP-spend for a belt-and-
+    suspenders grab), though the UI only lets the user pick one.
     """
 
     torrent_id: str = Field(..., min_length=1)
@@ -42,6 +60,8 @@ class InjectRequest(BaseModel):
     category: str = ""
     author_blob: str = ""
     source: str = "manual_inject"
+    use_wedge_override: bool = False
+    buy_personal_fl: bool = False
 
 
 class InjectResponse(BaseModel):
@@ -173,6 +193,54 @@ async def snatch_budget():
         await db.close()
 
 
+async def _buy_personal_fl_for_inject(torrent_id: str, token: str) -> None:
+    """Spend 50k BP to flag this torrent as personal freeleech.
+
+    Called before `inject_grab` when the user checked the "buy
+    personal FL" box on the manual-inject dialog. Failure is audited
+    but NOT raised — the inject still proceeds with whatever
+    freeleech state the torrent already had. Rationale: the user
+    confirmed the grab regardless of the FL buy, so a transient MAM
+    rejection shouldn't cost them the snatch.
+
+    On success, the torrent-info cache is invalidated so the
+    downstream `inject_grab` -> `_build_economic_context` -> policy
+    engine path picks up `personal_freeleech=True` and returns the
+    `free` tier automatically.
+    """
+    # Deferred imports keep the router's top-level import graph
+    # light — the economy_audit + database modules haul in aiosqlite
+    # and we'd rather not pay that cost at module load when the
+    # feature isn't being used.
+    from app.database import get_db
+    from app.storage import economy_audit
+
+    if not torrent_id or not token:
+        return
+
+    result = await buy_personal_freeleech(torrent_id, token=token)
+    db = await get_db()
+    try:
+        await economy_audit.record(
+            db,
+            action=economy_audit.ACTION_PERSONAL_FL,
+            trigger=economy_audit.TRIGGER_USER_GRAB,
+            outcome=(
+                economy_audit.OUTCOME_SUCCESS
+                if result.success
+                else economy_audit.OUTCOME_FAILURE
+            ),
+            torrent_id=torrent_id,
+            message=result.message,
+            user_bonus_after=result.new_seedbonus,
+        )
+    finally:
+        await db.close()
+
+    if result.success:
+        invalidate_torrent_info()
+
+
 @router.post("/inject", response_model=InjectResponse)
 async def inject_endpoint(request: InjectRequest) -> InjectResponse:
     if state.dispatcher is None:
@@ -184,6 +252,15 @@ async def inject_endpoint(request: InjectRequest) -> InjectResponse:
             detail="dispatcher not initialized yet",
         )
 
+    # F4 path: buy personal-FL for this torrent BEFORE the inject.
+    # On buy failure the caller probably still wants the grab to
+    # proceed normally (the checkbox is optional), so we audit the
+    # failure and fall through rather than aborting.
+    if request.buy_personal_fl:
+        await _buy_personal_fl_for_inject(
+            request.torrent_id, state.dispatcher.mam_token or ""
+        )
+
     result = await inject_grab(
         state.dispatcher,
         torrent_id=request.torrent_id,
@@ -191,6 +268,7 @@ async def inject_endpoint(request: InjectRequest) -> InjectResponse:
         category=request.category,
         author_blob=request.author_blob,
         raw_line=f"manual_inject:source={request.source}",
+        force_fl_wedge=request.use_wedge_override,
     )
 
     # ok=True means the grab successfully entered the pipeline

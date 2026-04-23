@@ -19,7 +19,18 @@ Decision matrix:
     4. If policy_use_wedge AND wedges > min_reserved → GRAB, tier=wedge
     5. If policy_free_only → SKIP (not free and no wedge available/allowed)
     6. If policy_ratio_floor > 0 AND ratio < floor → SKIP, tier=ratio_too_low
-    7. Otherwise → GRAB, tier=normal (user's ratio can absorb it)
+    7. If buffer_gate_enabled AND torrent_size + margin > upload_buffer
+       → SKIP, tier=buffer_insufficient
+    8. Otherwise → GRAB, tier=normal (user's ratio can absorb it)
+
+The buffer gate is deliberately placed AFTER the free/VIP/wedge
+paths — a free torrent doesn't eat buffer, so blocking it on buffer
+size would be gibberish. It's also AFTER the ratio floor because
+ratio is cheaper to evaluate (already present in UserStatus) and
+bailing there saves a second comparison. Missing data (unknown
+torrent_size or unknown upload_buffer) falls through without
+blocking — same fail-open stance as the other `Optional[...]`
+checks in this module.
 
 Every decision includes a `tier` string for audit logging — the caller
 writes it to the `grabs` table so we can reconstruct why each grab
@@ -48,6 +59,14 @@ class PolicyConfig:
     min_wedges_reserved: int = 0
     ratio_floor: float = 0.0
 
+    # Buffer gate — refuses to grab a torrent whose size would drive
+    # the upload buffer below `buffer_safety_margin_bytes` once it
+    # starts accumulating download credit. Disabled by default; the
+    # dispatcher wires the caller-supplied torrent size + user buffer
+    # into `EconomicContext` only when this flag is True.
+    buffer_gate_enabled: bool = False
+    buffer_safety_margin_bytes: int = 0
+
 
 @dataclass(frozen=True)
 class EconomicContext:
@@ -71,6 +90,12 @@ class EconomicContext:
     # From user-status API
     user_ratio: Optional[float] = None
     user_wedges: Optional[int] = None
+    user_upload_buffer_bytes: Optional[int] = None
+
+    # From torrent-info API (the `size` field, parsed to int). None
+    # when the lookup was disabled or failed — in which case the
+    # buffer gate skips (fail-open) rather than blocking.
+    torrent_size_bytes: Optional[int] = None
 
     @property
     def is_vip(self) -> bool:
@@ -108,6 +133,9 @@ class PolicyDecision:
       - "free_required" — skipped, policy_free_only and no free path available
       - "ratio_too_low" — skipped, ratio below floor
       - "wedge_reserve" — skipped, would use wedge but below reserve threshold
+      - "buffer_insufficient" — skipped, buffer_gate_enabled and the torrent's
+                                size would eat through the user's buffer plus
+                                the configured safety margin
 
     `use_wedge` is True when the decision is to grab AND spend a wedge.
     The caller must append `&fl` to the download URL.
@@ -168,6 +196,20 @@ def evaluate_policy(
         if ratio is not None and ratio < config.ratio_floor:
             return PolicyDecision(action="skip", tier="ratio_too_low")
 
-    # Step 7: Normal grab. The torrent isn't free, but the user hasn't
+    # Step 7: Buffer gate. Non-free download that would drive the
+    # user's upload buffer below a safety margin — refuse it rather
+    # than let the ratio creep down. Fail-open: missing data (size
+    # or buffer unknown) means we can't evaluate, so we fall through
+    # and let the grab proceed.
+    if config.buffer_gate_enabled:
+        size = ctx.torrent_size_bytes
+        buffer = ctx.user_upload_buffer_bytes
+        if size is not None and buffer is not None:
+            if size + config.buffer_safety_margin_bytes > buffer:
+                return PolicyDecision(
+                    action="skip", tier="buffer_insufficient",
+                )
+
+    # Step 8: Normal grab. The torrent isn't free, but the user hasn't
     # set any gates that would prevent grabbing it.
     return PolicyDecision(action="grab", tier="normal")

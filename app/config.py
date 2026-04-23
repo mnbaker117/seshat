@@ -433,6 +433,64 @@ DEFAULT_SETTINGS = {
     # tick (daily by default).
     "sink_max_retries": 3,
 
+    # ── MAM economy (Tier 1 MouseSearch port) ──────────────
+    # All enable flags default False. The first deploy of a new
+    # Seshat version is a silent no-op loop — users opt into each
+    # feature explicitly via Settings. Manual "Buy now" clicks from
+    # the UI bypass `*_enabled` (so users can test integration) but
+    # still honor `mam_economy_last_*_buy_at` as a shared-timestamp
+    # lockout with the scheduler.
+
+    # VIP auto-buy loop
+    "mam_economy_vip_enabled": False,
+    "mam_economy_vip_interval_hours": 24,
+    # Refuse to auto-buy when seedbonus is under this floor. 0
+    # disables the floor (will fire as long as the weeks purchase is
+    # individually affordable). Protects against auto-buy draining
+    # the pool after a big manual spend.
+    "mam_economy_vip_min_bonus": 0,
+    # Weeks to buy per firing tick. 4/8/12 are fixed MAM amounts;
+    # "max" lets MAM decide how much to credit based on available
+    # BP and the 90-day VIP cap. Stored as int in settings.json —
+    # "max" is a string that JSON handles transparently.
+    "mam_economy_vip_weeks": 4,
+    "mam_economy_last_vip_buy_at": 0.0,
+
+    # Upload-credit auto-buy loop (three independent triggers —
+    # ratio → buffer → bonus in priority order, first to fire wins)
+    "mam_economy_upload_enabled": False,
+    "mam_economy_upload_interval_hours": 6,
+    "mam_economy_upload_ratio_trigger": False,
+    "mam_economy_upload_ratio_floor": 1.5,
+    "mam_economy_upload_ratio_chunk_gb": 50,
+    "mam_economy_upload_buffer_trigger": False,
+    "mam_economy_upload_buffer_floor_gb": 10,
+    "mam_economy_upload_buffer_chunk_gb": 50,
+    "mam_economy_upload_bonus_trigger": False,
+    "mam_economy_upload_bonus_ceiling": 5000,
+    "mam_economy_last_upload_buy_at": 0.0,
+
+    # Pre-download buffer gate (commit 5 will wire this into the
+    # policy engine / dispatcher; the key is defined here so the
+    # settings migration is a single commit).
+    "mam_economy_buffer_gate_enabled": False,
+    "mam_economy_buffer_gate_safety_margin_gb": 1,
+
+    # Per-grab wedge / personal-FL offer flags (commit 6 wires the
+    # inject router + frontend). Both default False so the first
+    # deploy shows no new checkboxes on the manual inject dialog.
+    # `manual_wedge_offer_enabled` controls the "use a wedge for
+    # this one" checkbox (drains pool, overrides global
+    # policy_use_wedge=False on a per-grab basis).
+    # `fl_wedge_offer_enabled` controls the "buy personal FL (50k
+    # BP) for this one" checkbox (calls bonusBuy spendtype=personalFL).
+    "mam_economy_manual_wedge_offer_enabled": False,
+    "mam_economy_fl_wedge_offer_enabled": False,
+
+    # First-run intro banner on MamPage — dismissed once via the
+    # Settings UI and never shown again.
+    "mam_economy_intro_dismissed": False,
+
     # ── Cron / scheduled jobs ───────────────────────────────
     # MAM keeps a session cookie alive as long as we make at least one
     # API call within a 15-day window. Seshat's cookie auto-rotation
