@@ -1604,12 +1604,7 @@ function SendToPipelineControl({
   sending,
   onSend,
 }: {
-  t: {
-    accent: string;
-    text2: string;
-    textDim: string;
-    [k: string]: string;
-  };
+  t: ReturnType<typeof useTheme>;
   offerWedge: boolean;
   offerFl: boolean;
   useWedgeChecked: boolean;
