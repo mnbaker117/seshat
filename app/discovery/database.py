@@ -481,6 +481,111 @@ async def _backfill_normalized_author_names(db) -> int:
     return touched
 
 
+async def _dedupe_author_rows(db) -> int:
+    """Collapse author rows whose `normalized_name` matches.
+
+    One-time cleanup mirroring the intra-author series dedup pattern.
+    Triggered by Calibre holding separate records for the same person
+    at different punctuation levels (e.g. calibre_id=254 "A. K. DuBoff"
+    and calibre_id=1179 "A K DuBoff") which the historical sync code
+    mirrored as two Seshat rows. The new `normalized_name` column
+    prevents new drift on future syncs; this pass cleans up what's
+    already there.
+
+    Winner selection (option 4a):
+      1. Most periods in the display name wins — matches external-
+         source conventions (Goodreads renders the punctuated form).
+      2. Tiebreak on most-books-attached so we keep the row that
+         most of the user's library already references.
+      3. Final tiebreak on lowest id (stable / deterministic).
+
+    Reparents every FK that references `authors.id`:
+      - books.author_id
+      - series.author_id
+      - pen_name_links.canonical_author_id
+      - pen_name_links.alias_author_id
+
+    After reparenting, the intra-author series dedup step that runs
+    AFTER this function cleans up any series-row collisions the merge
+    may have produced (two series with the same name now under the
+    same author). Self-referencing pen_name_links rows (canonical ==
+    alias post-merge) are dropped.
+
+    Returns the number of author rows that were deleted, for logging.
+    Inert on healthy databases.
+    """
+    rows = await (await db.execute(
+        "SELECT id, name, normalized_name FROM authors "
+        "WHERE normalized_name IS NOT NULL AND normalized_name != ''"
+    )).fetchall()
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        groups[r["normalized_name"]].append(
+            {"id": r["id"], "name": r["name"]}
+        )
+
+    deleted = 0
+    for norm, members in groups.items():
+        if len(members) < 2:
+            continue
+        # Score: (period_count, book_count, -id). Sort descending —
+        # the most-punctuated, most-linked, lowest-id row wins.
+        scored = []
+        for m in members:
+            cnt_row = await (await db.execute(
+                "SELECT COUNT(*) FROM books WHERE author_id = ?", (m["id"],)
+            )).fetchone()
+            book_count = cnt_row[0] if cnt_row else 0
+            period_count = m["name"].count(".")
+            scored.append((period_count, book_count, -m["id"], m))
+        scored.sort(reverse=True)
+        winner = scored[0][3]
+        losers = [s[3] for s in scored[1:]]
+
+        for loser in losers:
+            # Reparent every FK reference before deleting the row.
+            await db.execute(
+                "UPDATE books SET author_id = ? WHERE author_id = ?",
+                (winner["id"], loser["id"]),
+            )
+            await db.execute(
+                "UPDATE series SET author_id = ? WHERE author_id = ?",
+                (winner["id"], loser["id"]),
+            )
+            await db.execute(
+                "UPDATE pen_name_links SET canonical_author_id = ? "
+                "WHERE canonical_author_id = ?",
+                (winner["id"], loser["id"]),
+            )
+            await db.execute(
+                "UPDATE pen_name_links SET alias_author_id = ? "
+                "WHERE alias_author_id = ?",
+                (winner["id"], loser["id"]),
+            )
+            await db.execute(
+                "DELETE FROM authors WHERE id = ?", (loser["id"],)
+            )
+            deleted += 1
+            _db_logger.info(
+                f"  Merged author '{loser['name']}' (id={loser['id']}) → "
+                f"'{winner['name']}' (id={winner['id']}) "
+                f"[normalized: {norm!r}]"
+            )
+
+        # Self-referencing pen_name_links rows post-merge: a link
+        # between the winner and a former loser now points winner→
+        # winner. Drop those.
+        await db.execute(
+            "DELETE FROM pen_name_links "
+            "WHERE canonical_author_id = alias_author_id"
+        )
+
+    if deleted:
+        await db.commit()
+    return deleted
+
+
 async def _dedupe_intra_author_series(db) -> int:
     """Collapse series rows under the same author whose names normalize equal.
 
@@ -651,6 +756,18 @@ async def init_db(slug=None):
         if touched:
             _db_logger.info(
                 f"Backfilled normalized_name on {touched} author row(s)"
+            )
+
+        # ── Step 4.6: One-time dedup of duplicate author rows ──────
+        # Collapses pre-existing duplicates created before the
+        # normalized-name upsert was wired up. Runs BEFORE the series
+        # dedup below because a merged pair of authors may produce
+        # colliding series (e.g. "Starship of the Ancients" under
+        # both rows), which the series dedup step then cleans up.
+        merged_authors = await _dedupe_author_rows(db)
+        if merged_authors:
+            _db_logger.info(
+                f"Author dedupe merged {merged_authors} duplicate row(s)"
             )
 
         # ── Step 5: Idempotent intra-author series dedupe ──────────
