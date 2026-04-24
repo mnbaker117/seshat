@@ -222,6 +222,130 @@ class TestAbsProxy:
             assert r.status_code == 404
 
 
+class TestCoverUrlProxy:
+    """Fallback path for books discovered via Goodreads / Hardcover /
+    Amazon / ibdb — they have a `cover_url` but no local `cover_path`.
+    Without this fallback the `/covers/{bid}` endpoint used to return
+    404 for the majority of Seshat's library (every non-Calibre/ABS
+    book), and the frontend rendered placeholder glyphs everywhere.
+    """
+
+    async def test_cover_url_streams_remote_image(self, library_db):
+        await _set_book(
+            "testlib", cover_url="https://cdn.example.com/book42.jpg",
+        )
+        with respx.mock(assert_all_called=True) as mock:
+            route = mock.get("https://cdn.example.com/book42.jpg").mock(
+                return_value=httpx.Response(
+                    200, content=b"\xff\xd8\xffgoodreads-bytes",
+                    headers={"content-type": "image/jpeg"},
+                )
+            )
+            app = _make_app()
+            async with await _client(app) as c:
+                r = await c.get("/api/discovery/covers/testlib/42")
+                assert r.status_code == 200
+                assert r.content == b"\xff\xd8\xffgoodreads-bytes"
+                assert r.headers["content-type"] == "image/jpeg"
+            assert route.called
+
+    async def test_cover_url_preserves_upstream_content_type(self, library_db):
+        # Hardcover serves webp, Amazon serves jpeg, etc — we must
+        # pass the upstream content-type through so the browser picks
+        # the right decoder.
+        await _set_book(
+            "testlib", cover_url="https://cdn.example.com/hc.webp",
+        )
+        with respx.mock() as mock:
+            mock.get("https://cdn.example.com/hc.webp").mock(
+                return_value=httpx.Response(
+                    200, content=b"RIFFwebpbytes",
+                    headers={"content-type": "image/webp"},
+                )
+            )
+            app = _make_app()
+            async with await _client(app) as c:
+                r = await c.get("/api/discovery/covers/testlib/42")
+                assert r.status_code == 200
+                assert r.headers["content-type"] == "image/webp"
+
+    async def test_cover_path_takes_precedence_over_url(
+        self, library_db, tmp_path,
+    ):
+        """When both are set (rare but possible after Calibre sync),
+        the local file wins — no remote fetch happens."""
+        cover = tmp_path / "local.jpg"
+        cover.write_bytes(b"local-bytes")
+        await _set_book(
+            "testlib",
+            cover_path=str(cover),
+            cover_url="https://cdn.example.com/never-called.jpg",
+        )
+        # `assert_all_called=False` — we're registering this route
+        # specifically to assert it does NOT get called.
+        with respx.mock(assert_all_called=False) as mock:
+            remote = mock.get("https://cdn.example.com/never-called.jpg")
+            app = _make_app()
+            async with await _client(app) as c:
+                r = await c.get("/api/discovery/covers/testlib/42")
+                assert r.content == b"local-bytes"
+            assert not remote.called
+
+    async def test_non_http_cover_url_is_404(self, library_db):
+        # A bad value in the DB (e.g. a relative path snuck in) must
+        # not try to fetch — the url-scheme check rejects it safely.
+        await _set_book("testlib", cover_url="/relative/path.jpg")
+        app = _make_app()
+        async with await _client(app) as c:
+            r = await c.get("/api/discovery/covers/testlib/42")
+            assert r.status_code == 404
+
+    async def test_upstream_non_image_content_type_is_404(self, library_db):
+        # If the CDN serves an HTML error page or CAPTCHA, the
+        # content-type won't start with "image/". Reject so the UI
+        # doesn't embed garbage into an <img> tag.
+        await _set_book(
+            "testlib", cover_url="https://cdn.example.com/captcha.html",
+        )
+        with respx.mock() as mock:
+            mock.get("https://cdn.example.com/captcha.html").mock(
+                return_value=httpx.Response(
+                    200, content=b"<html>captcha</html>",
+                    headers={"content-type": "text/html"},
+                )
+            )
+            app = _make_app()
+            async with await _client(app) as c:
+                r = await c.get("/api/discovery/covers/testlib/42")
+                assert r.status_code == 404
+
+    async def test_upstream_4xx_becomes_404(self, library_db):
+        await _set_book(
+            "testlib", cover_url="https://cdn.example.com/gone.jpg",
+        )
+        with respx.mock() as mock:
+            mock.get("https://cdn.example.com/gone.jpg").mock(
+                return_value=httpx.Response(404, content=b""),
+            )
+            app = _make_app()
+            async with await _client(app) as c:
+                r = await c.get("/api/discovery/covers/testlib/42")
+                assert r.status_code == 404
+
+    async def test_upstream_connect_error_becomes_404(self, library_db):
+        await _set_book(
+            "testlib", cover_url="https://cdn.example.com/dead.jpg",
+        )
+        with respx.mock() as mock:
+            mock.get("https://cdn.example.com/dead.jpg").mock(
+                side_effect=httpx.ConnectError("simulated"),
+            )
+            app = _make_app()
+            async with await _client(app) as c:
+                r = await c.get("/api/discovery/covers/testlib/42")
+                assert r.status_code == 404
+
+
 class TestLegacyActiveLibraryRoute:
     async def test_active_library_path_works_without_slug(
         self, library_db, tmp_path,

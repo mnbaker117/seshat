@@ -1,7 +1,7 @@
 """
 Cover image serving.
 
-Two resolution paths:
+Three resolution paths, tried in order:
 
   1. **Calibre-style** — `cover_path` on the book row points at a local
      `cover.jpg` file mounted into the container; we stream it with a
@@ -11,6 +11,12 @@ Two resolution paths:
      proxy ABS's `/api/items/{id}/cover` endpoint, streaming the
      response body back to the browser using the configured bearer
      token.
+  3. **Source `cover_url` proxy** — books discovered via Goodreads /
+     Hardcover / Amazon / ibdb / etc. have a `cover_url` but no local
+     cover_path (we don't cache them on disk). We proxy-stream the
+     remote URL so the browser sees a same-origin image and doesn't
+     have to care whether it's a CDN URL, a cross-site, or anything
+     else.
 
 Two endpoint shapes:
 
@@ -47,7 +53,7 @@ async def _resolve_cover(slug: Optional[str], bid: int):
     db = await get_db(slug) if slug else await get_db()
     try:
         row = await (await db.execute(
-            "SELECT cover_path, audiobookshelf_id FROM books WHERE id=?",
+            "SELECT cover_path, audiobookshelf_id, cover_url FROM books WHERE id=?",
             (bid,),
         )).fetchone()
     finally:
@@ -58,15 +64,19 @@ async def _resolve_cover(slug: Optional[str], bid: int):
 
     abs_id = _safe_str(row, "audiobookshelf_id")
     local_path = _safe_str(row, "cover_path")
+    cover_url = _safe_str(row, "cover_url")
 
     if local_path:
         p = Path(local_path)
         if p.exists():
             return FileResponse(p, media_type="image/jpeg")
-        # fall through to ABS proxy if we have an audiobookshelf_id
+        # Fall through to ABS proxy or cover_url if present.
 
     if abs_id:
         return await _proxy_abs_cover(abs_id)
+
+    if cover_url:
+        return await _proxy_cover_url(cover_url)
 
     raise HTTPException(404)
 
@@ -121,6 +131,65 @@ async def _proxy_abs_cover(abs_item_id: str) -> StreamingResponse:
     # Stream the body back while holding the client open; close it
     # once the iterator completes (success) or the request is
     # cancelled (client disconnect).
+    async def iter_body():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await client.aclose()
+
+    return StreamingResponse(iter_body(), media_type=content_type)
+
+
+async def _proxy_cover_url(url: str) -> StreamingResponse:
+    """Proxy-stream a remote cover image URL back to the browser.
+
+    Used for books discovered via Goodreads / Hardcover / Amazon /
+    ibdb / etc. — their `cover_url` points at a third-party CDN and
+    we proxy rather than hot-link so:
+      * the browser sees a same-origin image (no third-party cookie
+        policies, no `referrer` disclosure of our admin UI),
+      * the UI can handle a single 404 shape regardless of which
+        CDN is behind the book,
+      * future work (on-disk caching, format conversion) has a
+        single chokepoint to hook into.
+
+    Realistic User-Agent because some image CDNs return 403 for
+    clients that look like curl / httpx defaults. 10s timeout is
+    plenty for a cover image — most complete in well under a second.
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(404)
+
+    client = httpx.AsyncClient(
+        timeout=10.0,
+        follow_redirects=True,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
+                "Gecko/20100101 Firefox/128.0"
+            ),
+            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        # `stream=True` here by default — `.aiter_bytes()` pulls chunks.
+        resp = await client.get(url)
+    except Exception:
+        await client.aclose()
+        raise HTTPException(404)
+
+    if resp.status_code >= 400:
+        await client.aclose()
+        raise HTTPException(404)
+
+    content_type = resp.headers.get("content-type") or "image/jpeg"
+    # Reject content types that clearly aren't images — protects
+    # against an upstream URL that serves HTML (e.g. a CAPTCHA page).
+    if not content_type.startswith("image/"):
+        await client.aclose()
+        raise HTTPException(404)
+
     async def iter_body():
         try:
             async for chunk in resp.aiter_bytes():
