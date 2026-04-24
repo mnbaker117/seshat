@@ -28,6 +28,7 @@ from app.config import load_settings
 from app.discovery.database import get_db, get_active_library, HF, cleanup_empty_series
 from app.discovery.lookup import lookup_author
 from app.discovery.cross_library import (
+    libraries_for,
     run_across_libraries,
     sort_and_paginate,
     sort_key_for,
@@ -467,55 +468,124 @@ async def trigger_author_full_rescan(aid: int, slug: Optional[str] = None):
     return {"status": "started", "author": name}
 
 
+async def _clear_authors_in_library(
+    db, author_ids: list[int], clear_source: bool, clear_mam: bool,
+) -> int:
+    """Run the clear-scan-data SQL against one library's DB.
+
+    Returns the number of books deleted (only set when `clear_source`).
+    Caller owns commit + connection lifecycle.
+    """
+    placeholders = ",".join(["?" for _ in author_ids])
+    affected = 0
+    if clear_source:
+        count_row = await db.execute_fetchall(
+            f"SELECT COUNT(*) FROM books WHERE author_id IN ({placeholders}) "
+            f"AND owned=0 AND calibre_id IS NULL",
+            author_ids,
+        )
+        affected = count_row[0][0] if count_row else 0
+        await db.execute(
+            f"DELETE FROM books WHERE author_id IN ({placeholders}) "
+            f"AND owned=0 AND calibre_id IS NULL",
+            author_ids,
+        )
+        await db.execute(
+            f"UPDATE books SET source_url=NULL WHERE author_id IN "
+            f"({placeholders}) AND owned=1",
+            author_ids,
+        )
+        await db.execute(
+            f"UPDATE authors SET last_lookup_at=NULL WHERE id IN ({placeholders})",
+            author_ids,
+        )
+    if clear_mam:
+        await db.execute(
+            f"UPDATE books SET mam_url=NULL, mam_status=NULL, mam_formats=NULL, "
+            f"mam_torrent_id=NULL, mam_has_multiple=0, mam_my_snatched=0 "
+            f"WHERE author_id IN ({placeholders})",
+            author_ids,
+        )
+    return affected
+
+
 @router.post("/authors/clear-scan-data")
 async def clear_author_scan_data(data: dict = Body(...)):
-    """Clear source and/or MAM scan data for specified authors."""
+    """Clear source and/or MAM scan data for specified authors.
+
+    `content_type` optional: "ebook" or "audiobook" scopes the clear
+    to libraries of that type. "all" or omitted clears across every
+    discovered library — matches how the cross-library Authors view
+    aggregates, so a Clear from that view actually wipes every copy
+    of the author. Without this split, a user on the cross-library
+    view clicks Clear Source and only the currently-active library
+    gets touched, silently leaving the other copy's data behind.
+    """
     author_ids = data.get("author_ids", [])
     clear_source = data.get("clear_source", False)
     clear_mam = data.get("clear_mam", False)
+    content_type = data.get("content_type")
     if not author_ids:
         return {"error": "No authors specified"}
     if not clear_source and not clear_mam:
         return {"error": "Nothing to clear — specify clear_source and/or clear_mam"}
-    db = await get_db()
-    try:
-        placeholders = ",".join(["?" for _ in author_ids])
-        affected = 0
-        if clear_source:
-            # Count books that will be deleted
-            count_row = await db.execute_fetchall(
-                f"SELECT COUNT(*) FROM books WHERE author_id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
-                author_ids
+
+    # Build the library list. `content_type=None` (active-lib only) is
+    # the pre-refactor behavior and remains the default so callers that
+    # don't know about libraries keep working.
+    if content_type is None:
+        target_libs = None  # signal: use active library via get_db()
+    else:
+        target_libs = libraries_for(content_type)
+        if not target_libs:
+            return {"status": "ok", "authors_cleared": 0, "books_deleted": 0,
+                    "message": f"No {content_type} libraries found."}
+
+    total_deleted = 0
+    libs_touched = 0
+    if target_libs is None:
+        db = await get_db()
+        try:
+            total_deleted += await _clear_authors_in_library(
+                db, author_ids, clear_source, clear_mam,
             )
-            affected = count_row[0][0] if count_row else 0
-            # Delete non-owned books (discovered by source scans) for these authors
-            await db.execute(
-                f"DELETE FROM books WHERE author_id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
-                author_ids
-            )
-            # Reset source URLs on owned books (keep source='calibre' intact)
-            await db.execute(
-                f"UPDATE books SET source_url=NULL WHERE author_id IN ({placeholders}) AND owned=1",
-                author_ids
-            )
-            await db.execute(
-                f"UPDATE authors SET last_lookup_at=NULL WHERE id IN ({placeholders})",
-                author_ids
-            )
-        if clear_mam:
-            await db.execute(
-                f"UPDATE books SET mam_url=NULL, mam_status=NULL, mam_formats=NULL, mam_torrent_id=NULL, mam_has_multiple=0, mam_my_snatched=0 WHERE author_id IN ({placeholders})",
-                author_ids
-            )
-        await db.commit()
-        if clear_source and affected > 0:
-            cleaned = await cleanup_empty_series(db)
-            if cleaned:
-                logger.info(f"  Empty series cleanup: removed {cleaned} orphaned series")
-        logger.info(f"Cleared scan data for {len(author_ids)} authors (source={clear_source}, mam={clear_mam}), {affected} books deleted")
-        return {"status": "ok", "authors_cleared": len(author_ids), "books_deleted": affected}
-    finally:
-        await db.close()
+            await db.commit()
+            if clear_source and total_deleted > 0:
+                cleaned = await cleanup_empty_series(db)
+                if cleaned:
+                    logger.info(f"  Empty series cleanup: removed {cleaned} orphaned series")
+            libs_touched = 1
+        finally:
+            await db.close()
+    else:
+        for lib in target_libs:
+            slug = lib.get("slug")
+            if not slug:
+                continue
+            db = await get_db(slug)
+            try:
+                deleted = await _clear_authors_in_library(
+                    db, author_ids, clear_source, clear_mam,
+                )
+                await db.commit()
+                if clear_source and deleted > 0:
+                    cleaned = await cleanup_empty_series(db)
+                    if cleaned:
+                        logger.info(
+                            f"  [{slug}] empty series cleanup: removed {cleaned} orphaned series"
+                        )
+                total_deleted += deleted
+                libs_touched += 1
+            finally:
+                await db.close()
+
+    logger.info(
+        f"Cleared scan data for {len(author_ids)} authors across {libs_touched} "
+        f"libraries (content_type={content_type or 'active'}, "
+        f"source={clear_source}, mam={clear_mam}), {total_deleted} books deleted"
+    )
+    return {"status": "ok", "authors_cleared": len(author_ids),
+            "books_deleted": total_deleted, "libraries_touched": libs_touched}
 
 
 @router.post("/authors/scan-sources")
