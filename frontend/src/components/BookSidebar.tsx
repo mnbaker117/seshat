@@ -14,6 +14,7 @@ import { useTheme } from "../theme";
 import { api } from "../api";
 import { Ic } from "../icons";
 import { fmtDate } from "../lib/format";
+import { toast } from "../lib/toast";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 import { SBRow } from "./SBRow";
@@ -256,11 +257,21 @@ export function BookSidebar({
           ? { mam_url: book.mam_url || "" }
           : { mam_url: "" };
       await api.put(`/discovery/books/${book.id}`, payload);
-      if (onEdit) await onEdit();
+      toast.success(action === "approve" ? "Approved as Found" : "Removed");
+      // Close immediately — the sidebar's book prop won't refresh in
+      // place, and awaiting onEdit() before unlocking the UI made the
+      // click feel sluggish. Fire onEdit in the background so the
+      // parent list reloads while the user watches the tile update.
+      onClose();
+      if (onEdit) {
+        Promise.resolve(onEdit()).catch(() => {
+          /* background refresh — errors surface on the parent list */
+        });
+      }
     } catch (e) {
-      alert(`Action failed: ${(e as Error).message || e}`);
+      toast.error(`Action failed: ${(e as Error).message || e}`);
+      setMamDeciding(false);
     }
-    setMamDeciding(false);
   };
 
   const rescanMam = async () => {
