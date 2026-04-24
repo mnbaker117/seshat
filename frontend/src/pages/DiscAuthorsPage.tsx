@@ -578,6 +578,20 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
                 Clear MAM
               </Btn>
             )}
+            {mamOn && (
+              <Btn
+                size="sm"
+                onClick={() => clearData("both")}
+                disabled={clearing}
+                style={{
+                  background: t.red + "22",
+                  color: t.redt,
+                  border: `1px solid ${t.red}44`,
+                }}
+              >
+                Clear Both
+              </Btn>
+            )}
             <Btn size="sm" onClick={() => setSel(new Set())}>
               Deselect
             </Btn>

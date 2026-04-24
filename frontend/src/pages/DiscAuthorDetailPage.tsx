@@ -277,6 +277,7 @@ export default function AuthorDetailPage({
   const [ld, setLd] = useState(true);
   const [ref, setRef] = useState(false);
   const [mamRef, setMamRef] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [vm, setVm] = usePersist<ViewMode>("adp_vm", "grid");
   const [rk, setRk] = useState(0);
   const [sb, setSb] = useState<Book | null>(null);
@@ -462,6 +463,31 @@ export default function AuthorDetailPage({
     } catch (e) {
       toast.error((e as Error).message || "MAM scan failed to start");
       setMamRef(false);
+    }
+  };
+
+  const clearData = async (type: "source" | "mam" | "both") => {
+    if (!authorIdNum) return;
+    const labels = {
+      source: "source scan",
+      mam: "MAM scan",
+      both: "all scan",
+    } as const;
+    if (!confirm(`Clear ${labels[type]} data for this author?`)) return;
+    setClearing(true);
+    try {
+      await api.post("/discovery/authors/clear-scan-data", {
+        author_ids: [authorIdNum],
+        clear_source: type === "source" || type === "both",
+        clear_mam: type === "mam" || type === "both",
+      });
+      toast.success("Cleared data");
+      loadA();
+      setRk((k) => k + 1);
+    } catch (e) {
+      toast.error((e as Error).message || "Error");
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -776,6 +802,60 @@ export default function AuthorDetailPage({
                 }}
               >
                 {mamRef ? <Spin /> : null} Scan MAM
+              </Btn>
+            ) : null}
+            <span
+              style={{
+                width: 1,
+                height: 20,
+                background: t.border,
+                margin: "0 2px",
+              }}
+            />
+            <Btn
+              size="sm"
+              onClick={() => clearData("source")}
+              disabled={clearing}
+              title="Clear this author's source scan data (URLs + discovered books)"
+              style={{
+                height: 38,
+                background: t.ylw + "22",
+                color: t.ylwt,
+                border: `1px solid ${t.ylw}44`,
+              }}
+            >
+              Clear Source
+            </Btn>
+            {mamOn ? (
+              <Btn
+                size="sm"
+                onClick={() => clearData("mam")}
+                disabled={clearing}
+                title="Clear this author's MAM scan data"
+                style={{
+                  height: 38,
+                  background: t.cyan + "22",
+                  color: t.cyant,
+                  border: `1px solid ${t.cyan}44`,
+                }}
+              >
+                Clear MAM
+              </Btn>
+            ) : null}
+            {mamOn ? (
+              <Btn
+                size="sm"
+                onClick={() => clearData("both")}
+                disabled={clearing}
+                title="Clear both source and MAM scan data for this author"
+                style={{
+                  height: 38,
+                  background: t.red + "22",
+                  color: t.redt,
+                  border: `1px solid ${t.red}44`,
+                }}
+              >
+                Clear Both
               </Btn>
             ) : null}
           </div>
