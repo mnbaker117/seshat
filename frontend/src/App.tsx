@@ -9,6 +9,8 @@ import { api } from "./api";
 import { ThemeProvider, useTheme, useThemeControls } from "./theme";
 import { Spin } from "./components/Spin";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import Toaster from "./components/Toaster";
+import { SseEventsProvider } from "./providers/SseEventsProvider";
 
 // Pipeline pages
 import LoginPage from "./pages/LoginPage";
@@ -398,7 +400,10 @@ function SeshatApp() {
 export default function App() {
   return (
     <ThemeProvider>
-      <SeshatApp />
+      <SseEventsProvider>
+        <SeshatApp />
+        <Toaster />
+      </SseEventsProvider>
     </ThemeProvider>
   );
 }
