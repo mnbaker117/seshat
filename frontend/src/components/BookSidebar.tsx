@@ -135,6 +135,7 @@ export function BookSidebar({
   const [pipelineReady, setPipelineReady] = useState(false);
   const [absUrl, setAbsUrl] = useState("");
   const [mamScanning, setMamScanning] = useState(false);
+  const [mamDeciding, setMamDeciding] = useState(false);
   const [mamOn, setMamOn] = useState(false);
   const [suggestion, setSuggestion] = useState<SeriesSuggestion | null>(null);
   const [sugBusy, setSugBusy] = useState<SuggestionAction | null>(null);
@@ -236,6 +237,30 @@ export function BookSidebar({
       alert(`${action} failed: ${(e as Error).message || e}`);
     }
     setSugBusy(null);
+  };
+
+  // Approve a "possible" match as Found, or Remove the MAM link
+  // entirely (clears URL and flips status to "not_found"). Uses the
+  // existing PUT /discovery/books/{id} endpoint — sending mam_url=""
+  // clears all three mam fields server-side (see update_book in
+  // app/discovery/routers/books.py).
+  const decideMam = async (action: "approve" | "remove") => {
+    if (mamDeciding) return;
+    if (action === "remove") {
+      if (!confirm("Remove this book's MAM link? It will be marked Not Found.")) return;
+    }
+    setMamDeciding(true);
+    try {
+      const payload =
+        action === "approve"
+          ? { mam_url: book.mam_url || "" }
+          : { mam_url: "" };
+      await api.put(`/discovery/books/${book.id}`, payload);
+      if (onEdit) await onEdit();
+    } catch (e) {
+      alert(`Action failed: ${(e as Error).message || e}`);
+    }
+    setMamDeciding(false);
   };
 
   const rescanMam = async () => {
@@ -1546,6 +1571,53 @@ export function BookSidebar({
           </>
         )}
       </div>
+
+      {/* Possible-MAM decision row — only when scan returned a
+          candidate that's waiting on user approval. Approve flips the
+          existing URL's status to Found; Remove clears the URL
+          entirely and marks Not Found. Sits just above the standard
+          action row so it's visible without scrolling through the
+          metadata rows. */}
+      {!editing && book.mam_status === "possible" && book.mam_url ? (
+        <div
+          className="sb-actions"
+          style={{
+            display: "flex",
+            gap: 8,
+            marginTop: "auto",
+            paddingTop: 12,
+            borderTop: `1px solid ${t.borderL}`,
+            flexWrap: "wrap",
+          }}
+        >
+          <Btn
+            size="sm"
+            onClick={() => decideMam("approve")}
+            disabled={mamDeciding}
+            title="Confirm this match as Found without editing the URL"
+            style={{
+              background: t.grn + "22",
+              color: t.grnt,
+              border: `1px solid ${t.grn}44`,
+            }}
+          >
+            {mamDeciding ? <Spin /> : null} Approve MAM
+          </Btn>
+          <Btn
+            size="sm"
+            onClick={() => decideMam("remove")}
+            disabled={mamDeciding}
+            title="Discard this match and mark the book as Not Found on MAM"
+            style={{
+              background: t.red + "22",
+              color: t.redt,
+              border: `1px solid ${t.red}44`,
+            }}
+          >
+            {mamDeciding ? <Spin /> : null} Remove MAM
+          </Btn>
+        </div>
+      ) : null}
 
       {/* Action row varies by book state:
           - hidden: Unhide-only
