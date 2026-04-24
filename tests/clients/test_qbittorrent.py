@@ -399,6 +399,50 @@ class TestListTorrents:
         # Session must be dropped so the next call re-authenticates.
         assert client._logged_in is False
 
+    async def test_transport_error_drops_session(self, fake_qbit):
+        # When the qBit container is stopped / network is partitioned,
+        # httpx raises a transport error. We must flip _logged_in so
+        # the budget watcher's reachability check (which reads the
+        # flag) reports false — that's what drives the SSE
+        # `client-status` event + the Downloader pill in the UI.
+        import httpx as _httpx
+
+        class _FailingTransport(_httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                raise _httpx.ConnectError("simulated qBit down")
+
+        client = _make_client(fake_qbit)
+        try:
+            await client.login()
+            assert client._logged_in is True
+            # Swap in a failing transport for the list call.
+            await client._client.aclose()
+            client._client = _httpx.AsyncClient(
+                base_url="http://fake.qbit.local:8080",
+                transport=_FailingTransport(),
+            )
+            result = await client.list_torrents()
+        finally:
+            await client.aclose()
+
+        assert result == []
+        assert client._logged_in is False
+
+    async def test_500_status_drops_session(self, fake_qbit):
+        # A 5xx from qBit (or from a reverse proxy in front of it
+        # with qBit down) also means we can't trust the session.
+        client = _make_client(fake_qbit)
+        try:
+            await client.login()
+            assert client._logged_in is True
+            fake_qbit.info_status = 500
+            result = await client.list_torrents()
+        finally:
+            await client.aclose()
+
+        assert result == []
+        assert client._logged_in is False
+
     async def test_seeding_time_parsed_correctly(self, fake_qbit):
         fake_qbit.torrents = [
             {

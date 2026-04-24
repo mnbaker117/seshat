@@ -308,6 +308,14 @@ class QbitClient:
                 headers={"Referer": self.base_url},
             )
         except httpx.HTTPError as e:
+            # Transport error = we can't reach qBit at all (container
+            # stopped, network partition, DNS miss). Flip _logged_in
+            # so the next tick's reachability check correctly reports
+            # unreachable — the SSE `client-status` publisher driving
+            # the Downloader pill reads this flag. Without the reset
+            # it stays True from the prior successful tick and the UI
+            # never learns qBit went down.
+            self._logged_in = False
             _log.warning(f"qBit list_torrents transport error: {type(e).__name__}: {e}")
             return []
 
@@ -317,6 +325,11 @@ class QbitClient:
             return []
 
         if resp.status_code != 200:
+            # Anything that isn't 200 or 403 (500s, 502 from a reverse
+            # proxy with qBit down behind it, etc.) also means we
+            # can't trust the session — clear the flag so reachability
+            # reports false until we successfully re-auth.
+            self._logged_in = False
             _log.warning(f"qBit list_torrents unexpected HTTP {resp.status_code}")
             return []
 
