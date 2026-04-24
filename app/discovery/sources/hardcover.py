@@ -187,16 +187,28 @@ query Search($query: String!) {
 """
 
 FIND_BOOKS_BY_IDS = FRAGMENTS + """
-query FindBooksByIds($ids: [Int!], $languages: [String!]) {
+query FindBooksByIds($ids: [Int!], $languages: [String!], $format_ids: [Int!]) {
   books(where: {id: {_in: $ids}}, order_by: {users_read_count: desc_nulls_last}) {
     ...BookData
     editions(
-      where: {reading_format_id: {_in: [1, 4]}, language: {_or: [{code3: {_in: $languages}}, {code3: {_is_null: true}}]}}
+      where: {reading_format_id: {_in: $format_ids}, language: {_or: [{code3: {_in: $languages}}, {code3: {_is_null: true}}]}}
       order_by: {users_count: desc_nulls_last}
     ) { ...EditionData }
   }
 }
 """
+
+
+# Hardcover's `reading_format_id` enum (from their public GraphQL schema):
+#   1 = Physical book, 2 = Audiobook, 4 = E-Book.
+# Ebook scans want physical + ebook editions; audiobook scans want
+# audiobook editions. Without this split, an audiobook-library scan
+# returns print/ebook metadata for every Hardcover hit — silently
+# useless.
+def _edition_format_ids(content_type: Optional[str]) -> list[int]:
+    if content_type == "audiobook":
+        return [2]
+    return [1, 4]
 
 # Direct author query (may work with some API keys)
 AUTHOR_BOOKS_QUERY = FRAGMENTS + """
@@ -398,9 +410,15 @@ class HardcoverSource(BaseSource):
                 f"across {len(search_queries)} queries → fetching {len(book_ids)}"
             )
             
-            # Step 2: Fetch books by IDs
+            # Step 2: Fetch books by IDs. Format filter varies by the
+            # active library's content_type (set by lookup.py alongside
+            # `_linked_author_names`) so audiobook scans pull audiobook
+            # editions while ebook scans pull print/ebook.
+            content_type = getattr(self, "_content_type", None)
             books_data = await self._query(FIND_BOOKS_BY_IDS, {
-                "ids": book_ids, "languages": ["eng", "en"]
+                "ids": book_ids,
+                "languages": ["eng", "en"],
+                "format_ids": _edition_format_ids(content_type),
             })
             books = books_data.get("books", [])
             if not books:

@@ -47,11 +47,11 @@ query Search($query: String!) {
 """
 
 _FIND_BOOKS = _FRAGMENTS + """
-query FindBooksByIds($ids: [Int!], $languages: [String!]) {
+query FindBooksByIds($ids: [Int!], $languages: [String!], $format_ids: [Int!]) {
   books(where: {id: {_in: $ids}}, order_by: {users_read_count: desc_nulls_last}) {
     ...BookData
     editions(
-      where: {reading_format_id: {_in: [1, 4]},
+      where: {reading_format_id: {_in: $format_ids},
               language: {_or: [{code3: {_in: $languages}},
                                {code3: {_is_null: true}}]}}
       order_by: {users_count: desc_nulls_last}
@@ -60,6 +60,13 @@ query FindBooksByIds($ids: [Int!], $languages: [String!]) {
   }
 }
 """
+
+
+# Hardcover's `reading_format_id` enum: 1=Physical, 2=Audiobook, 4=E-Book.
+# Mirror the discovery-side filter split — audiobook enrichment pulls
+# audiobook editions, everything else pulls print/ebook.
+def _edition_format_ids(audiobook: bool) -> list[int]:
+    return [2] if audiobook else [1, 4]
 
 
 class HardcoverSource(MetaSource):
@@ -116,11 +123,18 @@ class HardcoverSource(MetaSource):
         if not ids:
             return None
 
-        # Fetch top 10 results with full metadata.
+        # Fetch top 10 results with full metadata. `_audiobook_hint` is
+        # set by the enricher before the call when enriching audiobook
+        # grabs, so we pick the right `reading_format_id` bucket.
+        audiobook = bool(getattr(self, "_audiobook_hint", False))
         try:
             books_data = await self._query(
                 _FIND_BOOKS,
-                {"ids": ids[:10], "languages": ["eng", "en"]},
+                {
+                    "ids": ids[:10],
+                    "languages": ["eng", "en"],
+                    "format_ids": _edition_format_ids(audiobook),
+                },
             )
         except Exception:
             _log.exception("hardcover: fetch books failed")

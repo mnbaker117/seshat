@@ -306,6 +306,12 @@ class MetadataEnricher:
             )
             # Insert at the front so MAM runs first.
             sources = [mam_src] + [s for s in sources if s.name != "mam"]
+        # Tag each source with the audiobook flag so sources that need
+        # to pick a format-specific query shape (Hardcover's
+        # `reading_format_id` filter) can read it. Harmless on sources
+        # that ignore the attribute.
+        for s in sources:
+            s._audiobook_hint = audiobook
 
         merged: Optional[MetaRecord] = None
         source_log: list[dict] = []  # per-source contributions

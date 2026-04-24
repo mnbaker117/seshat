@@ -1916,7 +1916,12 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     settings = load_settings()
     languages = settings.get("languages", ["English"])
     owned_only = bool(settings.get("author_scan_owned_only", False))
+    # `exclude_audiobooks` drops title-marked audiobook editions at
+    # merge time ("[Audible Audio]", "(Narrator)", etc.). Only apply
+    # to ebook scans — on audiobook libraries we want those results.
     exclude_audiobooks = bool(settings.get("exclude_audiobooks", True))
+    if state.get_active_library_content_type() == "audiobook":
+        exclude_audiobooks = False
     if owned_only:
         logger.info(f"  Library-only mode: only enriching owned books for '{author_name}', no new discoveries")
 
@@ -2109,6 +2114,11 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         # (amazon, ibdb) read this attribute off the instance to widen
         # their author-byline gate. Harmless on sources that don't.
         source._linked_author_names = linked_author_names
+        # Active library's content_type — Hardcover reads this to pick
+        # the right `reading_format_id` filter (audiobook libraries need
+        # audiobook editions, not print/ebook). Harmless on sources that
+        # don't check it.
+        source._content_type = ct
         # Per-source pre-flight (Hardcover is the only one that needs it).
         if spec.name == "hardcover":
             source.update_api_key(_hc_key)
