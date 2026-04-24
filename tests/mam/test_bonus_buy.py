@@ -350,6 +350,24 @@ class TestModuleSurface:
 
 
 class TestNeverRaises:
+    async def test_dry_run_whole_gb_message_has_no_decimal(self, fake_mam, dry_run_enabled):
+        """Regression guard for the "2852.0 GB" audit-message leak.
+        Pydantic coerces `{"gb": 2852}` to 2852.0 at the router, and
+        the raw float str was surfacing in the dry-run message. The
+        `_format_gb_for_display` helper drops the trailing `.0` for
+        whole numbers."""
+        result = await buy_upload_credit(2852.0, token="tok")
+        assert result.success is True
+        # "2852" not "2852.0"
+        assert "on upload 2852 GB" in result.message
+        assert "2852.0" not in result.message
+
+    async def test_dry_run_fractional_gb_keeps_two_decimals(self, fake_mam, dry_run_enabled):
+        result = await buy_upload_credit(50.5, token="tok")
+        assert result.success is True
+        assert "on upload 50.50 GB" in result.message
+
+
     async def test_network_exception_returns_failure_result(self, monkeypatch):
         # Simulate a network-layer exception before we can even get a
         # response object. Patch cookie._do_get to raise, and confirm

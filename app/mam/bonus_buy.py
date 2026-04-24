@@ -206,16 +206,32 @@ async def buy_upload_credit(
             f"buy_upload_credit gb must be at least {MIN_UPLOAD_GB} GB — "
             f"MAM rejects smaller programmatic buys (got {gb} GB)"
         )
+    gb_display = _format_gb_for_display(gb)
     if _is_dry_run():
         return _dry_run_result(
-            f"upload {gb} GB", int(round(gb * BP_PER_UPLOAD_GB)),
+            f"upload {gb_display} GB", int(round(gb * BP_PER_UPLOAD_GB)),
         )
     return await _do_buy(
         spendtype="upload",
         extra_params={"amount": str(gb)},
         token=token,
-        log_label=f"upload {gb} GB",
+        log_label=f"upload {gb_display} GB",
     )
+
+
+def _format_gb_for_display(gb: float) -> str:
+    """Render a GB amount for human-facing log lines / audit messages.
+
+    Whole numbers drop the trailing `.0` ("50" not "50.0"), fractional
+    values keep two decimals. Pydantic coerces JSON ints to Python
+    float on the `/upload/buy` request shape (`gb: Optional[float]`),
+    so a frontend `{"gb": 2852}` call ends up here as 2852.0 — the
+    raw str() of which was leaking into audit messages as "2852.0 GB"
+    during Tier 1 UAT.
+    """
+    if gb == int(gb):
+        return str(int(gb))
+    return f"{gb:.2f}"
 
 
 async def buy_personal_freeleech(
