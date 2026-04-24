@@ -11,6 +11,7 @@
 // "should this sidebar exist" decision.
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme";
+import { useViewport } from "../hooks/useViewport";
 import { api } from "../api";
 import { Ic } from "../icons";
 import { fmtDate } from "../lib/format";
@@ -117,6 +118,7 @@ export function BookSidebar({
   onEdit,
 }: BookSidebarProps) {
   const t = useTheme();
+  const { isMobile } = useViewport();
   const [mounted, setMounted] = useState(false);
   const [editing, setEditing] = useState(false);
   const [ef, setEf] = useState<EditFields>({
@@ -496,18 +498,22 @@ export function BookSidebar({
         position: "fixed",
         top: 0,
         right: 0,
-        width: 420,
-        maxWidth: "90vw",
+        // Mobile: full-viewport sheet so the sidebar fills the
+        // screen instead of competing with the parent grid for ~10%
+        // of the width. Desktop: 420px panel with a 90vw cap for
+        // medium-narrow viewports.
+        width: isMobile ? "100vw" : 420,
+        maxWidth: isMobile ? "100vw" : "90vw",
         height: "100vh",
         background: t.bg2,
-        borderLeft: `1px solid ${t.border}`,
+        borderLeft: isMobile ? "none" : `1px solid ${t.border}`,
         zIndex: 100,
         overflowY: "auto",
-        padding: 24,
+        padding: isMobile ? 14 : 24,
         display: "flex",
         flexDirection: "column",
         gap: 16,
-        boxShadow: "-4px 0 20px rgba(0,0,0,0.3)",
+        boxShadow: isMobile ? "none" : "-4px 0 20px rgba(0,0,0,0.3)",
         transform: parentClosing
           ? "translateX(100%)"
           : mounted
