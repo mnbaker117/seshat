@@ -12,7 +12,9 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import Toaster from "./components/Toaster";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { InstallPrompt } from "./components/InstallPrompt";
+import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SseEventsProvider } from "./providers/SseEventsProvider";
+import { useViewport } from "./hooks/useViewport";
 
 // Pipeline pages
 import LoginPage from "./pages/LoginPage";
@@ -158,6 +160,8 @@ function renderPage(
 function SeshatApp() {
   const t = useTheme();
   const { cycle, themeName } = useThemeControls();
+  const { isMobile } = useViewport();
+  const [navOpen, setNavOpen] = useState(false);
 
   const [auth, setAuth] = useState<AuthState>({ loading: true, authenticated: false, firstRun: false });
   // Library-level first-run gate — orthogonal to auth.firstRun (which
@@ -252,19 +256,37 @@ function SeshatApp() {
   const activeNav = section === "discovery" ? DISCOVERY_NAV : PIPELINE_NAV;
   const maxW = 1800;
 
+  // Right-rail tool icons. Defined once and reused — desktop nav
+  // renders them as a horizontal icon strip, mobile drawer renders
+  // them as a vertical labeled list, same source of truth.
+  const RIGHT_ICONS = [
+    { id: "disc-importexport", icon: "📦", label: "Import / Export" },
+    { id: "pipe-mam",          icon: "📡", label: "MAM Status" },
+    { id: "logs",              icon: "📋", label: "Logs" },
+    { id: "database",          icon: "🗄️", label: "Database" },
+    { id: "settings",          icon: "⚙️", label: "Settings" },
+  ];
+
+  const handleLogout = async () => {
+    if (!confirm("Sign out of Seshat?")) return;
+    try { await api.post("/auth/logout", {}); } catch { /* */ }
+    setAuth({ loading: false, authenticated: false, firstRun: false });
+  };
+
   return (
     <div style={{ minHeight: "100vh", background: t.bg, color: t.text }}>
-      {/* ─── Navbar ─────────────────────────────────────────── */}
+      {/* ─── Navbar — desktop horizontal, mobile compact + drawer ─── */}
       <nav style={{
         background: t.bg2,
         borderBottom: `1px solid ${t.border}`,
         display: "flex",
         alignItems: "center",
-        padding: "0 80px",
+        padding: isMobile ? "0 12px" : "0 80px",
         height: 52,
         position: "sticky",
         top: 0,
         zIndex: 100,
+        gap: isMobile ? 10 : 0,
       }}>
         {/* Logo / Dashboard */}
         <div
@@ -272,129 +294,166 @@ function SeshatApp() {
           style={{
             cursor: "pointer",
             fontWeight: 800,
-            fontSize: 20,
+            fontSize: isMobile ? 18 : 20,
             color: t.accent,
             letterSpacing: "0.02em",
-            marginRight: 20,
+            marginRight: isMobile ? 0 : 20,
             userSelect: "none",
             display: "flex",
             alignItems: "center",
             gap: 8,
+            flex: isMobile ? 1 : "0 0 auto",
           }}
         >
-          <img src="/icon.svg" alt="" style={{ width: 32, height: 32 }} />
+          <img src="/icon.svg" alt="" style={{ width: isMobile ? 28 : 32, height: isMobile ? 28 : 32 }} />
           Seshat
         </div>
 
-        {/* Section switcher */}
-        <div style={{ display: "flex", gap: 2, marginRight: 16 }}>
-          {(["discovery", "pipeline"] as Section[]).map(s => (
-            <button
-              key={s}
-              onClick={() => switchSection(s)}
-              style={{
-                background: section === s ? t.abg : "transparent",
-                color: section === s ? t.accent : t.td,
-                border: `1px solid ${section === s ? t.abr : "transparent"}`,
-                borderRadius: 6,
-                padding: "5px 14px",
-                fontSize: 15,
-                fontWeight: 600,
-                cursor: "pointer",
-                textTransform: "capitalize",
-              }}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-
-        {/* Section nav items */}
-        <div style={{ display: "flex", gap: 4, flex: 1 }}>
-          {activeNav.map(item => (
-            <button
-              key={item.id}
-              onClick={() => nav(item.id)}
-              style={{
-                background: page === item.id ? t.abg : "transparent",
-                color: page === item.id ? t.accent : t.tm,
-                border: "none",
-                borderRadius: 6,
-                padding: "6px 12px",
-                fontSize: 14,
-                fontWeight: page === item.id ? 600 : 400,
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-              }}
-            >
-              <span>{item.icon}</span>
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Right icons */}
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          {[
-            { id: "disc-importexport", icon: "📦", title: "Import / Export" },
-            { id: "pipe-mam", icon: "📡", title: "MAM Status" },
-            { id: "logs", icon: "📋", title: "Logs" },
-            { id: "database", icon: "🗄️", title: "Database" },
-            { id: "settings", icon: "⚙️", title: "Settings" },
-          ].map(btn => (
-            <button
-              key={btn.id}
-              onClick={() => nav(btn.id)}
-              title={btn.title}
-              style={{
-                background: page === btn.id ? t.abg : "transparent",
-                border: "none",
-                cursor: "pointer",
-                fontSize: 18,
-                padding: "4px 8px",
-                borderRadius: 4,
-                opacity: page === btn.id ? 1 : 0.7,
-              }}
-            >
-              {btn.icon}
-            </button>
-          ))}
+        {isMobile ? (
+          // Mobile: hamburger button. Drawer renders at the bottom of
+          // the SeshatApp tree so it overlays the whole viewport.
           <button
-            onClick={cycle}
-            title={`Theme: ${themeName}`}
-            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, padding: "4px 6px" }}
-          >
-            {themeIcon}
-          </button>
-          <button
-            onClick={async () => {
-              if (!confirm("Sign out of Seshat?")) return;
-              try { await api.post("/auth/logout", {}); } catch { /* */ }
-              setAuth({ loading: false, authenticated: false, firstRun: false });
-            }}
-            title="Sign out"
+            onClick={() => setNavOpen(true)}
+            aria-label="Open navigation"
             style={{
               background: "transparent",
               border: "none",
               cursor: "pointer",
-              fontSize: 15,
-              color: t.td,
-              padding: "4px 8px",
+              padding: "8px 10px",
+              fontSize: 22,
+              color: t.text2,
+              lineHeight: 1,
             }}
           >
-            ⏻
+            ☰
           </button>
-        </div>
+        ) : (
+          <>
+            {/* Section switcher */}
+            <div style={{ display: "flex", gap: 2, marginRight: 16 }}>
+              {(["discovery", "pipeline"] as Section[]).map(s => (
+                <button
+                  key={s}
+                  onClick={() => switchSection(s)}
+                  style={{
+                    background: section === s ? t.abg : "transparent",
+                    color: section === s ? t.accent : t.td,
+                    border: `1px solid ${section === s ? t.abr : "transparent"}`,
+                    borderRadius: 6,
+                    padding: "5px 14px",
+                    fontSize: 15,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    textTransform: "capitalize",
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+
+            {/* Section nav items */}
+            <div style={{ display: "flex", gap: 4, flex: 1 }}>
+              {activeNav.map(item => (
+                <button
+                  key={item.id}
+                  onClick={() => nav(item.id)}
+                  style={{
+                    background: page === item.id ? t.abg : "transparent",
+                    color: page === item.id ? t.accent : t.tm,
+                    border: "none",
+                    borderRadius: 6,
+                    padding: "6px 12px",
+                    fontSize: 14,
+                    fontWeight: page === item.id ? 600 : 400,
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  <span>{item.icon}</span>
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Right icons */}
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {RIGHT_ICONS.map(btn => (
+                <button
+                  key={btn.id}
+                  onClick={() => nav(btn.id)}
+                  title={btn.label}
+                  style={{
+                    background: page === btn.id ? t.abg : "transparent",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 18,
+                    padding: "4px 8px",
+                    borderRadius: 4,
+                    opacity: page === btn.id ? 1 : 0.7,
+                  }}
+                >
+                  {btn.icon}
+                </button>
+              ))}
+              <button
+                onClick={cycle}
+                title={`Theme: ${themeName}`}
+                style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, padding: "4px 6px" }}
+              >
+                {themeIcon}
+              </button>
+              <button
+                onClick={handleLogout}
+                title="Sign out"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: 15,
+                  color: t.td,
+                  padding: "4px 8px",
+                }}
+              >
+                ⏻
+              </button>
+            </div>
+          </>
+        )}
       </nav>
 
       {/* ─── Page content ───────────────────────────────────── */}
-      <main style={{ maxWidth: maxW, margin: "0 auto", padding: "24px 16px" }}>
+      <main
+        className="seshat-main"
+        style={{ maxWidth: maxW, margin: "0 auto", padding: "24px 16px" }}
+      >
         <ErrorBoundary>
           {renderPage(page, pageArg, nav)}
         </ErrorBoundary>
       </main>
+
+      {/* Mobile nav drawer — only mounted when isMobile flips true.
+          The MobileNavDrawer guards on `open` itself so this stays
+          cheap to keep mounted; we still gate on isMobile to avoid
+          firing the body-scroll-lock effect on desktop. */}
+      {isMobile ? (
+        <MobileNavDrawer
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          section={section}
+          onSectionChange={switchSection}
+          activePage={page}
+          navItems={activeNav}
+          rightIcons={RIGHT_ICONS}
+          onNavigate={nav}
+          themeIcon={themeIcon}
+          themeName={themeName}
+          onCycleTheme={cycle}
+          onLogout={handleLogout}
+        />
+      ) : null}
     </div>
   );
 }

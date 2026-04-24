@@ -29,6 +29,43 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   .settings-grid > * { grid-column: 1 !important; }
 }
 
+/* ─── Mobile responsive globals (≤ 700px) ─────────────────────
+ * iOS Safari zooms the page when an input is focused and its
+ * font-size is below 16px. Bumping all form controls to 16px on
+ * narrow viewports keeps Safari from interrupting taps with a
+ * surprise zoom. Desktop styles can stay smaller.
+ */
+@media (max-width: 700px) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+
+  /* Trim the default 24px / 16px main padding so content gets the
+   * full viewport width on phones. App.tsx applies the desktop
+   * value inline; this overrides via the .seshat-main className
+   * we'll add in commit 1.                                       */
+  .seshat-main {
+    padding: 12px 8px !important;
+  }
+
+  /* Hide the Authors page alphabet sidebar on phones — touch users
+   * jump via search instead, and the column eats ~50px of width.
+   * The class is applied to the sidebar wrapper in commit 2.    */
+  .seshat-alphabet {
+    display: none !important;
+  }
+}
+
+/* Default mobile-tap target sizing — buttons in dense bars are
+ * 22-26px on desktop; tap targets need ~40px on touch. Apply via
+ * `.seshat-tap` opt-in className so we don't enlarge dense
+ * desktop UIs.                                                  */
+@media (max-width: 700px) and (pointer: coarse) {
+  .seshat-tap, .seshat-tap button {
+    min-height: 40px;
+  }
+}
+
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
