@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from app.discovery.sources.base import BaseSource, AuthorResult, SeriesResult, BookResult
-from app.metadata.scoring import score_match
+from app.metadata.author_names import authors_match
 
 logger = logging.getLogger("seshat.discovery.ibdb")
 
@@ -51,10 +51,28 @@ class IbdbSource(BaseSource):
 
         IBDB doesn't have a dedicated author endpoint, so we search
         by author name and filter results by match quality.
+
+        Author gate: ibdb's search returns ANYTHING containing the
+        query string — for "Randi Darren" that includes a baseball
+        biography with "Darren Oliver" in the author list and
+        religious books with "Randy Clark" as foreword contributor.
+        The previous filter used `score_match` with title=title which
+        made the title component trivially 1.0 and let the 0.3 floor
+        accept effectively anything.
+
+        Replaced with `authors_match` against each item_author — the
+        shared normalized+fuzzy comparator. An item is accepted iff
+        at least one of its listed authors matches the queried name
+        (or a pen-name alias injected via `_linked_author_names`).
         """
         author_name = author_id
         existing_titles = existing_titles or set()
         owned_titles = owned_titles or []
+
+        # Pen-name aliases — set on the instance by lookup.py's
+        # per-source preflight. Accept books bylined under any alias.
+        linked_names = getattr(self, "_linked_author_names", []) or []
+        accept_authors = [author_name] + list(linked_names)
 
         try:
             resp = await self._get(_SEARCH_URL, params={"q": author_name})
@@ -78,12 +96,21 @@ class IbdbSource(BaseSource):
                 continue
 
             item_authors = _extract_authors(item)
-            sc = score_match(
-                record_title=title, record_authors=item_authors,
-                search_title=title, search_authors=author_name,
+            if not item_authors:
+                logger.debug(
+                    f"  ibdb: skipping '{title[:60]}' — no author info"
+                )
+                continue
+            matched = any(
+                authors_match(candidate, ia)
+                for candidate in accept_authors
+                for ia in item_authors
             )
-            # Only include results with reasonable author match
-            if sc < 0.3:
+            if not matched:
+                logger.debug(
+                    f"  ibdb: skipping '{title[:60]}' — authors "
+                    f"{item_authors!r} don't match {accept_authors!r}"
+                )
                 continue
 
             # ibdb.dev's actual response shape (verified live 2026-04-15):
