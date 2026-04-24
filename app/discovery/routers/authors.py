@@ -347,6 +347,21 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
                 )
             except Exception:
                 logger.debug("author-scan notify failed", exc_info=True)
+            # In-browser toast parallel to the ntfy push. The
+            # `trigger_lookup` endpoint in scan.py has its own toast
+            # for the Dashboard-originated full scan — this covers the
+            # other code path (single-author lookup, full-rescan, bulk
+            # scans triggered from the author detail page, etc.) which
+            # all route through _spawn_lookup_task.
+            try:
+                from app.orchestrator.sse_publishers import publish_toast
+                new_books = int(state._lookup_progress.get("new_books", 0))
+                await publish_toast(
+                    "success",
+                    f"{label} scan complete: {new_books} new book(s)",
+                )
+            except Exception:
+                logger.debug("author-scan toast failed", exc_info=True)
         except asyncio.CancelledError:
             # User clicked Stop on the Dashboard widget. Mark cancelled
             # and let the exception propagate so any further `await` in
@@ -356,6 +371,11 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
         except Exception as e:
             logger.error(f"Author scan task error: {e}", exc_info=True)
             state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+            try:
+                from app.orchestrator.sse_publishers import publish_toast
+                await publish_toast("error", f"Author scan failed: {e}")
+            except Exception:
+                logger.debug("author-scan error toast failed", exc_info=True)
 
     state._lookup_task = asyncio.create_task(_do())
 
