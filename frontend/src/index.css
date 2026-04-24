@@ -54,6 +54,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   .seshat-alphabet {
     display: none !important;
   }
+
+  /* Authors-list view collapses 2-column CSS columns to a single
+   * column on phones — the 5-column inner grid each row uses can
+   * still squeeze, but at one column per row it fits cleanly.   */
+  .seshat-author-cols {
+    columns: 1 !important;
+  }
 }
 
 /* Default mobile-tap target sizing — buttons in dense bars are

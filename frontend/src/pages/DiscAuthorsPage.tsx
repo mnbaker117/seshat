@@ -248,8 +248,11 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
 
   return (
     <div style={{ display: "flex", gap: 0 }}>
-      {/* ── Alphabet Sidebar ── */}
+      {/* ── Alphabet Sidebar — hidden on mobile via .seshat-alphabet
+          CSS rule. Touch users jump via search instead, and the
+          ~80px column is dead weight on a phone. ── */}
       <div
+        className="seshat-alphabet"
         style={{
           width: 80,
           flexShrink: 0,
@@ -648,7 +651,7 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
             ))}
           </div>
         ) : (
-          <div style={{ columns: 2, columnGap: 6 }}>
+          <div className="seshat-author-cols" style={{ columns: 2, columnGap: 6 }}>
             {visible.map((a) => (
               <div
                 key={a.id}
