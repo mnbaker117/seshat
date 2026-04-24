@@ -76,13 +76,93 @@ export default defineConfig({
         // default "wait until all tabs close" behavior.
         skipWaiting: true,
         clientsClaim: true,
-        // Precache the Vite build output (app shell). Runtime
-        // caching rules for the API surface live in the next commit.
+        // Precache the Vite build output (app shell).
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
         // SPA fallback: navigations resolve to index.html so
         // deep-linked routes work offline after the shell is cached.
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/api\//],
+        // SSE connections (EventSource) MUST NEVER be intercepted by
+        // the service worker — workbox would buffer them into a
+        // cache entry and the live-update stream would die. The
+        // broadcast channel under /api/v1/events handles torrent
+        // progress, client status, mam stats, and toasts.
+        // Same for any other streaming endpoint we add later.
+        runtimeCaching: [
+          // 1. Covers: cache-first, 7-day TTL. Book covers change
+          //    rarely (re-enrich events) and account for the bulk of
+          //    image bytes. Cache-first means instant display on
+          //    repeat views; the TTL + LRU cap bounds disk usage.
+          //    No URL-versioning on the backend today, so if a cover
+          //    IS replaced the browser won't pick it up until the
+          //    cache entry ages out. Acceptable tradeoff.
+          {
+            urlPattern: /\/api\/discovery\/covers\//,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "seshat-covers",
+              expiration: {
+                maxEntries: 500,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+
+          // 2. MAM status + user-status: stale-while-revalidate.
+          //    These endpoints drive the dashboard pills and economy
+          //    widgets; the user wants the number NOW plus a refresh.
+          //    SSE pushes the truth in real time regardless, so a
+          //    slightly stale HTTP response is harmless.
+          {
+            urlPattern: /\/api\/v1\/mam\/status/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "seshat-mam-status",
+              expiration: { maxEntries: 16, maxAgeSeconds: 60 * 60 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+
+          // 3. Discovery list endpoints (books, authors, series,
+          //    config). Stale-while-revalidate so offline browsing
+          //    shows the last snapshot while the network fetch
+          //    refreshes in the background when online.
+          {
+            urlPattern: /\/api\/discovery\/(books|authors|series|config|libraries|works)\b/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "seshat-lists",
+              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+
+          // 4. SSE stream — explicit NetworkOnly so workbox doesn't
+          //    buffer the EventSource response. If it ever ended up
+          //    in a caching handler the live-update layer would die
+          //    silently. Belt-and-braces against future rule reordering.
+          {
+            urlPattern: /\/api\/v1\/events/,
+            handler: "NetworkOnly",
+          },
+
+          // 5. Default for everything else under /api/: network-first
+          //    with a 5-second timeout, falling back to cache when
+          //    offline. Covers the write endpoints too — those just
+          //    fail gracefully offline instead of matching some stale
+          //    cache entry and pretending to succeed.
+          {
+            urlPattern: /\/api\//,
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "seshat-api",
+              networkTimeoutSeconds: 5,
+              expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+        ],
       },
       // Dev build: SW runs in dev too so we can test registration
       // and caching locally without doing a full production build
