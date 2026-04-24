@@ -23,6 +23,7 @@ const PER_PAGE_LIST = 24;
 
 type LinkType = "pen_name" | "co_author";
 type ClearType = "source" | "mam" | "both";
+type ContentScope = "ebook" | "audiobook";
 
 // Response envelopes for the bulk scan / scan-mam endpoints. `error`
 // and `message` are both optional since the server uses them to
@@ -165,13 +166,20 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
     reload();
   };
 
-  const clearData = async (type: ClearType) => {
+  const clearData = async (type: ClearType, scope?: ContentScope) => {
     const labels: Record<ClearType, string> = {
       source: "source scan",
       mam: "MAM scan",
       both: "all scan",
     };
-    if (!confirm(`Clear ${labels[type]} data for ${sel.size} author(s)?`))
+    const scopeLabel = scope
+      ? ` (${scope === "audiobook" ? "audiobook" : "ebook"} libraries only)`
+      : "";
+    if (
+      !confirm(
+        `Clear ${labels[type]} data${scopeLabel} for ${sel.size} author(s)?`,
+      )
+    )
       return;
     setClearing(true);
     try {
@@ -179,6 +187,7 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
         author_ids: [...sel],
         clear_source: type === "source" || type === "both",
         clear_mam: type === "mam" || type === "both",
+        ...(scope ? { content_type: scope } : {}),
       });
       toast.success("Cleared data");
       setSel(new Set());
@@ -190,12 +199,16 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
     setClearing(false);
   };
 
-  const scanSources = async () => {
-    if (!confirm(`Scan ${sel.size} author(s)?`)) return;
+  const scanSources = async (scope?: ContentScope) => {
+    const scopeLabel = scope
+      ? ` (${scope === "audiobook" ? "audiobook" : "ebook"} libraries)`
+      : "";
+    if (!confirm(`Scan${scopeLabel} ${sel.size} author(s)?`)) return;
     setScanning(true);
     try {
       await api.post("/discovery/authors/scan-sources", {
         author_ids: [...sel],
+        ...(scope ? { content_type: scope } : {}),
       });
       toast.info("Scan started");
       setSel(new Set());
@@ -496,8 +509,9 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
             </span>
             <Btn
               size="sm"
-              onClick={scanSources}
+              onClick={() => scanSources()}
               disabled={scanning || clearing || linking}
+              title="Source scan using the active library's content type"
               style={{
                 background: t.grn + "22",
                 color: t.grnt,
@@ -505,6 +519,19 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
               }}
             >
               Scan Sources
+            </Btn>
+            <Btn
+              size="sm"
+              onClick={() => scanSources("audiobook")}
+              disabled={scanning || clearing || linking}
+              title="Scan these authors across every audiobook library"
+              style={{
+                background: t.pur + "22",
+                color: t.purt,
+                border: `1px solid ${t.pur}44`,
+              }}
+            >
+              Scan Audio
             </Btn>
             {mamOn && (
               <Btn
@@ -556,6 +583,7 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
               size="sm"
               onClick={() => clearData("source")}
               disabled={clearing}
+              title="Clear source scan data in the active library"
               style={{
                 background: t.ylw + "22",
                 color: t.ylwt,
@@ -563,6 +591,32 @@ export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
               }}
             >
               Clear Source
+            </Btn>
+            <Btn
+              size="sm"
+              onClick={() => clearData("source", "ebook")}
+              disabled={clearing}
+              title="Clear source scan data across every ebook library"
+              style={{
+                background: t.ylw + "11",
+                color: t.ylwt,
+                border: `1px dashed ${t.ylw}55`,
+              }}
+            >
+              Clear Ebook Src
+            </Btn>
+            <Btn
+              size="sm"
+              onClick={() => clearData("source", "audiobook")}
+              disabled={clearing}
+              title="Clear source scan data across every audiobook library"
+              style={{
+                background: t.pur + "11",
+                color: t.purt,
+                border: `1px dashed ${t.pur}55`,
+              }}
+            >
+              Clear Audio Src
             </Btn>
             {mamOn && (
               <Btn

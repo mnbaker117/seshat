@@ -466,20 +466,28 @@ export default function AuthorDetailPage({
     }
   };
 
-  const clearData = async (type: "source" | "mam" | "both") => {
+  const clearData = async (
+    type: "source" | "mam" | "both",
+    scope?: "ebook" | "audiobook",
+  ) => {
     if (!authorIdNum) return;
     const labels = {
       source: "source scan",
       mam: "MAM scan",
       both: "all scan",
     } as const;
-    if (!confirm(`Clear ${labels[type]} data for this author?`)) return;
+    const scopeLabel = scope
+      ? ` (${scope === "audiobook" ? "audiobook" : "ebook"} libraries only)`
+      : "";
+    if (!confirm(`Clear ${labels[type]} data${scopeLabel} for this author?`))
+      return;
     setClearing(true);
     try {
       await api.post("/discovery/authors/clear-scan-data", {
         author_ids: [authorIdNum],
         clear_source: type === "source" || type === "both",
         clear_mam: type === "mam" || type === "both",
+        ...(scope ? { content_type: scope } : {}),
       });
       toast.success("Cleared data");
       loadA();
@@ -488,6 +496,23 @@ export default function AuthorDetailPage({
       toast.error((e as Error).message || "Error");
     } finally {
       setClearing(false);
+    }
+  };
+
+  const scanAudiobookSources = async () => {
+    if (!authorIdNum || ref) return;
+    if (!confirm("Scan this author across every audiobook library?")) return;
+    setRef(true);
+    try {
+      await api.post("/discovery/authors/scan-sources", {
+        author_ids: [authorIdNum],
+        content_type: "audiobook",
+      });
+      toast.info("Audiobook scan started");
+      window.dispatchEvent(new CustomEvent("seshat:scan-started"));
+    } catch (e) {
+      toast.error((e as Error).message || "Scan failed to start");
+      setRef(false);
     }
   };
 
@@ -788,6 +813,20 @@ export default function AuthorDetailPage({
             >
               {ref ? <Spin /> : Ic.refresh} Full
             </Btn>
+            <Btn
+              size="sm"
+              onClick={scanAudiobookSources}
+              disabled={ref}
+              title="Scan this author across every audiobook library"
+              style={{
+                height: 38,
+                background: t.pur + "22",
+                color: t.purt,
+                border: `1px solid ${t.pur}44`,
+              }}
+            >
+              Scan Audio
+            </Btn>
             {mamOn ? (
               <Btn
                 size="sm"
@@ -816,7 +855,7 @@ export default function AuthorDetailPage({
               size="sm"
               onClick={() => clearData("source")}
               disabled={clearing}
-              title="Clear this author's source scan data (URLs + discovered books)"
+              title="Clear this author's source scan data in the active library"
               style={{
                 height: 38,
                 background: t.ylw + "22",
@@ -825,6 +864,34 @@ export default function AuthorDetailPage({
               }}
             >
               Clear Source
+            </Btn>
+            <Btn
+              size="sm"
+              onClick={() => clearData("source", "ebook")}
+              disabled={clearing}
+              title="Clear this author's source data across every ebook library"
+              style={{
+                height: 38,
+                background: t.ylw + "11",
+                color: t.ylwt,
+                border: `1px dashed ${t.ylw}55`,
+              }}
+            >
+              Clear Ebook Src
+            </Btn>
+            <Btn
+              size="sm"
+              onClick={() => clearData("source", "audiobook")}
+              disabled={clearing}
+              title="Clear this author's source data across every audiobook library"
+              style={{
+                height: 38,
+                background: t.pur + "11",
+                color: t.purt,
+                border: `1px dashed ${t.pur}55`,
+              }}
+            >
+              Clear Audio Src
             </Btn>
             {mamOn ? (
               <Btn
