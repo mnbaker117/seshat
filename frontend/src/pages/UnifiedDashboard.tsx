@@ -275,6 +275,16 @@ export default function UnifiedDashboard({ onNav }: Props) {
     setScanning(false);
     refresh();
   };
+  const triggerAudiobookSources = async () => {
+    setScanning(true);
+    try {
+      await api.post("/discovery/lookup?content_type=audiobook");
+    } catch {
+      /* ignore */
+    }
+    setScanning(false);
+    refresh();
+  };
   const triggerMam = async () => {
     setMamScanning(true);
     try {
@@ -492,6 +502,21 @@ export default function UnifiedDashboard({ onNav }: Props) {
               busy={scanning || ("running" in srcScan && !!srcScan.running)}
               onClick={triggerSources}
             />
+            {libScans.some(
+              (ls) =>
+                (ls as ScanProgress & { content_type?: string }).content_type ===
+                "audiobook",
+            ) ? (
+              <CmdBtn
+                label={
+                  <>
+                    <Dot color={t.pur} /> Scan Audiobooks
+                  </>
+                }
+                busy={scanning || ("running" in srcScan && !!srcScan.running)}
+                onClick={triggerAudiobookSources}
+              />
+            ) : null}
             <CmdBtn
               label={
                 <>

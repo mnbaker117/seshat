@@ -126,34 +126,76 @@ async def trigger_sync_alias():
 
 
 # ─── Author Lookup ───────────────────────────────────────────
+async def _count_due_authors(cutoff: float) -> int:
+    """Count authors in the currently-active library due for a source scan.
+
+    Mirrors the iteration inside `run_full_lookup` — skip orphan authors
+    with no linked books so the pre-flight "due count" doesn't overstate
+    what the scan loop will actually visit.
+    """
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT COUNT(*) c FROM authors WHERE COALESCE(last_lookup_at,0) < ? AND id IN (SELECT DISTINCT author_id FROM books)",
+            (cutoff,),
+        )).fetchone()
+        return row["c"] if row else 0
+    finally:
+        await db.close()
+
+
 @router.post("/sync/lookup")
-async def trigger_lookup():
+async def trigger_lookup(content_type: str | None = None):
+    """Start an author source scan.
+
+    `content_type=audiobook` (or `ebook`) fans the scan across every
+    discovered library of that type — the Dashboard's "Scan Audiobooks"
+    button passes it so audiobook libraries get visited even when the
+    user's active library is an ebook one. Without it we scan only the
+    active library (historical default).
+    """
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
         return {"error": "Author scanning is disabled — enable it in Settings"}
     if state._lookup_task and not state._lookup_task.done():
         return {"error": "An author scan is already running"}
 
-    # Pre-flight: how many authors are actually due for scanning given the
-    # cache window? If zero, surface a clear "nothing to do" status instead
-    # of starting a no-op task that briefly shows "Scanning... 0 of 0" then
-    # vanishes. Users hitting this most often have just completed a scan and
-    # are inside the lookup_interval_days cache window.
+    # Pick target libraries. `None` sentinel means "whatever the active
+    # library resolves to" — preserves pre-multi-library behavior on
+    # installs that haven't populated `_discovered_libraries` yet.
+    if content_type is not None:
+        target_slugs: list[str | None] = [
+            l["slug"] for l in state._discovered_libraries
+            if l.get("content_type") == content_type and l.get("slug")
+        ]
+        if not target_slugs:
+            return {"status": "ok", "due": 0,
+                    "message": f"No {content_type} libraries found."}
+    else:
+        active = get_active_library()
+        target_slugs = [active] if active else [None]
+
+    # Pre-flight: sum due-counts across every target library so the
+    # progress bar starts with a correct total instead of jumping as
+    # each library's scan kicks off. Switches active library per-read
+    # and restores on the way out — same pattern as `trigger_sync`.
     cache_sec = s.get("lookup_interval_days", 3) * 86400
     cutoff = time.time() - cache_sec
-    db = await get_db()
+    per_lib_due: list[tuple[str | None, int]] = []
+    total_due = 0
+    original_active = get_active_library()
     try:
-        # Match what run_full_lookup() actually iterates: skip orphan
-        # authors so the "due count" estimate isn't inflated by authors
-        # that the lookup loop will silently filter out.
-        row = await (await db.execute(
-            "SELECT COUNT(*) c FROM authors WHERE COALESCE(last_lookup_at,0) < ? AND id IN (SELECT DISTINCT author_id FROM books)",
-            (cutoff,),
-        )).fetchone()
-        due_count = row["c"] if row else 0
+        for slug in target_slugs:
+            if slug is not None and slug != get_active_library():
+                set_active_library(slug)
+            count = await _count_due_authors(cutoff)
+            per_lib_due.append((slug, count))
+            total_due += count
     finally:
-        await db.close()
-    if due_count == 0:
+        if original_active and original_active != get_active_library():
+            set_active_library(original_active)
+
+    if total_due == 0:
         state._lookup_progress = {
             "running": False, "checked": 0, "total": 0, "current_author": "",
             "current_book": "",
@@ -163,38 +205,69 @@ async def trigger_lookup():
         return {"status": "ok", "due": 0,
                 "message": "No authors due for scanning within the current cache window."}
 
-    state._lookup_progress = {"running": True, "checked": 0, "total": due_count, "current_author": "",
+    state._lookup_progress = {"running": True, "checked": 0, "total": total_due, "current_author": "",
                         "current_book": "",
                         "new_books": 0, "status": "scanning", "type": "lookup"}
-    def _progress(data):
-        state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
-                                 "current_author": data["current_author"], "new_books": data["new_books"]})
+
     async def _do():
+        cumulative_checked = 0
+        cumulative_new = 0
+        aggregated_timeouts: dict[str, int] = {}
+        original = get_active_library()
         try:
-            result = await run_full_lookup(on_progress=_progress)
+            for slug, count in per_lib_due:
+                if count == 0:
+                    continue
+                if slug is not None and slug != get_active_library():
+                    set_active_library(slug)
+
+                def _progress(data, _base_checked=cumulative_checked, _base_new=cumulative_new):
+                    state._lookup_progress.update({
+                        "checked": _base_checked + int(data.get("checked", 0)),
+                        "total": total_due,
+                        "current_author": data.get("current_author", ""),
+                        "new_books": _base_new + int(data.get("new_books", 0)),
+                    })
+
+                try:
+                    result = await run_full_lookup(on_progress=_progress)
+                except Exception as e:
+                    logger.error(f"Author scan error on library '{slug}': {e}")
+                    continue
+                cumulative_checked += int(result.get("authors_checked", 0))
+                cumulative_new += int(result.get("new_books", 0))
+                for src, n in (result.get("source_timeouts") or {}).items():
+                    aggregated_timeouts[src] = aggregated_timeouts.get(src, 0) + int(n)
+
             state._lookup_progress.update({
                 "running": False, "status": "complete",
-                "source_timeouts": result.get("source_timeouts") or {},
+                "source_timeouts": aggregated_timeouts,
+                "checked": cumulative_checked,
+                "new_books": cumulative_new,
             })
             try:
                 from app.discovery.notify import notify_scan_complete
                 await notify_scan_complete(
                     label="Source Scan",
-                    new_books=int(state._lookup_progress.get("new_books", 0)),
-                    authors_total=int(state._lookup_progress.get("total", 0) or 1),
+                    new_books=cumulative_new,
+                    authors_total=cumulative_checked or 1,
                 )
             except Exception:
                 logger.debug("source-scan notify failed", exc_info=True)
         except Exception as e:
             logger.error(f"Author scan error: {e}")
             state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+        finally:
+            if original and original != get_active_library():
+                set_active_library(original)
+
     state._lookup_task = asyncio.create_task(_do())
-    return {"status": "started"}
+    return {"status": "started", "due": total_due}
 
 
 @router.post("/lookup")
-async def trigger_lookup_alias():
-    return await trigger_lookup()
+async def trigger_lookup_alias(content_type: str | None = None):
+    return await trigger_lookup(content_type=content_type)
 
 
 @router.post("/lookup/cancel")
