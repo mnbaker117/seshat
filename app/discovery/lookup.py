@@ -1175,6 +1175,9 @@ _RX_TITLE_SERIES_IDX = re.compile(
 )
 
 
+_RX_BOOK_N_SUFFIX = re.compile(r"\s+(book|bk)\s+\d+(\.\d+)?\s*$", re.IGNORECASE)
+
+
 async def _title_to_series_pass(author_id: int):
     """Post-scan pass: link standalone books to series by title substring.
 
@@ -1184,6 +1187,21 @@ async def _title_to_series_pass(author_id: int):
 
     Example: "Super Sales on Super Heroes 4 (Super Sales on Super Heroes #4)"
     → match series "Super Sales on Super Heroes", extract index 4.
+
+    When the extracted index collides with an existing book at the same
+    `(series_id, series_index)` slot (the "Remnant Book 2" vs
+    "Remnant II" case), the pass dedups in place instead of creating
+    a duplicate row:
+
+      - If the existing row is OWNED (from Calibre), DELETE the
+        incoming standalone — user's curated row wins.
+      - If neither is owned, prefer the title WITHOUT a "Book N"
+        suffix — matches canonical convention ("Remnant II" beats
+        "Remnant Book 2").
+      - Otherwise, keep the existing row (lowest id wins on ties).
+
+    book_series_suggestions.book_id has ON DELETE CASCADE so dropped
+    loser rows auto-clean their suggestions.
     """
     db = await get_db()
     try:
@@ -1208,6 +1226,7 @@ async def _title_to_series_pass(author_id: int):
         series_list = sorted(series_rows, key=lambda r: len(r["name"]), reverse=True)
 
         linked = 0
+        deduped = 0
         for book in standalone:
             title = book["title"]
             title_lower = title.lower()
@@ -1233,6 +1252,68 @@ async def _title_to_series_pass(author_id: int):
                         except ValueError:
                             pass
 
+                # If we extracted an index, check whether another book
+                # already occupies that (series_id, series_index) slot.
+                # Ibdb + Hardcover regularly return "Remnant Book 2" as
+                # a standalone which we'd link to series "Remnant" at
+                # index 2 — but "Remnant II" (OWNED from Calibre) is
+                # already at index 2. Without this dedup the UI shows
+                # two books for the same series position.
+                if idx is not None:
+                    existing = await (await db.execute(
+                        "SELECT id, title, owned FROM books "
+                        "WHERE author_id = ? AND series_id = ? "
+                        "AND series_index = ? AND id != ?",
+                        (author_id, series["id"], idx, book["id"]),
+                    )).fetchone()
+                    if existing is not None:
+                        ex_owned = int(existing["owned"] or 0)
+                        ex_has_book_n = bool(
+                            _RX_BOOK_N_SUFFIX.search(existing["title"] or "")
+                        )
+                        incoming_has_book_n = bool(
+                            _RX_BOOK_N_SUFFIX.search(title or "")
+                        )
+                        # Compute winner: (owned, non-Book-N title, lowest id).
+                        # Higher tuple wins.
+                        ex_score = (ex_owned, 0 if ex_has_book_n else 1, -existing["id"])
+                        in_score = (0, 0 if incoming_has_book_n else 1, -book["id"])
+                        if ex_score >= in_score:
+                            # Existing wins — delete the incoming standalone.
+                            await db.execute(
+                                "DELETE FROM books WHERE id = ?", (book["id"],)
+                            )
+                            deduped += 1
+                            logger.info(
+                                f"    TITLE→SERIES DEDUP: dropped "
+                                f"'{title}' (id={book['id']}) — position "
+                                f"already held by '{existing['title']}' "
+                                f"(id={existing['id']}, owned={ex_owned}) "
+                                f"in series '{sname}' #{idx}"
+                            )
+                        else:
+                            # Incoming wins — delete the existing row,
+                            # then fall through to the UPDATE that links
+                            # the incoming standalone into the series.
+                            await db.execute(
+                                "DELETE FROM books WHERE id = ?", (existing["id"],)
+                            )
+                            deduped += 1
+                            logger.info(
+                                f"    TITLE→SERIES DEDUP: '{title}' "
+                                f"(id={book['id']}) replaces "
+                                f"'{existing['title']}' "
+                                f"(id={existing['id']}) at series "
+                                f"'{sname}' #{idx}"
+                            )
+                            await db.execute(
+                                "UPDATE books SET series_id = ?, "
+                                "series_index = ? WHERE id = ?",
+                                (series["id"], idx, book["id"]),
+                            )
+                            linked += 1
+                        break  # matched — done with this book
+
                 # Link the book to the series
                 if idx is not None:
                     await db.execute(
@@ -1251,11 +1332,12 @@ async def _title_to_series_pass(author_id: int):
                 )
                 break  # matched — don't try other series
 
-        if linked:
+        if linked or deduped:
             await db.commit()
             logger.info(
                 f"  Title→series pass: linked {linked} standalone "
-                f"book(s) to existing series for author_id={author_id}"
+                f"book(s) to existing series (and dedup'd {deduped} "
+                f"slot collision(s)) for author_id={author_id}"
             )
         return linked
     finally:

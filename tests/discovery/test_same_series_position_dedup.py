@@ -331,6 +331,116 @@ class TestInsertTimePrevention:
         assert rows[0]["title"] == "Remnant II"
         assert new == 0
 
+    async def test_title_series_pass_dedups_against_owned(self, discovery_db):
+        """
+        ibdb / Hardcover sometimes return a series book as a STANDALONE
+        (no series_index). `_merge_result` inserts it plainly, then
+        `_title_to_series_pass` assigns series+index from the title
+        pattern. Before this fix, that UPDATE could stick an incoming
+        "Remnant Book 2" at the same (Remnant, 2) slot as the user's
+        existing OWNED "Remnant II" — two rows at one series position.
+
+        After: the pass detects the collision and DELETEs the
+        incoming standalone instead of linking it.
+        """
+        from app.discovery.lookup import _title_to_series_pass
+
+        author_id = await _insert_author("Randi Darren")
+        series_id = await _insert_series("Remnant", author_id)
+        owned_id = await _insert_book(
+            "Remnant II", author_id,
+            series_id=series_id, series_index=2.0, owned=1, source="calibre",
+        )
+        # Simulate ibdb's post-insert standalone (no series_id/index yet).
+        standalone_id = await _insert_book(
+            "Remnant Book 2", author_id,
+            series_id=None, series_index=None, owned=0, source="ibdb",
+        )
+
+        await _title_to_series_pass(author_id)
+
+        rows = await _book_rows(author_id)
+        # Only the OWNED roman-numeral row survives at (series_id, 2).
+        assert len(rows) == 1
+        assert rows[0]["id"] == owned_id
+        assert rows[0]["title"] == "Remnant II"
+        # Confirm the incoming standalone row is actually gone.
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            gone = await (await db.execute(
+                "SELECT 1 FROM books WHERE id = ?", (standalone_id,),
+            )).fetchone()
+        finally:
+            await db.close()
+        assert gone is None
+
+    async def test_title_series_pass_prefers_non_book_n_title(
+        self, discovery_db,
+    ):
+        """
+        When neither collision candidate is OWNED, the canonical
+        (non-"Book N") title wins. Uses `_RX_TITLE_SERIES_IDX`-parsable
+        titles on both sides so the collision path actually fires
+        (roman numerals aren't extracted by that regex, so a
+        "Remnant II" standalone wouldn't get a series_index and
+        wouldn't collide).
+        """
+        from app.discovery.lookup import _title_to_series_pass
+
+        author_id = await _insert_author("Randi Darren")
+        series_id = await _insert_series("Remnant", author_id)
+        # Existing non-canonical ("Book N") already at index 2.
+        await _insert_book(
+            "Remnant Book 2", author_id,
+            series_id=series_id, series_index=2.0, owned=0, source="ibdb",
+        )
+        # Incoming standalone with a trailing-number pattern — regex
+        # extracts index 2 → collision → non-"Book N" title wins.
+        incoming_id = await _insert_book(
+            "Remnant 2", author_id,
+            series_id=None, series_index=None, owned=0, source="hardcover",
+        )
+
+        await _title_to_series_pass(author_id)
+
+        rows = await _book_rows(author_id)
+        assert len(rows) == 1
+        assert rows[0]["id"] == incoming_id
+        assert rows[0]["title"] == "Remnant 2"
+        assert rows[0]["series_index"] == 2.0
+
+    async def test_title_series_pass_no_collision_links_normally(
+        self, discovery_db,
+    ):
+        """
+        Sanity: when no existing row occupies the target (series_id,
+        series_index), the link proceeds normally — the fix mustn't
+        break the non-collision path.
+        """
+        from app.discovery.lookup import _title_to_series_pass
+
+        author_id = await _insert_author("Randi Darren")
+        series_id = await _insert_series("Remnant", author_id)
+        # Existing book at #1 only.
+        await _insert_book(
+            "Remnant", author_id,
+            series_id=series_id, series_index=1.0, owned=1,
+        )
+        # Incoming standalone matching series position #4 — empty slot.
+        standalone_id = await _insert_book(
+            "Remnant Book 4", author_id,
+            series_id=None, series_index=None, owned=0, source="ibdb",
+        )
+
+        await _title_to_series_pass(author_id)
+
+        rows = await _book_rows(author_id)
+        by_idx = {r["series_index"]: r for r in rows}
+        assert 1.0 in by_idx
+        assert 4.0 in by_idx
+        assert by_idx[4.0]["id"] == standalone_id
+
     async def test_distinct_position_still_inserts(self, discovery_db):
         """
         Incoming book at a series position not yet occupied must still
