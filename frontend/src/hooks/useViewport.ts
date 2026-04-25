@@ -19,6 +19,13 @@ export interface Viewport {
   isMobile: boolean;
   isTablet: boolean;
   isDesktop: boolean;
+  // True on devices with a coarse pointer (touch). Width-based
+  // breakpoints alone misclassify large iPads — iPad Pro 12.9"
+  // landscape is 1366px and falls in `isDesktop`, but it's still a
+  // touch device and wants the mobile nav. Detected via the
+  // `(pointer: coarse)` media query, which all touchscreen tablets
+  // and phones report; desktop browsers with a mouse do not.
+  isTouch: boolean;
 }
 
 function read(): Viewport {
@@ -31,14 +38,20 @@ function read(): Viewport {
       isMobile: false,
       isTablet: false,
       isDesktop: true,
+      isTouch: false,
     };
   }
   const w = window.innerWidth;
+  const isTouch =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(pointer: coarse)").matches
+      : false;
   return {
     width: w,
     isMobile: w <= MOBILE_MAX,
     isTablet: w > MOBILE_MAX && w <= TABLET_MAX,
     isDesktop: w > TABLET_MAX,
+    isTouch,
   };
 }
 
@@ -58,9 +71,18 @@ export function useViewport(): Viewport {
     };
     window.addEventListener("resize", update);
     window.addEventListener("orientationchange", update);
+    // Pointer-class can change at runtime (e.g. iPad Magic Keyboard
+    // attached/detached, plug a mouse into a Surface). Listen for it
+    // so the nav swaps as the device changes input mode.
+    const mq =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(pointer: coarse)")
+        : null;
+    mq?.addEventListener?.("change", update);
     return () => {
       window.removeEventListener("resize", update);
       window.removeEventListener("orientationchange", update);
+      mq?.removeEventListener?.("change", update);
       if (raf) cancelAnimationFrame(raf);
     };
   }, []);

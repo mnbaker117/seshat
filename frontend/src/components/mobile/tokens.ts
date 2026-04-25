@@ -71,8 +71,11 @@ export function scaleFor(vp: Viewport): Scale {
   return vp.isTablet ? TABLET : PHONE;
 }
 
-// True for any "mobile codepath" viewport. Phone OR iPad. Components
-// that only have a desktop variant + a mobile variant key off this.
+// True for any "mobile codepath" viewport. Phone OR iPad OR any
+// touch device that's wider than our tablet breakpoint (e.g. an
+// iPad Pro 12.9" in landscape — 1366px, would otherwise classify as
+// desktop). Components that only have a desktop variant + a mobile
+// variant key off this.
 export function useMobileCodepath(vp: Viewport): boolean {
-  return vp.isMobile || vp.isTablet;
+  return vp.isMobile || vp.isTablet || vp.isTouch;
 }

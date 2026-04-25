@@ -161,10 +161,12 @@ function SeshatApp() {
   const t = useTheme();
   const { cycle, themeName } = useThemeControls();
   const vp = useViewport();
-  // Phones AND iPads get the hamburger nav. The desktop horizontal
-  // bar only fits comfortably above ~1024px; iPads and landscape
-  // phones overflowed when this was gated on isMobile only.
-  const isMobile = vp.isMobile || vp.isTablet;
+  // Any touch-class viewport gets the hamburger nav. Width alone
+  // misclassified iPads (an iPad Pro 12.9" landscape is 1366px and
+  // would otherwise be "desktop"); the pointer:coarse media query
+  // covers every iPad/iPhone regardless of orientation while still
+  // letting a mouse-pointer 1024-1366px laptop use the desktop nav.
+  const isMobile = vp.isMobile || vp.isTablet || vp.isTouch;
   const [navOpen, setNavOpen] = useState(false);
 
   const [auth, setAuth] = useState<AuthState>({ loading: true, authenticated: false, firstRun: false });
