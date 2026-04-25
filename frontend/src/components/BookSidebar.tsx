@@ -645,9 +645,8 @@ export function BookSidebar({
             style={{
               position: "relative",
               display: "block",
-              margin: "0 auto",
-              maxWidth: "100%",
-              maxHeight: 300,
+              width: "100%",
+              height: "auto",
               objectFit: "contain",
               zIndex: 1,
               cursor: "zoom-in",
