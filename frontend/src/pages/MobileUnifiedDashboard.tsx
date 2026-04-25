@@ -261,13 +261,15 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
       }}
     >
       {/* ─── Pipeline health pills ─────────────────────────── */}
+      {/* Wrap to a second line on narrow phones — all four statuses
+          should be visible at a glance, not hidden behind a horizontal
+          scroll the user has to discover. */}
       <div
         style={{
           display: "flex",
-          gap: 8,
-          overflowX: "auto",
+          flexWrap: "wrap",
+          gap: 6,
           padding: "4px 2px",
-          scrollbarWidth: "none",
         }}
       >
         <MobileHealthPill label="Dispatcher" ok={dispatcherOk} />
@@ -364,7 +366,7 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
       </MobileSection>
 
       {/* ─── Hermes: MAM + budget + recent activity ────────── */}
-      <MobileSection title="Hermes" subtitle="Pipeline detail" defaultOpen={false}>
+      <MobileSection title="Hermes" subtitle="Pipeline detail" defaultOpen={true}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {mam?.username && (
             <MobileMamAccount
@@ -438,7 +440,7 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
       </MobileSection>
 
       {/* ─── Pipeline quick actions ────────────────────────── */}
-      <MobileSection title="Pipeline" defaultOpen={false}>
+      <MobileSection title="Pipeline" defaultOpen={true}>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <MobileRow
             title="Review"

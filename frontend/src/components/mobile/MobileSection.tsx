@@ -117,8 +117,17 @@ export function MobileSection({
         {collapsible && (
           <span
             style={{
-              fontSize: s.type.body,
-              color: t.tg,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: TAP.icon,
+              height: TAP.icon,
+              fontSize: s.type.heading,
+              fontWeight: 700,
+              color: t.td,
+              background: t.bg3,
+              border: `1px solid ${t.borderL}`,
+              borderRadius: RADIUS.full,
               flexShrink: 0,
               transform: open ? "rotate(0deg)" : "rotate(-90deg)",
               transition: "transform 0.15s",
