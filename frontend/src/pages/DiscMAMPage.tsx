@@ -19,6 +19,7 @@ import { api } from "../api";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
+import { BookGridSkeleton } from "../components/Skeleton";
 import { VT, type ViewMode } from "../components/VT";
 import { SearchBar } from "../components/SearchBar";
 import { BGrid, BList } from "../components/BookViews";
@@ -989,7 +990,7 @@ export default function MAMPage({ onNav }: { onNav: NavFn }) {
 
       {/* Book list */}
       {ld ? (
-        <Load />
+        vm === "grid" ? <BookGridSkeleton /> : <Load />
       ) : books.length === 0 ? (
         <div style={{ textAlign: "center", padding: 40, color: t.tg }}>
           No books in this section

@@ -13,6 +13,7 @@ import { api } from "../api";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
+import { BookGridSkeleton } from "../components/Skeleton";
 import { VT, type ViewMode } from "../components/VT";
 import { SearchBar } from "../components/SearchBar";
 import { Section } from "../components/Section";
@@ -642,7 +643,11 @@ export default function BooksPage({
       </div>
 
       {ld ? (
-        <Load />
+        // Grid view shows BookCardSkeleton stand-ins; list view falls
+        // back to the spinner since the table rows aren't worth a
+        // bespoke skeleton (single column of dense text wouldn't read
+        // as "still loading" the way card placeholders do).
+        vm === "grid" ? <BookGridSkeleton /> : <Load />
       ) : (
         <>
           {content}
