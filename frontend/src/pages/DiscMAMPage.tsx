@@ -25,6 +25,9 @@ import { SearchBar } from "../components/SearchBar";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 import { ClearMenu } from "../components/ClearMenu";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileMAMPage from "./MobileMAMPage";
 import type {
   Book,
   BookAction,
@@ -128,7 +131,16 @@ interface TabDef {
   desc: string;
 }
 
-export default function MAMPage({ onNav }: { onNav: NavFn }) {
+export default function MAMPage(props: { onNav: NavFn }) {
+  // Mobile codepath catches phones, iPads, and any touch device.
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) {
+    return <MobileMAMPage {...props} />;
+  }
+  return <DesktopMAMPage {...props} />;
+}
+
+function DesktopMAMPage({ onNav }: { onNav: NavFn }) {
   const t = useTheme();
   void onNav;
 
