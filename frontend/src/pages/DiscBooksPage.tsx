@@ -22,6 +22,9 @@ import { BookSidebar } from "../components/BookSidebar";
 import { ClearMenu } from "../components/ClearMenu";
 import { toast } from "../lib/toast";
 import { ExportModal } from "../components/ExportModal";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileBooksPage from "./MobileBooksPage";
 import type {
   Book,
   BookAction,
@@ -68,7 +71,16 @@ interface ScanSourcesResponse {
 
 type ClearType = "source" | "mam" | "both";
 
-export default function BooksPage({
+export default function BooksPage(props: BooksPageProps) {
+  // Mobile codepath catches phones, iPads, and any touch device.
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) {
+    return <MobileBooksPage {...props} />;
+  }
+  return <DesktopBooksPage {...props} />;
+}
+
+function DesktopBooksPage({
   title,
   apiPath = "/books",
   extraParams = {},

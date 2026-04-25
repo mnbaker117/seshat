@@ -33,6 +33,9 @@ export type { MobilePaginationProps } from "./MobilePagination";
 export { MobileSection } from "./MobileSection";
 export type { MobileSectionProps } from "./MobileSection";
 
+export { MobileBookCard } from "./MobileBookCard";
+export type { MobileBookCardProps } from "./MobileBookCard";
+
 export {
   TAP,
   RADIUS,
