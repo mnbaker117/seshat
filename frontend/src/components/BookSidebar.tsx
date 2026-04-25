@@ -15,6 +15,7 @@ import { useViewport } from "../hooks/useViewport";
 import { api } from "../api";
 import { Ic } from "../icons";
 import { fmtDate } from "../lib/format";
+import { openCoverLightbox } from "../lib/lightbox";
 import { toast } from "../lib/toast";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
@@ -602,6 +603,8 @@ export function BookSidebar({
         // are. The gradient fades from transparent at the top
         // (lets the blurred backdrop show through) to bg2 at the
         // bottom (clean handoff into the metadata rows below).
+        // Click on the foreground cover opens a PhotoSwipe lightbox
+        // for full-size view + zoom + pan.
         <div
           style={{
             position: "relative",
@@ -634,6 +637,8 @@ export function BookSidebar({
           <img
             src={coverSrc}
             alt=""
+            onClick={() => openCoverLightbox(coverSrc)}
+            title="Click to enlarge"
             style={{
               position: "relative",
               display: "block",
@@ -642,6 +647,7 @@ export function BookSidebar({
               maxHeight: 300,
               objectFit: "contain",
               zIndex: 1,
+              cursor: "zoom-in",
             }}
           />
         </div>
