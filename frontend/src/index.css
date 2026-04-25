@@ -19,6 +19,18 @@ button:active:not(:disabled) { transform: scale(0.97); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 ::selection { background: #6fa8ff44; }
+
+/* Book-card hover lift — desktop only. The translateY + shadow
+ * combo signals "this is interactive" without relying on the cursor
+ * landing in the right spot. Touch devices skip this entirely
+ * (pointer:fine media query) — hover-lift on touch produces a
+ * sticky-elevated card after every tap, which feels broken. */
+@media (hover: hover) and (pointer: fine) {
+  .bcard:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  }
+}
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: #0e0f13; }
 ::-webkit-scrollbar-thumb { background: #2a2e3a; border-radius: 4px; }
