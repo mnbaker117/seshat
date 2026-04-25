@@ -611,8 +611,21 @@ export function BookSidebar({
           style={{
             position: "relative",
             width: "100%",
+            // aspect-ratio establishes the slot shape (2:3 portrait
+            // is the standard book-cover ratio). On mobile / narrow
+            // sidebars the natural-aspect height fits cleanly. On
+            // desktop sidebars (~370px wide) 2:3 yields ~555px tall,
+            // which is the right "feels like a cover" size — capped
+            // at 600 so absurdly wide sidebars don't produce a
+            // wall-of-cover before the metadata rows.
             aspectRatio: "2 / 3",
-            maxHeight: 480,
+            maxHeight: 600,
+            // Sidebar is `display: flex, flexDirection: column` —
+            // without flex-shrink:0 the slot was getting compressed
+            // by the surrounding metadata rows when the sidebar
+            // viewport was tight. Lock the slot at its computed
+            // size; the sidebar already scrolls.
+            flexShrink: 0,
             borderRadius: 8,
             overflow: "hidden",
             background: t.bg4,
