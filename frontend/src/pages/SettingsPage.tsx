@@ -5,6 +5,9 @@ import { Spin } from "../components/Spin";
 import { MetadataSourcesPanel } from "../components/MetadataSourcesPanel";
 import { api } from "../api";
 import { useTheme } from "../theme";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileSettingsPage from "./MobileSettingsPage";
 
 type S = Record<string, unknown>;
 
@@ -303,6 +306,12 @@ const SECTIONS = [
 // ── Main Settings Page ────────────────────────────────────────
 
 export default function SettingsPage() {
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) return <MobileSettingsPage />;
+  return <DesktopSettingsPage />;
+}
+
+function DesktopSettingsPage() {
   const t = useTheme();
   const [s, setS] = useState<S | null>(null);
   const [creds, setCreds] = useState<CredItem[]>([]);
