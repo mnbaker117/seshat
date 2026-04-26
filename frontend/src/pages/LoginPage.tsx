@@ -1,11 +1,17 @@
 // LoginPage handles both first-run admin setup and the regular
 // login flow. The mode is driven by the `firstRun` prop, which the
 // /api/auth/check call resolves before this component renders.
+//
+// Mobile rendering: inputs bump to 16px font (no iOS Safari zoom),
+// the submit button uses the touch-sized MobileBtn, and the form
+// card relaxes its max-width.
 import { useState, type FormEvent } from "react";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { api, ApiError } from "../api";
 import { useTheme } from "../theme";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath, MobileBtn } from "../components/mobile";
 
 interface Props {
   firstRun: boolean;
@@ -14,6 +20,8 @@ interface Props {
 
 export default function LoginPage({ firstRun, onLoginSuccess }: Props) {
   const theme = useTheme();
+  const vp = useViewport();
+  const mobile = useMobileCodepath(vp);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -62,9 +70,9 @@ export default function LoginPage({ firstRun, onLoginSuccess }: Props) {
           background: theme.bg2,
           border: `1px solid ${theme.border}`,
           borderRadius: 14,
-          padding: 32,
+          padding: mobile ? 22 : 32,
           width: "100%",
-          maxWidth: 380,
+          maxWidth: mobile ? 440 : 380,
           animation: "slide-up 0.25s ease-out",
         }}
       >
@@ -96,6 +104,7 @@ export default function LoginPage({ firstRun, onLoginSuccess }: Props) {
           onChange={setUsername}
           autoFocus
           autoComplete="username"
+          mobile={mobile}
         />
         <Field
           label="Password"
@@ -103,6 +112,7 @@ export default function LoginPage({ firstRun, onLoginSuccess }: Props) {
           value={password}
           onChange={setPassword}
           autoComplete={firstRun ? "new-password" : "current-password"}
+          mobile={mobile}
         />
         {firstRun && (
           <Field
@@ -111,6 +121,7 @@ export default function LoginPage({ firstRun, onLoginSuccess }: Props) {
             value={confirm}
             onChange={setConfirm}
             autoComplete="new-password"
+            mobile={mobile}
           />
         )}
 
@@ -131,14 +142,26 @@ export default function LoginPage({ firstRun, onLoginSuccess }: Props) {
         )}
 
         <div style={{ marginTop: 20 }}>
-          <Btn
-            type="submit"
-            variant="primary"
-            disabled={busy || !username || !password}
-            fullWidth
-          >
-            {busy ? <Spin size={16} /> : firstRun ? "Create account" : "Sign in"}
-          </Btn>
+          {mobile ? (
+            <MobileBtn
+              type="submit"
+              variant="primary"
+              primary
+              disabled={busy || !username || !password}
+              fullWidth
+            >
+              {busy ? "…" : firstRun ? "Create account" : "Sign in"}
+            </MobileBtn>
+          ) : (
+            <Btn
+              type="submit"
+              variant="primary"
+              disabled={busy || !username || !password}
+              fullWidth
+            >
+              {busy ? <Spin size={16} /> : firstRun ? "Create account" : "Sign in"}
+            </Btn>
+          )}
         </div>
       </form>
     </div>
@@ -152,6 +175,7 @@ function Field({
   type = "text",
   autoFocus,
   autoComplete,
+  mobile,
 }: {
   label: string;
   value: string;
@@ -159,14 +183,15 @@ function Field({
   type?: string;
   autoFocus?: boolean;
   autoComplete?: string;
+  mobile?: boolean;
 }) {
   const theme = useTheme();
   return (
     <label
       style={{
         display: "block",
-        marginBottom: 12,
-        fontSize: 12,
+        marginBottom: mobile ? 14 : 12,
+        fontSize: mobile ? 13 : 12,
         color: theme.textDim,
         fontWeight: 600,
       }}
@@ -182,12 +207,13 @@ function Field({
           display: "block",
           width: "100%",
           marginTop: 6,
-          padding: "10px 12px",
+          padding: mobile ? "12px 14px" : "10px 12px",
+          minHeight: mobile ? 44 : undefined,
           borderRadius: 8,
           border: `1px solid ${theme.border}`,
           background: theme.bg3,
           color: theme.text,
-          fontSize: 14,
+          fontSize: mobile ? 16 : 14,
           outline: "none",
         }}
       />
