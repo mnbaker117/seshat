@@ -283,13 +283,17 @@ function SeshatApp() {
   return (
     <div style={{ minHeight: "100vh", background: t.bg, color: t.text }}>
       {/* ─── Navbar — desktop horizontal, mobile compact + drawer ─── */}
+      {/* paddingTop: env(safe-area-inset-top) adds the iOS PWA notch
+          inset so the navbar doesn't tuck under the status bar in
+          standalone mode. Falls back to 0 outside iOS standalone. */}
       <nav style={{
         background: t.bg2,
         borderBottom: `1px solid ${t.border}`,
         display: "flex",
         alignItems: "center",
         padding: isMobile ? "0 12px" : "0 80px",
-        height: 52,
+        paddingTop: "env(safe-area-inset-top, 0px)",
+        height: `calc(52px + env(safe-area-inset-top, 0px))`,
         position: "sticky",
         top: 0,
         zIndex: 100,
