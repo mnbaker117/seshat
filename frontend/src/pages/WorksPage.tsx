@@ -17,6 +17,9 @@ import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
 import { Spin } from "../components/Spin";
 import { toast } from "../lib/toast";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileWorksPage from "./MobileWorksPage";
 
 interface WorkLinkOut {
   id: number;
@@ -62,6 +65,12 @@ interface RebuildResult {
 type SourceFilter = "all" | "auto" | "manual";
 
 export default function WorksPage() {
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) return <MobileWorksPage />;
+  return <DesktopWorksPage />;
+}
+
+function DesktopWorksPage() {
   const t = useTheme();
   const [works, setWorks] = useState<WorkSummary[]>([]);
   const [total, setTotal] = useState(0);

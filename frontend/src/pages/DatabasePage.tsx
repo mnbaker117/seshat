@@ -14,6 +14,9 @@ import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { api } from "../api";
 import { useTheme } from "../theme";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileDatabasePage from "./MobileDatabasePage";
 
 interface TableEntry {
   name: string;
@@ -59,6 +62,12 @@ type RowKey = string;
 type PendingEdits = Record<RowKey, Record<string, unknown>>;
 
 export default function DatabasePage() {
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) return <MobileDatabasePage />;
+  return <DesktopDatabasePage />;
+}
+
+function DesktopDatabasePage() {
   const t = useTheme();
   const [tables, setTables] = useState<TableEntry[] | null>(null);
   const [selected, setSelected] = useState<string>("");

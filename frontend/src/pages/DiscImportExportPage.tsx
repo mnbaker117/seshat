@@ -13,6 +13,9 @@ import { api } from "../api";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { ExportModal } from "../components/ExportModal";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileImportExportPage from "./MobileImportExportPage";
 
 // Preview-row status set emitted by /discovery/books/import-preview
 // plus "added" — applied client-side after a successful add so the
@@ -51,6 +54,12 @@ interface ImportAddResponse {
 }
 
 export default function ImportExportPage() {
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) return <MobileImportExportPage />;
+  return <DesktopImportExportPage />;
+}
+
+function DesktopImportExportPage() {
   const t = useTheme();
   const [urls, setUrls] = useState("");
   const [results, setResults] = useState<ImportPreviewRow[] | null>(null);

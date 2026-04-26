@@ -12,6 +12,9 @@ import { Spin } from "../components/Spin";
 import { api } from "../api";
 import { useTheme } from "../theme";
 import { useVisibleInterval } from "../hooks/useVisibleInterval";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileLogsPage from "./MobileLogsPage";
 
 interface LogEntry {
   ts: string;
@@ -33,6 +36,12 @@ interface LogsResponse {
 type Tab = "all" | "announces" | "application" | "irc" | "scans";
 
 export default function LogsPage() {
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) return <MobileLogsPage />;
+  return <DesktopLogsPage />;
+}
+
+function DesktopLogsPage() {
   const theme = useTheme();
   const [tab, setTab] = useState<Tab>("all");
   const [entries, setEntries] = useState<LogEntry[] | null>(null);

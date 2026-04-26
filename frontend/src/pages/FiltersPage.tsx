@@ -14,6 +14,9 @@ import { Section } from "../components/Section";
 import { Spin } from "../components/Spin";
 import { api } from "../api";
 import { useTheme } from "../theme";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileFiltersPage from "./MobileFiltersPage";
 
 interface CategoryEntry {
   id: string;
@@ -38,6 +41,12 @@ interface PatchResponse {
 }
 
 export default function FiltersPage() {
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) return <MobileFiltersPage />;
+  return <DesktopFiltersPage />;
+}
+
+function DesktopFiltersPage() {
   const theme = useTheme();
   const [enums, setEnums] = useState<EnumsResponse | null>(null);
   const [settings, setSettings] = useState<SettingsMap | null>(null);
