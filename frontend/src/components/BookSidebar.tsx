@@ -12,6 +12,7 @@
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme";
 import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "./mobile";
 import { api } from "../api";
 import { Ic } from "../icons";
 import { fmtDate } from "../lib/format";
@@ -119,7 +120,11 @@ export function BookSidebar({
   onEdit,
 }: BookSidebarProps) {
   const t = useTheme();
-  const { isMobile } = useViewport();
+  const vp = useViewport();
+  // Use the full mobile codepath (phones + iPads + any touch device)
+  // so iPad portrait doesn't get the cramped 420px side panel. Width
+  // alone misses iPad landscape (>1024px); pointer:coarse covers it.
+  const isMobile = useMobileCodepath(vp);
   const [mounted, setMounted] = useState(false);
   const [editing, setEditing] = useState(false);
   const [ef, setEf] = useState<EditFields>({

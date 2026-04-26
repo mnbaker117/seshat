@@ -4,11 +4,16 @@
 // finish (save + rescan + initial sync). App.tsx mounts this component
 // when `GET /api/discovery/platform` reports `first_run: true`, so the
 // runtime-mode + OS info is baked into the UX branches here.
+//
+// Mobile rendering: tightens padding, bumps input font to 16px (no
+// iOS Safari zoom), and full-width buttons on the step nav row.
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "./mobile";
 
 interface SetupWizardProps {
   onComplete: () => void;
@@ -71,6 +76,8 @@ interface FinishResult {
 
 export function SetupWizard({ onComplete }: SetupWizardProps) {
   const t = useTheme();
+  const vp = useViewport();
+  const mobile = useMobileCodepath(vp);
   const [step, setStep] = useState(0);
   const [platform, setPlatform] = useState<PlatformInfo | null>(null);
 
@@ -181,12 +188,13 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
   // Input style helper.
   const ist: React.CSSProperties = {
-    padding: "10px 14px",
+    padding: mobile ? "12px 14px" : "10px 14px",
+    minHeight: mobile ? 44 : undefined,
     borderRadius: 8,
     border: `1px solid ${t.border}`,
     background: t.inp,
     color: t.text2,
-    fontSize: 14,
+    fontSize: mobile ? 16 : 14,
     outline: "none",
     width: "100%",
   };
@@ -267,7 +275,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           background: t.bg2,
           border: `1px solid ${t.border}`,
           borderRadius: 16,
-          padding: "40px 36px",
+          padding: mobile ? "24px 18px" : "40px 36px",
           boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
         }}
       >
