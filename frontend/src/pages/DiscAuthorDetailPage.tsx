@@ -22,6 +22,9 @@ import { Section } from "../components/Section";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 import { toast } from "../lib/toast";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileAuthorDetailPage from "./MobileAuthorDetailPage";
 import type {
   Author,
   AuthorsResponse,
@@ -269,7 +272,16 @@ interface LibraryBlock {
   data: AuthorDetail;
 }
 
-export default function AuthorDetailPage({
+export default function AuthorDetailPage(props: AuthorDetailPageProps) {
+  // Mobile codepath catches phones, iPads, and any touch device.
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) {
+    return <MobileAuthorDetailPage {...props} />;
+  }
+  return <DesktopAuthorDetailPage {...props} />;
+}
+
+function DesktopAuthorDetailPage({
   authorId,
   onNav,
 }: AuthorDetailPageProps) {

@@ -11,6 +11,9 @@ import { SearchBar } from "../components/SearchBar";
 import { VT, type ViewMode } from "../components/VT";
 import { PB } from "../components/PB";
 import { toast } from "../lib/toast";
+import { useViewport } from "../hooks/useViewport";
+import { useMobileCodepath } from "../components/mobile";
+import MobileAuthorsPage from "./MobileAuthorsPage";
 import type {
   Author,
   AuthorsResponse,
@@ -47,7 +50,16 @@ function getLetterKey(name: string): string {
   return /[A-Z]/.test(ch) ? ch : "#";
 }
 
-export default function AuthorsPage({ onNav }: { onNav: NavFn }) {
+export default function AuthorsPage(props: { onNav: NavFn }) {
+  // Mobile codepath catches phones, iPads, and any touch device.
+  const vp = useViewport();
+  if (useMobileCodepath(vp)) {
+    return <MobileAuthorsPage {...props} />;
+  }
+  return <DesktopAuthorsPage {...props} />;
+}
+
+function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   const t = useTheme();
   const [aus, setAus] = useState<Author[]>([]);
   const [ld, setLd] = useState(true);
