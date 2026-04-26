@@ -18,6 +18,7 @@ import {
   MobileBtn,
   MobileSection,
   MobileRow,
+  MobileBackButton,
 } from "../components/mobile";
 import {
   MobileLibraryHero,
@@ -260,6 +261,7 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
         gap: 12,
       }}
     >
+      <MobileBackButton />
       {/* ─── Pipeline health pills ─────────────────────────── */}
       {/* Wrap to a second line on narrow phones — all four statuses
           should be visible at a glance, not hidden behind a horizontal

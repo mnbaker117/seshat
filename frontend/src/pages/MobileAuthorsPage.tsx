@@ -17,6 +17,7 @@ import {
   MobileSheet,
   MobileRow,
   MobileBadge,
+  MobileBackButton,
 } from "../components/mobile";
 import type {
   Author,
@@ -87,6 +88,7 @@ export default function MobileAuthorsPage({ onNav }: { onNav: NavFn }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       {/* Title + count */}
       <div
         style={{

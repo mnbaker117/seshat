@@ -21,6 +21,7 @@ import {
   MobileBtn,
   MobileSheet,
   MobileRow,
+  MobileBackButton,
 } from "../components/mobile";
 import type {
   Book,
@@ -301,6 +302,7 @@ export default function MobileMAMPage({ onNav }: { onNav: NavFn }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       {/* Page title */}
       <div
         style={{

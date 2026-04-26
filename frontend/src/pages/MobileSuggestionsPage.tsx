@@ -11,6 +11,7 @@ import {
   MobileChip,
   MobileBtn,
   MobileBadge,
+  MobileBackButton,
 } from "../components/mobile";
 import type { NavFn } from "../types";
 
@@ -103,6 +104,7 @@ export default function MobileSuggestionsPage({ onNav }: { onNav: NavFn }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       <div>
         <h1
           style={{

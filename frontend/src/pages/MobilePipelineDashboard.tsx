@@ -14,6 +14,7 @@ import {
   MobileSection,
   MobileRow,
   MobileBtn,
+  MobileBackButton,
 } from "../components/mobile";
 import {
   MobileHealthPill,
@@ -150,6 +151,7 @@ export default function MobilePipelineDashboard({ onNav }: DashboardProps) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       {error && (
         <div
           style={{

@@ -17,6 +17,7 @@ import {
   MobileBookCard,
   MobileBadge,
   MobileInput,
+  MobileBackButton,
 } from "../components/mobile";
 import type {
   Author,
@@ -62,13 +63,11 @@ interface MobileAuthorDetailPageProps {
 // expands so a long author page stays cheap.
 function MobileSeriesSection({
   series,
-  authorId,
   librarySlug,
   onBookClick,
   showMamLink,
 }: {
   series: Series;
-  authorId: number;
   librarySlug?: string | null;
   onBookClick: (b: Book) => void;
   showMamLink: boolean;
@@ -77,20 +76,17 @@ function MobileSeriesSection({
   const [ld, setLd] = useState(false);
 
   const load = useCallback(() => {
+    if (bks) return;
     setLd(true);
-    const slug = librarySlug
-      ? `&slug=${encodeURIComponent(librarySlug)}`
-      : "";
+    const qs = librarySlug ? `?slug=${encodeURIComponent(librarySlug)}` : "";
     api
-      .get<{ books: Book[] }>(
-        `/discovery/series/${series.id}/books?author_id=${authorId}${slug}`,
-      )
-      .then((r) => {
-        setBks(r.books || []);
+      .get<{ books?: Book[] }>(`/discovery/series/${series.id}${qs}`)
+      .then((d) => {
+        setBks(d.books || []);
         setLd(false);
       })
       .catch(() => setLd(false));
-  }, [series.id, authorId, librarySlug]);
+  }, [series.id, librarySlug, bks]);
 
   // Triggered by MobileSection's open state — we use the lazy
   // pattern by rendering a tiny effect inside the children that
@@ -375,7 +371,6 @@ export default function MobileAuthorDetailPage({
           <MobileSeriesSection
             key={`${block.slug}-${s.id}`}
             series={s}
-            authorId={block.data.id}
             librarySlug={block.slug}
             onBookClick={setSb}
             showMamLink={mamOn}
@@ -410,6 +405,7 @@ export default function MobileAuthorDetailPage({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       {/* Hero card */}
       <div
         style={{

@@ -36,6 +36,8 @@ export type { MobileSectionProps } from "./MobileSection";
 export { MobileBookCard } from "./MobileBookCard";
 export type { MobileBookCardProps } from "./MobileBookCard";
 
+export { MobileBackButton } from "./MobileBackButton";
+
 export {
   TAP,
   RADIUS,

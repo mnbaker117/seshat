@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useTheme } from "../theme";
 import { BookSidebar } from "../components/BookSidebar";
-import { MobileBookCard } from "../components/mobile";
+import { MobileBookCard, MobileBackButton } from "../components/mobile";
 import type { Book, BookAction, BooksResponse, NavFn } from "../types";
 
 export default function MobileHiddenPage({ onNav }: { onNav: NavFn }) {
@@ -46,6 +46,7 @@ export default function MobileHiddenPage({ onNav }: { onNav: NavFn }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       <div
         style={{
           display: "flex",

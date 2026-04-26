@@ -24,6 +24,7 @@ import {
   MobileSheet,
   MobileBtn,
   MobileRow,
+  MobileBackButton,
 } from "../components/mobile";
 import type {
   Book,
@@ -147,6 +148,7 @@ export default function MobileBooksPage({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       {/* Page title + count */}
       <div
         style={{

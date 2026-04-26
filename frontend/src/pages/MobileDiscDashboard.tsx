@@ -22,6 +22,7 @@ import {
   MobileBtn,
   MobileSection,
   MobileRow,
+  MobileBackButton,
 } from "../components/mobile";
 import {
   MobileLibraryHero,
@@ -143,6 +144,7 @@ export default function MobileDiscDashboard({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <MobileBackButton />
       {/* Library switcher — only shown when there's more than one library. */}
       {libs.length > 1 && switchLib && (
         <select
