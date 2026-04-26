@@ -118,6 +118,24 @@ export default function MobileReviewPage() {
     }
   };
 
+  const reEnrich = async (
+    id: number,
+    metadata: Record<string, unknown>,
+  ): Promise<boolean> => {
+    setBusyId(id);
+    setError(null);
+    try {
+      await api.post(`/v1/review/${id}/re-enrich`, { metadata });
+      await refresh();
+      return true;
+    } catch (e) {
+      setError(String(e));
+      return false;
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const bulkAction = async (action: "approve" | "reject") => {
     if (!items || items.length === 0) return;
     if (
@@ -213,6 +231,7 @@ export default function MobileReviewPage() {
             onApprove={approve}
             onReject={reject}
             onSave={saveEdits}
+            onReEnrich={reEnrich}
             busy={busyId === item.id}
           />
         ))
@@ -226,12 +245,17 @@ function ReviewCard({
   onApprove,
   onReject,
   onSave,
+  onReEnrich,
   busy,
 }: {
   item: ReviewItem;
   onApprove: (id: number, metadata?: Record<string, unknown>) => void;
   onReject: (id: number) => void;
   onSave: (id: number, metadata: Record<string, unknown>) => void;
+  onReEnrich: (
+    id: number,
+    metadata: Record<string, unknown>,
+  ) => Promise<boolean>;
   busy: boolean;
 }) {
   const t = useTheme();
@@ -261,6 +285,28 @@ function ReviewCard({
       metadata.series_index = parseInt(edits.series_index) || null;
     onSave(item.id, metadata);
     setEditing(false);
+  };
+
+  const reEnrich = async () => {
+    // Use the current edits if the user has the form open; otherwise
+    // seed the re-scrape with the saved metadata so the search has
+    // something to anchor on.
+    const seed: Record<string, unknown> = editing
+      ? { ...edits }
+      : {
+          title: metaString(item, "title"),
+          author: metaString(item, "author"),
+          series: metaString(item, "series"),
+          isbn: metaString(item, "isbn"),
+        };
+    if (
+      !confirm(
+        "Re-scrape metadata from sources using the current title/author? This will overwrite the enriched metadata and you'll review again.",
+      )
+    )
+      return;
+    const ok = await onReEnrich(item.id, seed);
+    if (ok) setEditing(false);
   };
 
   return (
@@ -416,11 +462,20 @@ function ReviewCard({
         </MobileSection>
       )}
 
-      {/* Action buttons */}
-      <div style={{ display: "grid", gridTemplateColumns: editing ? "1fr 1fr" : "1fr 1fr 1fr", gap: 8 }}>
+      {/* Secondary action chips — Edit toggle + Re-enrich. Re-enrich
+          is available whether the form is open or not so the user
+          can re-scrape with edits as the seed without committing. */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {!editing && (
           <MobileChip onClick={() => setEditing(true)}>Edit</MobileChip>
         )}
+        <MobileChip onClick={reEnrich} leadingIcon="↻">
+          Re-enrich
+        </MobileChip>
+      </div>
+
+      {/* Primary action buttons */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <MobileBtn
           variant="primary"
           primary
