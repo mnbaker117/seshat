@@ -812,3 +812,76 @@ async def delete_book(bid: int):
         return {"status": "ok"}
     finally:
         await db.close()
+
+
+# ─── Bulk Book Actions ───────────────────────────────────────
+# Used by the multi-select bar on Author Detail (and any future page
+# that needs to act on a set of book IDs). Each endpoint mirrors the
+# single-book equivalent above but operates on a list. `bulk-delete`
+# silently skips Calibre-synced rows rather than failing the whole
+# call, since a partial selection is still a useful outcome.
+@router.post("/books/bulk-hide")
+async def bulk_hide(data: dict = Body(...)):
+    book_ids = data.get("book_ids", [])
+    if not book_ids:
+        return {"error": "No books specified"}
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        await db.execute(f"UPDATE books SET hidden=1 WHERE id IN ({placeholders})", book_ids)
+        await db.execute(f"DELETE FROM book_series_suggestions WHERE book_id IN ({placeholders})", book_ids)
+        await db.commit()
+        return {"status": "ok", "count": len(book_ids)}
+    finally:
+        await db.close()
+
+
+@router.post("/books/bulk-dismiss")
+async def bulk_dismiss(data: dict = Body(...)):
+    book_ids = data.get("book_ids", [])
+    if not book_ids:
+        return {"error": "No books specified"}
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        await db.execute(f"UPDATE books SET is_new=0 WHERE id IN ({placeholders})", book_ids)
+        await db.commit()
+        return {"status": "ok", "count": len(book_ids)}
+    finally:
+        await db.close()
+
+
+@router.post("/books/bulk-delete")
+async def bulk_delete(data: dict = Body(...)):
+    book_ids = data.get("book_ids", [])
+    if not book_ids:
+        return {"error": "No books specified"}
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        # Partition the requested IDs into deletable vs Calibre-protected
+        # so we can report "deleted N, skipped M" honestly.
+        rows = await (await db.execute(
+            f"SELECT id, calibre_id, source FROM books WHERE id IN ({placeholders})",
+            book_ids,
+        )).fetchall()
+        deletable = [
+            r["id"] for r in rows
+            if not (r["calibre_id"] is not None and r["source"] == "calibre")
+        ]
+        skipped = len(rows) - len(deletable)
+        if not deletable:
+            return {"status": "ok", "deleted": 0, "skipped": skipped}
+        del_placeholders = ",".join(["?" for _ in deletable])
+        await db.execute(
+            f"DELETE FROM book_series_suggestions WHERE book_id IN ({del_placeholders})",
+            deletable,
+        )
+        cur = await db.execute(
+            f"DELETE FROM books WHERE id IN ({del_placeholders})",
+            deletable,
+        )
+        await db.commit()
+        return {"status": "ok", "deleted": cur.rowcount, "skipped": skipped}
+    finally:
+        await db.close()

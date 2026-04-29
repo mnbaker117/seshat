@@ -66,14 +66,28 @@ function MobileSeriesSection({
   librarySlug,
   onBookClick,
   showMamLink,
+  selMode,
+  sel,
+  onToggleSel,
+  onSelectMany,
+  onDeselectMany,
+  onBooksLoaded,
 }: {
   series: Series;
   librarySlug?: string | null;
   onBookClick: (b: Book) => void;
   showMamLink: boolean;
+  selMode?: boolean;
+  sel?: Set<number>;
+  onToggleSel?: (id: number) => void;
+  onSelectMany?: (ids: number[]) => void;
+  onDeselectMany?: (ids: number[]) => void;
+  onBooksLoaded?: (key: string, books: Book[]) => void;
 }) {
+  const t = useTheme();
   const [bks, setBks] = useState<Book[] | null>(null);
   const [ld, setLd] = useState(false);
+  const lkey = `${librarySlug || "active"}:${series.id}`;
 
   const load = useCallback(() => {
     if (bks) return;
@@ -82,11 +96,13 @@ function MobileSeriesSection({
     api
       .get<{ books?: Book[] }>(`/discovery/series/${series.id}${qs}`)
       .then((d) => {
-        setBks(d.books || []);
+        const books = d.books || [];
+        setBks(books);
         setLd(false);
+        if (onBooksLoaded) onBooksLoaded(lkey, books);
       })
       .catch(() => setLd(false));
-  }, [series.id, librarySlug, bks]);
+  }, [series.id, librarySlug, bks, lkey, onBooksLoaded]);
 
   // Triggered by MobileSection's open state — we use the lazy
   // pattern by rendering a tiny effect inside the children that
@@ -100,6 +116,36 @@ function MobileSeriesSection({
   const missing = series.missing_count ?? 0;
   const total = series.book_count ?? 0;
 
+  const ids = bks ? bks.map((b) => b.id) : [];
+  const selectedHere = sel ? ids.filter((id) => sel.has(id)).length : 0;
+  const allSelected = ids.length > 0 && selectedHere === ids.length;
+  const quickPick =
+    selMode && bks ? (
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          if (allSelected) onDeselectMany && onDeselectMany(ids);
+          else onSelectMany && onSelectMany(ids);
+        }}
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          padding: "4px 10px",
+          borderRadius: 5,
+          background: allSelected ? t.accent + "22" : "transparent",
+          color: allSelected ? t.accent : t.td,
+          border: `1px solid ${allSelected ? t.accent + "66" : t.border}`,
+          cursor: "pointer",
+        }}
+      >
+        {allSelected
+          ? "Deselect"
+          : selectedHere > 0
+            ? `Select all (${selectedHere}/${ids.length})`
+            : "Select"}
+      </button>
+    ) : null;
+
   return (
     <MobileSection
       title={series.name}
@@ -108,6 +154,7 @@ function MobileSeriesSection({
         missing > 0 ? `${missing} missing` : undefined
       }
       defaultOpen={false}
+      right={quickPick}
     >
       <div
         style={{
@@ -122,6 +169,9 @@ function MobileSeriesSection({
             book={b}
             onClick={() => onBookClick(b)}
             showMamLink={showMamLink}
+            selMode={selMode}
+            selected={sel ? sel.has(b.id) : false}
+            onToggleSel={onToggleSel}
           />
         ))}
       </div>
@@ -146,6 +196,41 @@ export default function MobileAuthorDetailPage({
   const [sbClosing, setSbClosing] = useState(false);
   const [mamOn, setMamOn] = useState(false);
   const [fmtTab, setFmtTab] = useState<string>("combined");
+
+  // Multi-select. Mirrors the desktop wiring — page-wide selection
+  // set, lazy series-book cache so "Select all" can include
+  // collapsed series whose books haven't been fetched yet (mobile
+  // sections start collapsed by default, so this matters more here).
+  const [selMode, setSelMode] = useState(false);
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [seriesBooks, setSeriesBooks] = useState<Record<string, Book[]>>({});
+
+  const toggleSel = useCallback((id: number) => {
+    setSel((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }, []);
+  const selectMany = useCallback((ids: number[]) => {
+    setSel((p) => {
+      const n = new Set(p);
+      ids.forEach((i) => n.add(i));
+      return n;
+    });
+  }, []);
+  const deselectMany = useCallback((ids: number[]) => {
+    setSel((p) => {
+      const n = new Set(p);
+      ids.forEach((i) => n.delete(i));
+      return n;
+    });
+  }, []);
+  const onBooksLoaded = useCallback((key: string, books: Book[]) => {
+    setSeriesBooks((p) => ({ ...p, [key]: books }));
+  }, []);
 
   // pen-name management
   const [penLinks, setPenLinks] = useState<PenNameLink[]>([]);
@@ -238,6 +323,65 @@ export default function MobileAuthorDetailPage({
     if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
     if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
     await loadA();
+  };
+
+  // Page-wide selectable IDs — see the desktop sibling for the
+  // matching helper. Mobile sections default to closed, so this is
+  // skewed toward "standalone is always available; series only
+  // counts after the user has expanded that section at least once
+  // and IS fetched its books."
+  const allVisibleIds = (): number[] => {
+    const ids = new Set<number>();
+    if (a) {
+      (a.standalone_books || []).forEach((b) => ids.add(b.id));
+      Object.values(a.cross_library || {}).forEach((c) => {
+        (c.author.standalone_books || []).forEach((b) => ids.add(b.id));
+      });
+    }
+    Object.values(seriesBooks).forEach((arr) =>
+      arr.forEach((b) => ids.add(b.id)),
+    );
+    return [...ids];
+  };
+
+  const bulkAct = async (kind: "hide" | "dismiss" | "delete") => {
+    const ids = [...sel];
+    if (ids.length === 0) return;
+    const labels = { hide: "Hide", dismiss: "Dismiss", delete: "Delete" } as const;
+    const msg =
+      kind === "delete"
+        ? `Delete ${ids.length} book(s)? Calibre-synced books will be skipped.`
+        : `${labels[kind]} ${ids.length} book(s)?`;
+    if (!confirm(msg)) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{
+        status?: string;
+        count?: number;
+        deleted?: number;
+        skipped?: number;
+        error?: string;
+      }>(`/discovery/books/bulk-${kind}`, { book_ids: ids });
+      if (r.error) {
+        toast.error(r.error);
+      } else if (kind === "delete") {
+        const skipMsg = r.skipped
+          ? `, skipped ${r.skipped} Calibre-synced`
+          : "";
+        toast.success(`Deleted ${r.deleted || 0} book(s)${skipMsg}`);
+      } else {
+        toast.success(
+          `${labels[kind]}d ${r.count ?? ids.length} book(s)`,
+        );
+      }
+      setSel(new Set());
+      setSelMode(false);
+      setSeriesBooks({});
+      await loadA();
+    } catch (e) {
+      toast.error((e as Error).message || `${labels[kind]} failed`);
+    }
+    setBusy(false);
   };
 
   const scanQs = authorSlug ? `?slug=${encodeURIComponent(authorSlug)}` : "";
@@ -351,57 +495,99 @@ export default function MobileAuthorDetailPage({
 
   // Helper to render the books for a given block (or all blocks combined).
   const renderBlocks = (blocksToRender: typeof blocks) =>
-    blocksToRender.map((block) => (
-      <div key={block.slug}>
-        {hasMultiLib && fmtTab === "combined" && (
-          <div
+    blocksToRender.map((block) => {
+      const standalone = block.data.standalone_books || [];
+      const stIds = standalone.map((b) => b.id);
+      const stSelected = stIds.filter((id) => sel.has(id)).length;
+      const stAllSelected = stIds.length > 0 && stSelected === stIds.length;
+      const stQuickPick =
+        selMode && stIds.length > 0 ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (stAllSelected) deselectMany(stIds);
+              else selectMany(stIds);
+            }}
             style={{
-              fontSize: 12,
-              color: t.tg,
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "0.04em",
-              padding: "12px 4px 6px",
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "4px 10px",
+              borderRadius: 5,
+              background: stAllSelected ? t.accent + "22" : "transparent",
+              color: stAllSelected ? t.accent : t.td,
+              border: `1px solid ${stAllSelected ? t.accent + "66" : t.border}`,
+              cursor: "pointer",
             }}
           >
-            {block.label}
-          </div>
-        )}
-        {(block.data.series || []).map((s) => (
-          <MobileSeriesSection
-            key={`${block.slug}-${s.id}`}
-            series={s}
-            librarySlug={block.slug}
-            onBookClick={setSb}
-            showMamLink={mamOn}
-          />
-        ))}
-        {(block.data.standalone_books || []).length > 0 && (
-          <MobileSection
-            title="Standalone"
-            count={block.data.standalone_books?.length}
-            defaultOpen={true}
-          >
+            {stAllSelected
+              ? "Deselect"
+              : stSelected > 0
+                ? `Select all (${stSelected}/${stIds.length})`
+                : "Select"}
+          </button>
+        ) : null;
+      return (
+        <div key={block.slug}>
+          {hasMultiLib && fmtTab === "combined" && (
             <div
               style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 360px), 1fr))",
-                gap: 8,
+                fontSize: 12,
+                color: t.tg,
+                fontWeight: 700,
+                textTransform: "uppercase",
+                letterSpacing: "0.04em",
+                padding: "12px 4px 6px",
               }}
             >
-              {(block.data.standalone_books || []).map((b) => (
-                <MobileBookCard
-                  key={b.id}
-                  book={b}
-                  onClick={() => setSb(b)}
-                  showMamLink={mamOn}
-                />
-              ))}
+              {block.label}
             </div>
-          </MobileSection>
-        )}
-      </div>
-    ));
+          )}
+          {(block.data.series || []).map((s) => (
+            <MobileSeriesSection
+              key={`${block.slug}-${s.id}`}
+              series={s}
+              librarySlug={block.slug}
+              onBookClick={setSb}
+              showMamLink={mamOn}
+              selMode={selMode}
+              sel={sel}
+              onToggleSel={toggleSel}
+              onSelectMany={selectMany}
+              onDeselectMany={deselectMany}
+              onBooksLoaded={onBooksLoaded}
+            />
+          ))}
+          {standalone.length > 0 && (
+            <MobileSection
+              title="Standalone"
+              count={standalone.length}
+              defaultOpen={true}
+              right={stQuickPick}
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 360px), 1fr))",
+                  gap: 8,
+                }}
+              >
+                {standalone.map((b) => (
+                  <MobileBookCard
+                    key={b.id}
+                    book={b}
+                    onClick={() => setSb(b)}
+                    showMamLink={mamOn}
+                    selMode={selMode}
+                    selected={sel.has(b.id)}
+                    onToggleSel={toggleSel}
+                  />
+                ))}
+              </div>
+            </MobileSection>
+          )}
+        </div>
+      );
+    });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -502,7 +688,82 @@ export default function MobileAuthorDetailPage({
             {mamRef ? "MAM scanning…" : "Scan MAM"}
           </MobileBtn>
         )}
+        <MobileBtn
+          variant={selMode ? "primary" : "secondary"}
+          onClick={() => {
+            setSelMode(!selMode);
+            if (selMode) setSel(new Set());
+          }}
+        >
+          {selMode ? "Cancel" : "Select"}
+        </MobileBtn>
       </div>
+
+      {/* Bulk action bar (visible only in select mode) */}
+      {selMode ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 12px",
+            background: t.bg2,
+            border: `1px solid ${t.border}`,
+            borderRadius: 10,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontSize: 13, fontWeight: 600, color: t.text2 }}>
+            {sel.size} book{sel.size === 1 ? "" : "s"}
+          </span>
+          {sel.size > 0 ? (
+            <>
+              <MobileBtn
+                variant="secondary"
+                onClick={() => bulkAct("hide")}
+                disabled={busy}
+                style={{ minHeight: 36, fontSize: 13 }}
+              >
+                Hide
+              </MobileBtn>
+              <MobileBtn
+                variant="secondary"
+                onClick={() => bulkAct("dismiss")}
+                disabled={busy}
+                style={{ minHeight: 36, fontSize: 13 }}
+              >
+                Dismiss
+              </MobileBtn>
+              <MobileBtn
+                variant="danger"
+                onClick={() => bulkAct("delete")}
+                disabled={busy}
+                style={{ minHeight: 36, fontSize: 13 }}
+              >
+                Delete
+              </MobileBtn>
+            </>
+          ) : null}
+          <MobileBtn
+            variant="ghost"
+            onClick={() => selectMany(allVisibleIds())}
+            disabled={busy}
+            style={{ minHeight: 36, fontSize: 13 }}
+          >
+            Select all
+          </MobileBtn>
+          {sel.size > 0 ? (
+            <MobileBtn
+              variant="ghost"
+              onClick={() => setSel(new Set())}
+              disabled={busy}
+              style={{ minHeight: 36, fontSize: 13 }}
+            >
+              Deselect
+            </MobileBtn>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Bio */}
       {a.bio && (

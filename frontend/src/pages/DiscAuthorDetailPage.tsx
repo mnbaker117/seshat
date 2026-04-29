@@ -78,6 +78,16 @@ interface SectionSharedProps {
   onAction?: BookActionHandler;
   onBookClick?: (book: Book) => void;
   collapsed?: boolean;
+  // Multi-select plumbing — when selMode is on, BCard/BListRow flip
+  // to "click toggles selection" mode. The per-section quick-pick
+  // ("Select all in this series") goes into the Section header's
+  // `right` slot, so each section needs to know which of its books
+  // are already in the parent's selection set.
+  selMode?: boolean;
+  sel?: Set<number>;
+  onToggleSel?: (id: number) => void;
+  onSelectMany?: (ids: number[]) => void;
+  onDeselectMany?: (ids: number[]) => void;
 }
 
 interface ISProps extends SectionSharedProps {
@@ -91,6 +101,11 @@ interface ISProps extends SectionSharedProps {
   // An ABS series id lookup against the Calibre DB returns a totally
   // different series, so we MUST scope the fetch per-library here.
   librarySlug?: string | null;
+  // Bubble loaded books up to the parent so the page-level "Select
+  // All" can include lazy-fetched series content. Keyed by
+  // `${librarySlug}:${series.id}` to disambiguate cross-library
+  // namespaces.
+  onBooksLoaded?: (key: string, books: Book[]) => void;
 }
 
 // ─── Inline Series (for Author Detail) ─────────────────────
@@ -105,10 +120,17 @@ function IS({
   collapsed,
   authorId,
   librarySlug,
+  selMode,
+  sel,
+  onToggleSel,
+  onSelectMany,
+  onDeselectMany,
+  onBooksLoaded,
 }: ISProps) {
   const t = useTheme();
   const [ld, setLd] = useState(false);
   const [bks, setBks] = useState<Book[] | null>(null);
+  const lkey = `${librarySlug || "active"}:${series.id}`;
 
   const load = () => {
     if (bks) return;
@@ -117,8 +139,10 @@ function IS({
     api
       .get<{ books?: Book[] }>(`/discovery/series/${series.id}${qs}`)
       .then((d) => {
-        setBks(d.books || []);
+        const books = d.books || [];
+        setBks(books);
         setLd(false);
+        if (onBooksLoaded) onBooksLoaded(lkey, books);
       })
       .catch(() => setLd(false));
   };
@@ -162,11 +186,48 @@ function IS({
     ? `${ownCount}/${regCount} · ${series.book_count || 0} total`
     : `${ownCount}/${regCount}`;
 
+  // Per-section quick-pick. When some-but-not-all books in this
+  // series are selected we treat the toggle as "select all"; clicking
+  // again deselects the whole set. Computed from the loaded books, so
+  // the button is only useful once the fetch resolves.
+  const allBookIds = bks ? bks.map((b) => b.id) : [];
+  const selectedHere = sel
+    ? allBookIds.filter((id) => sel.has(id)).length
+    : 0;
+  const allSelected =
+    allBookIds.length > 0 && selectedHere === allBookIds.length;
+  const quickPick =
+    selMode && bks ? (
+      <button
+        onClick={() => {
+          if (allSelected) onDeselectMany && onDeselectMany(allBookIds);
+          else onSelectMany && onSelectMany(allBookIds);
+        }}
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          padding: "3px 8px",
+          borderRadius: 5,
+          background: allSelected ? t.accent + "22" : "transparent",
+          color: allSelected ? t.accent : t.td,
+          border: `1px solid ${allSelected ? t.accent + "66" : t.border}`,
+          cursor: "pointer",
+        }}
+      >
+        {allSelected
+          ? "Deselect series"
+          : selectedHere > 0
+            ? `Select all (${selectedHere}/${allBookIds.length})`
+            : "Select series"}
+      </button>
+    ) : null;
+
   return (
     <Section
       title={header}
       count={countStr}
       defaultOpen={!collapsed}
+      right={quickPick}
     >
       {ld ? (
         <Load />
@@ -179,6 +240,9 @@ function IS({
               onBookClick={onBookClick}
               showAuthor={isMulti}
               highlightAuthorId={authorId}
+              selMode={selMode}
+              sel={sel}
+              onToggleSel={onToggleSel}
             />
           ) : (
             <BGrid
@@ -187,6 +251,9 @@ function IS({
               onBookClick={onBookClick}
               showAuthor={isMulti}
               highlightAuthorId={authorId}
+              selMode={selMode}
+              sel={sel}
+              onToggleSel={onToggleSel}
             />
           )}
           {omnibus && omnibus.length > 0 ? (
@@ -221,6 +288,9 @@ function IS({
                   onBookClick={onBookClick}
                   showAuthor={isMulti}
                   highlightAuthorId={authorId}
+                  selMode={selMode}
+                  sel={sel}
+                  onToggleSel={onToggleSel}
                 />
               ) : (
                 <BGrid
@@ -229,6 +299,9 @@ function IS({
                   onBookClick={onBookClick}
                   showAuthor={isMulti}
                   highlightAuthorId={authorId}
+                  selMode={selMode}
+                  sel={sel}
+                  onToggleSel={onToggleSel}
                 />
               )}
             </>
@@ -244,13 +317,71 @@ interface SAProps extends SectionSharedProps {
   books: Book[];
 }
 
-function SA({ books, vm, onAction, onBookClick, collapsed }: SAProps) {
+function SA({
+  books,
+  vm,
+  onAction,
+  onBookClick,
+  collapsed,
+  selMode,
+  sel,
+  onToggleSel,
+  onSelectMany,
+  onDeselectMany,
+}: SAProps) {
+  const t = useTheme();
+  const ids = books.map((b) => b.id);
+  const selectedHere = sel ? ids.filter((id) => sel.has(id)).length : 0;
+  const allSelected = ids.length > 0 && selectedHere === ids.length;
+  const quickPick = selMode ? (
+    <button
+      onClick={() => {
+        if (allSelected) onDeselectMany && onDeselectMany(ids);
+        else onSelectMany && onSelectMany(ids);
+      }}
+      style={{
+        fontSize: 11,
+        fontWeight: 600,
+        padding: "3px 8px",
+        borderRadius: 5,
+        background: allSelected ? t.accent + "22" : "transparent",
+        color: allSelected ? t.accent : t.td,
+        border: `1px solid ${allSelected ? t.accent + "66" : t.border}`,
+        cursor: "pointer",
+      }}
+    >
+      {allSelected
+        ? "Deselect standalone"
+        : selectedHere > 0
+          ? `Select all (${selectedHere}/${ids.length})`
+          : "Select standalone"}
+    </button>
+  ) : null;
   return (
-    <Section title="Standalone" count={books.length} defaultOpen={!collapsed}>
+    <Section
+      title="Standalone"
+      count={books.length}
+      defaultOpen={!collapsed}
+      right={quickPick}
+    >
       {vm === "list" ? (
-        <BList books={books} onAction={onAction} onBookClick={onBookClick} />
+        <BList
+          books={books}
+          onAction={onAction}
+          onBookClick={onBookClick}
+          selMode={selMode}
+          sel={sel}
+          onToggleSel={onToggleSel}
+        />
       ) : (
-        <BGrid books={books} onAction={onAction} onBookClick={onBookClick} />
+        <BGrid
+          books={books}
+          onAction={onAction}
+          onBookClick={onBookClick}
+          selMode={selMode}
+          sel={sel}
+          onToggleSel={onToggleSel}
+        />
       )}
     </Section>
   );
@@ -298,6 +429,42 @@ function DesktopAuthorDetailPage({
   const [allCol, setAllCol] = useState(false);
   const [mamOn, setMamOn] = useState(false);
   const [fmtTab, setFmtTab] = useState<string>("combined");
+
+  // Multi-select state. `selMode` flips the cards into checkbox-like
+  // toggles; `sel` is the set of selected book IDs spanning every
+  // visible series + standalone (and every cross-library tab — IDs
+  // are page-wide). `seriesBooks` is a cache of books loaded by the
+  // lazy IS sections so the page-level Select All can include them.
+  const [selMode, setSelMode] = useState(false);
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [seriesBooks, setSeriesBooks] = useState<Record<string, Book[]>>({});
+
+  const toggleSel = useCallback((id: number) => {
+    setSel((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }, []);
+  const selectMany = useCallback((ids: number[]) => {
+    setSel((p) => {
+      const n = new Set(p);
+      ids.forEach((i) => n.add(i));
+      return n;
+    });
+  }, []);
+  const deselectMany = useCallback((ids: number[]) => {
+    setSel((p) => {
+      const n = new Set(p);
+      ids.forEach((i) => n.delete(i));
+      return n;
+    });
+  }, []);
+  const onBooksLoaded = useCallback((key: string, books: Book[]) => {
+    setSeriesBooks((p) => ({ ...p, [key]: books }));
+  }, []);
 
   // Nav arg may arrive as "slug:id" when the click came from a cross-
   // library merged row — the id alone is ambiguous because ABS's
@@ -553,6 +720,69 @@ function DesktopAuthorDetailPage({
     setTimeout(() => window.scrollTo(0, scrollY), 100);
   };
 
+  // Page-wide selectable IDs = standalone books on every visible
+  // library block + every series whose IS section has loaded its
+  // books. Series that haven't been mounted yet (e.g. a tab the user
+  // hasn't switched to) won't appear; that's intentional — we only
+  // select what's on screen.
+  const allVisibleIds = (): number[] => {
+    const ids = new Set<number>();
+    if (a) {
+      (a.standalone_books || []).forEach((b) => ids.add(b.id));
+      Object.values(a.cross_library || {}).forEach((c) => {
+        (c.author.standalone_books || []).forEach((b) => ids.add(b.id));
+      });
+    }
+    Object.values(seriesBooks).forEach((arr) =>
+      arr.forEach((b) => ids.add(b.id)),
+    );
+    return [...ids];
+  };
+
+  const bulkAct = async (kind: "hide" | "dismiss" | "delete") => {
+    const ids = [...sel];
+    if (ids.length === 0) return;
+    const labels = { hide: "Hide", dismiss: "Dismiss", delete: "Delete" } as const;
+    const msg =
+      kind === "delete"
+        ? `Delete ${ids.length} book(s)? Calibre-synced books will be skipped.`
+        : `${labels[kind]} ${ids.length} book(s)?`;
+    if (!confirm(msg)) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{
+        status?: string;
+        count?: number;
+        deleted?: number;
+        skipped?: number;
+        error?: string;
+      }>(`/discovery/books/bulk-${kind}`, { book_ids: ids });
+      if (r.error) {
+        toast.error(r.error);
+      } else if (kind === "delete") {
+        const skipMsg = r.skipped
+          ? `, skipped ${r.skipped} Calibre-synced`
+          : "";
+        toast.success(`Deleted ${r.deleted || 0} book(s)${skipMsg}`);
+      } else {
+        toast.success(
+          `${labels[kind]}d ${r.count ?? ids.length} book(s)`,
+        );
+      }
+      setSel(new Set());
+      setSelMode(false);
+      // Invalidate the lazy series cache so series sections re-fetch
+      // (deleted books should disappear; hidden/dismissed books stay
+      // in the list but with their flags cleared by the refresh).
+      setSeriesBooks({});
+      await loadA();
+      setRk((k) => k + 1);
+    } catch (e) {
+      toast.error((e as Error).message || `${labels[kind]} failed`);
+    }
+    setBusy(false);
+  };
+
   if (ld) return <Load />;
   if (!a) return <div style={{ color: t.tf }}>Not found</div>;
 
@@ -798,6 +1028,17 @@ function DesktopAuthorDetailPage({
               {allCol ? Ic.expand : Ic.collapse}
             </Btn>
             <VT mode={vm} setMode={setVm} />
+            <Btn
+              size="sm"
+              variant={selMode ? "accent" : "default"}
+              onClick={() => {
+                setSelMode(!selMode);
+                if (selMode) setSel(new Set());
+              }}
+              style={{ height: 38 }}
+            >
+              {selMode ? "Cancel" : "Select"}
+            </Btn>
             <Btn
               size="sm"
               onClick={() => refresh(false)}
@@ -1058,6 +1299,86 @@ function DesktopAuthorDetailPage({
         </div>
       ) : null}
 
+      {/* ── Bulk action bar (visible only in select mode) ── */}
+      {selMode ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 14px",
+            background: t.bg2,
+            border: `1px solid ${t.border}`,
+            borderRadius: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontSize: 13, fontWeight: 600, color: t.text2 }}>
+            {sel.size} book{sel.size === 1 ? "" : "s"} selected
+          </span>
+          {sel.size > 0 ? (
+            <>
+              <Btn
+                size="sm"
+                onClick={() => bulkAct("hide")}
+                disabled={busy}
+                style={{
+                  background: t.ylw + "22",
+                  color: t.ylwt,
+                  border: `1px solid ${t.ylw}44`,
+                }}
+              >
+                Hide
+              </Btn>
+              <Btn
+                size="sm"
+                onClick={() => bulkAct("dismiss")}
+                disabled={busy}
+                style={{
+                  background: t.cyan + "22",
+                  color: t.cyant,
+                  border: `1px solid ${t.cyan}44`,
+                }}
+              >
+                Dismiss
+              </Btn>
+              <Btn
+                size="sm"
+                onClick={() => bulkAct("delete")}
+                disabled={busy}
+                style={{
+                  background: t.red + "22",
+                  color: t.redt,
+                  border: `1px solid ${t.red}44`,
+                }}
+              >
+                Delete
+              </Btn>
+              <span
+                style={{
+                  width: 1,
+                  height: 20,
+                  background: t.border,
+                  margin: "0 4px",
+                }}
+              />
+            </>
+          ) : null}
+          <Btn
+            size="sm"
+            onClick={() => selectMany(allVisibleIds())}
+            disabled={busy}
+          >
+            Select All
+          </Btn>
+          {sel.size > 0 ? (
+            <Btn size="sm" onClick={() => setSel(new Set())} disabled={busy}>
+              Deselect All
+            </Btn>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* ── Format tabs (only shown when author exists in >1 library) ── */}
       <FormatTabs a={a} fmtTab={fmtTab} setFmtTab={setFmtTab} t={t} />
 
@@ -1072,6 +1393,12 @@ function DesktopAuthorDetailPage({
         toggleSb={toggleSb}
         rk={rk}
         t={t}
+        selMode={selMode}
+        sel={sel}
+        onToggleSel={toggleSel}
+        onSelectMany={selectMany}
+        onDeselectMany={deselectMany}
+        onBooksLoaded={onBooksLoaded}
       />
 
       {sb ? (
@@ -1176,6 +1503,12 @@ function PerLibraryBlocks({
   toggleSb,
   rk,
   t,
+  selMode,
+  sel,
+  onToggleSel,
+  onSelectMany,
+  onDeselectMany,
+  onBooksLoaded,
 }: {
   a: AuthorDetail;
   fmtTab: string;
@@ -1186,6 +1519,12 @@ function PerLibraryBlocks({
   toggleSb: (b: Book) => void;
   rk: number;
   t: Theme;
+  selMode: boolean;
+  sel: Set<number>;
+  onToggleSel: (id: number) => void;
+  onSelectMany: (ids: number[]) => void;
+  onDeselectMany: (ids: number[]) => void;
+  onBooksLoaded: (key: string, books: Book[]) => void;
 }) {
   const crossLib = a.cross_library || {};
   const crossSlugs = Object.keys(crossLib);
@@ -1321,6 +1660,12 @@ function PerLibraryBlocks({
                 collapsed={allCol}
                 authorId={block.data?.id ?? authorIdNum}
                 librarySlug={block.slug}
+                selMode={selMode}
+                sel={sel}
+                onToggleSel={onToggleSel}
+                onSelectMany={onSelectMany}
+                onDeselectMany={onDeselectMany}
+                onBooksLoaded={onBooksLoaded}
               />
             ))}
             {standalone.length > 0 && (
@@ -1330,6 +1675,11 @@ function PerLibraryBlocks({
                 onAction={onAction}
                 onBookClick={toggleSb}
                 collapsed={allCol}
+                selMode={selMode}
+                sel={sel}
+                onToggleSel={onToggleSel}
+                onSelectMany={onSelectMany}
+                onDeselectMany={onDeselectMany}
               />
             )}
             {series.length === 0 && standalone.length === 0 && (
