@@ -388,6 +388,39 @@ class KoboSource(BaseSource):
                     items = items + extra_items
                     logger.debug(f"  Kobo: page {pn} added {len(extra_items)} raw items (running total {len(items)})")
 
+            # Author validation: Kobo's `&fcsearchfield=Author` query
+            # treats the queried name as a substring against any
+            # contributor field — translator, foreword, illustrator,
+            # "various authors" anthologies — so we get false positives
+            # under the queried author. Each result card carries a
+            # `data-testid="authors"` element with the actual primary
+            # author(s) of that book, so we walk up to the result-card
+            # ancestor and pull the displayed author for per-book filter
+            # before queuing the slow detail fetch.
+            #
+            # Matching mirrors hardcover.py's `_check_contributor`:
+            # exact, period-strip, and parts-set comparison so "J. K.
+            # Rowling" / "JK Rowling" / "Rowling J K" all collapse.
+            # Linked author names (pen names + co-authors that the user
+            # set up) are accepted too — set on the source instance via
+            # `_linked_author_names` before the call.
+            queried_lc = author_name.lower().strip()
+            queried_parts = set(queried_lc.replace(".", "").split())
+            accepted_names = {queried_lc}
+            for ln in (getattr(self, "_linked_author_names", None) or []):
+                accepted_names.add(ln.lower().strip())
+
+            def _author_matches(card_author: str) -> bool:
+                cn = card_author.lower().strip()
+                if cn in accepted_names:
+                    return True
+                if cn.replace(".", "") in {a.replace(".", "") for a in accepted_names}:
+                    return True
+                cn_parts = set(cn.replace(".", "").split())
+                if cn_parts and cn_parts == queried_parts:
+                    return True
+                return False
+
             # Pass 1: collect raw search results (title, href, cover
             # thumbnail). Dedupe by kobo_id because the XPath
             # `//a[@data-testid='title']` matches BOTH the cover-image
@@ -395,6 +428,7 @@ class KoboSource(BaseSource):
             # without this dedupe every book would be processed twice.
             raw_books = []
             seen_ids = set()
+            skipped_bad_author = 0
             for item in items:
                 title = item.text_content().strip()
                 href = item.get("href", "")
@@ -411,6 +445,30 @@ class KoboSource(BaseSource):
                 if dedupe_key in seen_ids:
                     continue
                 seen_ids.add(dedupe_key)
+
+                # Author validation — pair the title with its result
+                # card's `data-testid="authors"` block. Each card may
+                # list multiple authors (anthologies, co-authors); we
+                # accept the result if ANY listed author matches.
+                card = item.xpath(
+                    "ancestor::*[descendant::*[@data-testid='authors']][1]"
+                )
+                card_authors: list[str] = []
+                if card:
+                    card_authors = [
+                        a.strip()
+                        for a in card[0].xpath(
+                            ".//*[@data-testid='authors']//a/text()"
+                        )
+                        if a.strip()
+                    ]
+                if card_authors and not any(_author_matches(ca) for ca in card_authors):
+                    skipped_bad_author += 1
+                    logger.info(
+                        f"  Kobo: skipping '{title}' — authors "
+                        f"{card_authors} don't match ['{author_name}']"
+                    )
+                    continue
 
                 # Try to get cover image (thumbnail from search page; will
                 # be replaced with the full-res version from the detail
@@ -584,6 +642,7 @@ class KoboSource(BaseSource):
                 f"  Kobo: found {len(books) + sum(len(s.books) for s in series_map.values())} "
                 f"books for '{author_name}' ({enriched} enriched, {skipped_known} URL-backfill"
                 f"{f', {skipped_unowned} skipped (library-only)' if skipped_unowned else ''}"
+                f"{f', {skipped_bad_author} skipped (wrong author)' if skipped_bad_author else ''}"
                 f"{f', {dupe_isbns} ISBN-dupes dropped' if dupe_isbns else ''})"
             )
 

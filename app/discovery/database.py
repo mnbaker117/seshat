@@ -452,6 +452,42 @@ def _norm_series_name(name: str) -> str:
     return re.sub(r'\s+', ' ', n).strip()
 
 
+async def _backfill_omnibus_flag(db) -> int:
+    """Set `is_omnibus=1` on existing rows whose title matches the omnibus pattern.
+
+    Catches two pre-existing classes of mis-flagged rows:
+      - Calibre-synced books (calibre_sync.py never calls _is_omnibus)
+      - Books inserted before _RX_OMNIBUS gained a particular keyword
+
+    Idempotent: each startup re-checks rows still at is_omnibus=0 and
+    flips any that now match. The check is cheap (single indexed scan)
+    and the typical steady-state touch count is 0. Also clears
+    `series_index` on promoted rows so omnibus entries don't push
+    other books out of position — mirrors the INSERT-path behavior
+    in lookup.py._merge_result.
+
+    The regex import lives inside the function body so the migration
+    runner doesn't pay for a discovery-module import on every db get.
+    Returns the number of rows touched.
+    """
+    from app.discovery.lookup import _RX_OMNIBUS
+
+    rows = await (await db.execute(
+        "SELECT id, title FROM books WHERE is_omnibus = 0 AND title IS NOT NULL"
+    )).fetchall()
+    touched = 0
+    for r in rows:
+        if _RX_OMNIBUS.search(r["title"] or ""):
+            await db.execute(
+                "UPDATE books SET is_omnibus = 1, series_index = NULL WHERE id = ?",
+                (r["id"],),
+            )
+            touched += 1
+    if touched:
+        await db.commit()
+    return touched
+
+
 async def _backfill_normalized_author_names(db) -> int:
     """Populate `authors.normalized_name` for any rows missing it.
 
@@ -874,6 +910,19 @@ async def init_db(slug=None):
             _db_logger.info(
                 f"Book-position dedupe collapsed {collapsed_books} "
                 f"duplicate same-series-index rows"
+            )
+
+        # ── Step 6: Omnibus flag backfill ──────────────────────────
+        # Idempotent rescan that flips is_omnibus=1 on books whose
+        # title matches the omnibus regex but were inserted/synced
+        # without the flag set (Calibre sync never sets it; older
+        # source-scans inserted before _RX_OMNIBUS picked up newer
+        # keywords). No-op once everything's been flagged.
+        omni_touched = await _backfill_omnibus_flag(db)
+        if omni_touched:
+            _db_logger.info(
+                f"Omnibus backfill flagged {omni_touched} previously-"
+                f"unflagged book row(s)"
             )
     finally:
         await db.close()

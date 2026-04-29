@@ -594,7 +594,7 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None, exclude_audiobooks: bool = True, linked_author_ids: list[int] = None):
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None, exclude_audiobooks: bool = True, linked_author_ids: list[int] = None, link_type_by_id: dict[int, str] | None = None):
     """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
 
     When owned_only=True (the "Library-only source scan" setting), the
@@ -640,7 +640,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         id_ph = ",".join("?" * len(all_author_ids))
         rows = await (await db.execute(
             f"SELECT id, title, source_url, series_id, series_index, source, "
-            f"pub_date, expected_date, description, isbn, author_id "
+            f"pub_date, expected_date, description, isbn, author_id, is_omnibus "
             f"FROM books WHERE author_id IN ({id_ph})",
             all_author_ids,
         )).fetchall()
@@ -662,6 +662,35 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             isbn = (r["isbn"] or "").strip().replace("-", "")
             if isbn and len(isbn) >= 10:
                 rows_by_isbn[isbn] = r
+
+        # ── Cross-author owned-ISBN map ─────────────────────────────
+        # Defense against the "Halo: Evolutions" failure mode: a source
+        # returns a book that the user already OWNS under a different
+        # author (typically "Various authors" anthologies, or a
+        # co-author the user hasn't manually linked yet) and the dedup
+        # window above can't see it because it's outside the linked
+        # author set. Look up every owned book's ISBN in the DB and
+        # block INSERT for any incoming ISBN that already lives there
+        # under a different author. Owned-only is the conservative
+        # boundary: discovered cross-author duplicates are still
+        # allowed (they may be legitimate co-authored entries the
+        # consensus pass will reconcile), and curated co-author rows
+        # where the user owns one entry per author also stay safe
+        # (those rows would already be in the same-author set above).
+        cross_isbn_owners: dict[str, int] = {}
+        for r in await (await db.execute(
+            "SELECT author_id, isbn FROM books "
+            "WHERE owned = 1 AND isbn IS NOT NULL AND isbn != ''"
+        )).fetchall():
+            isbn = (r["isbn"] or "").strip().replace("-", "")
+            if not isbn or len(isbn) < 10:
+                continue
+            # Skip ISBNs already owned by this author or its linked
+            # authors — those are handled by the same-author dedup
+            # path. We only want to flag truly external owners.
+            if r["author_id"] in all_author_ids:
+                continue
+            cross_isbn_owners.setdefault(isbn, r["author_id"])
 
         # Same-series-position prefilter: `(series_id, series_index)` →
         # row. Used to dedup incoming books against existing ones that
@@ -777,6 +806,25 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     sets.append("series_id=?"); vals.append(series_id)
                     if bk.series_index: sets.append("series_index=?"); vals.append(bk.series_index)
                     logger.debug(f"    MERGE SERIES: '{bk.title}' (id={matched_row['id']}) → series_id={series_id} #{bk.series_index} (source={source_name}, was={existing_source})")
+            # Omnibus flag promotion (additive only): existing rows that
+            # were inserted before _RX_OMNIBUS matched their title — or
+            # imported from Calibre, which never sets the flag — get
+            # caught here on the next merge. Match against either title
+            # so we promote whether the regex hits the existing curated
+            # title or the incoming source title. Never clears the flag
+            # (existing 1 stays 1) so a deliberately-set omnibus row
+            # can't be un-flagged by a stricter incoming title. Placed
+            # after the series block so its series_index=NULL overrides
+            # whatever series_index the series block may have set —
+            # omnibus entries shouldn't push other books out of position.
+            existing_omni = matched_row["is_omnibus"] if "is_omnibus" in matched_row.keys() else 0
+            if not existing_omni and (_is_omnibus(matched_row["title"]) or _is_omnibus(bk.title)):
+                sets.append("is_omnibus=?"); vals.append(1)
+                sets.append("series_index=?"); vals.append(None)
+                logger.info(
+                    f"    OMNIBUS PROMOTE: '{matched_row['title']}' "
+                    f"(id={matched_row['id']}) → is_omnibus=1"
+                )
             if full_scan:
                 fields_updated = []
                 if is_owned_calibre:
@@ -987,15 +1035,18 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         )
                         matched_row = None  # reject the merge
                 if matched_row:
-                    # ── Pen-name dedup: matched a linked author's book ──
+                    # ── Linked-author dedup: matched a linked author's book ──
+                    # `linked_author_ids` covers both pen names and
+                    # co-authors (the link_type only labels the UI).
                     # Don't UPDATE the linked author's row (that's their
                     # book), just suppress the INSERT so we don't create
                     # a duplicate under this author.
                     if matched_row["author_id"] != author_id:
+                        lt = (link_type_by_id or {}).get(matched_row["author_id"], "linked")
                         logger.debug(
-                            f"    PEN-NAME DEDUP: '{bk.title}' matches "
-                            f"'{matched_row['title']}' under linked author "
-                            f"(id={matched_row['author_id']}) — skipping"
+                            f"    LINKED-AUTHOR DEDUP ({lt}): '{bk.title}' "
+                            f"matches '{matched_row['title']}' under linked "
+                            f"author (id={matched_row['author_id']}) — skipping"
                         )
                         continue
                     # Lazy series upsert: only create the series row
@@ -1024,6 +1075,23 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if norm in existing:
                     logger.debug(f"    SKIP (norm dup): '{bk.title}'")
                     continue
+                # Cross-author owned-ISBN safety net: if this ISBN is
+                # already owned under a different (un-linked) author,
+                # don't create a duplicate. Catches the "Halo: Evolutions"
+                # case where a source attributes an anthology entry to a
+                # contributor while the user owns the canonical row under
+                # "Various authors". Linked-author owners are excluded
+                # from `cross_isbn_owners` upstream.
+                if bk.isbn:
+                    clean_isbn = bk.isbn.strip().replace("-", "")
+                    if clean_isbn in cross_isbn_owners:
+                        logger.info(
+                            f"    CROSS-AUTHOR DEDUP: '{bk.title}' "
+                            f"(isbn={clean_isbn}) already owned under "
+                            f"author_id={cross_isbn_owners[clean_isbn]} — "
+                            f"skipping insert"
+                        )
+                        continue
                 # Insert path: also needs the series row to exist.
                 sid_use = await _ensure_series()
                 initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
@@ -1078,12 +1146,13 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         matched_row = r
                         break
             if matched_row:
-                # Pen-name dedup for standalone books
+                # Linked-author dedup (pen names + co-authors).
                 if matched_row["author_id"] != author_id:
+                    lt = (link_type_by_id or {}).get(matched_row["author_id"], "linked")
                     logger.debug(
-                        f"    PEN-NAME DEDUP: '{bk.title}' matches "
-                        f"'{matched_row['title']}' under linked author "
-                        f"(id={matched_row['author_id']}) — skipping"
+                        f"    LINKED-AUTHOR DEDUP ({lt}): '{bk.title}' "
+                        f"matches '{matched_row['title']}' under linked "
+                        f"author (id={matched_row['author_id']}) — skipping"
                     )
                     continue
                 sql, vals = _update_existing(matched_row, bk)
@@ -1101,6 +1170,18 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if norm in existing:
                 logger.debug(f"    SKIP (norm dup): '{bk.title}'")
                 continue
+            # Cross-author owned-ISBN safety net (see series-books path
+            # comment above for the full rationale).
+            if bk.isbn:
+                clean_isbn = bk.isbn.strip().replace("-", "")
+                if clean_isbn in cross_isbn_owners:
+                    logger.info(
+                        f"    CROSS-AUTHOR DEDUP: '{bk.title}' "
+                        f"(isbn={clean_isbn}) already owned under "
+                        f"author_id={cross_isbn_owners[clean_isbn]} — "
+                        f"skipping insert"
+                    )
+                    continue
             initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
             await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
                 (bk.title, author_id, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
@@ -1751,7 +1832,7 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None, start_at=0):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None, link_type_by_id=None, start_at=0):
     """Try a single source with validation and detailed logging.
 
     `start_at` is forwarded to `source.get_author_books()` for the
@@ -1842,7 +1923,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book, exclude_audiobooks=exclude_audiobooks, linked_author_ids=linked_author_ids)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book, exclude_audiobooks=exclude_audiobooks, linked_author_ids=linked_author_ids, link_type_by_id=link_type_by_id)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -1927,13 +2008,18 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
 
     db = await get_db()
     try:
-        # ── Pen-name expansion: include linked authors' books for dedup ──
-        # If this author has pen-name links, owned titles and existing
-        # titles from the linked author(s) are included so dedup works
-        # across identities (e.g., William D. Arand ↔ Randi Darren).
+        # ── Linked-author expansion (pen names + co-authors) ──────────
+        # `pen_name_links` carries both link types (`pen_name` and
+        # `co_author`); we load BOTH for dedup so Buckell's scan sees
+        # books that exist under his linked co-author Karen Traviss
+        # exactly the same way it sees books under his pen names. The
+        # dedup pre-filters and merge candidate-set treat all linked
+        # IDs identically — only the log labels distinguish the two.
         linked_ids = [author_id]
+        link_type_by_id: dict[int, str] = {}
         pen_rows = await (await db.execute(
-            "SELECT canonical_author_id, alias_author_id FROM pen_name_links "
+            "SELECT canonical_author_id, alias_author_id, link_type "
+            "FROM pen_name_links "
             "WHERE canonical_author_id = ? OR alias_author_id = ?",
             (author_id, author_id),
         )).fetchall()
@@ -1941,9 +2027,18 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
             for col in ("canonical_author_id", "alias_author_id"):
                 if pr[col] != author_id and pr[col] not in linked_ids:
                     linked_ids.append(pr[col])
+                    link_type_by_id[pr[col]] = pr["link_type"]
         if len(linked_ids) > 1:
-            logger.info(f"  Pen-name expansion: {author_name} linked to {len(linked_ids)-1} other author(s)")
-        # IDs of linked authors (excluding self) — passed to _merge_result
+            n_pen = sum(1 for v in link_type_by_id.values() if v == "pen_name")
+            n_co = sum(1 for v in link_type_by_id.values() if v == "co_author")
+            logger.info(
+                f"  Linked-author expansion: {author_name} linked to "
+                f"{n_pen} pen name(s) + {n_co} co-author(s)"
+            )
+        # IDs of linked authors (excluding self) — passed to _merge_result.
+        # Variable name kept as `pen_linked` for legacy compatibility with
+        # `_merge_result`'s `linked_author_ids=` param; semantics now
+        # cover both pen names and co-authors.
         pen_linked = [i for i in linked_ids if i != author_id]
         # Resolve linked author IDs → display names so sources can
         # accept books bylined under pen-name aliases. Amazon and ibdb
@@ -2137,6 +2232,7 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
                     existing_titles=existing_titles, full_scan=full_scan,
                     owned_only=owned_only, series_collector=series_collector,
                     exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
+                    link_type_by_id=link_type_by_id,
                 ),
                 timeout=timeout,
             )
@@ -2217,6 +2313,7 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
                     existing_titles=existing_titles, full_scan=full_scan,
                     owned_only=owned_only, series_collector=series_collector,
                     exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
+                    link_type_by_id=link_type_by_id,
                     start_at=start_at,
                 ),
                 timeout=retry_timeout,
