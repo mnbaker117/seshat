@@ -7,6 +7,129 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.1.0] — 2026-04-29
+
+Mobile-redesign release. Every desktop page now branches at the top
+via `useMobileCodepath()` and renders a purpose-built mobile variant
+on phones, iPads, and any touch device — no more CSS-shrunken desktop
+layouts. Adds multi-select bulk actions on the author detail page
+plus a transitive-dependency security patch.
+
+### Major features
+
+- **Mobile-native pages across the entire app.** Six phases of
+  ground-up mobile UI, replacing the CSS-responsive pass shipped in
+  2.0.0. Every page declares its parent via `MobileBackButton to=…`
+  for hierarchical navigation, and a 44pt minimum touch target is
+  enforced via the new `components/mobile/tokens.ts` scale.
+
+  - **Phase 1 — Dashboards.** New mobile primitives (`MobileBtn`,
+    `MobileChip`, `MobileSection`, `MobileSheet`, `MobileBookCard`,
+    etc.) and dashboard widgets (`LibraryHero`, `StatTile`,
+    `HealthPill`, `MamAccount`, `SnatchBudget`, `ScanProgress`,
+    `RecentActivity`). `MobileUnifiedDashboard`,
+    `MobileDiscDashboard`, `MobilePipelineDashboard` compose these
+    widgets into a vertical stack with health pills, library heroes,
+    command center, and stats grid.
+  - **Phase 2 — Discovery surfaces.** `MobileBooksPage` (Library /
+    Missing / Upcoming via shared `apiPath` + `extraParams`),
+    `MobileMAMPage`, `MobileHiddenPage`, `MobileSuggestionsPage`,
+    `MobileAuthorsPage`, `MobileAuthorDetailPage`. Cards, format
+    chips, sort sheets, MAM-status filters, lazy-loaded series
+    sections, full-screen `BookSidebar` for tap-to-detail.
+  - **Phase 3 — Pipeline pages.** `MobileReviewPage`,
+    `MobileTentativePage`, `MobileIgnoredWeeklyPage`,
+    `MobilePipelineAuthorsPage`, `MobileDelayedPage`. Card-per-item
+    layouts, inline edit, bulk select chips, paste-to-add textareas.
+  - **Phase 4 — Utility pages.** `MobileLogsPage`, `MobileWorksPage`,
+    `MobileImportExportPage`, `MobileFiltersPage`,
+    `MobileDatabasePage`, `MobileSettingsPage` (1218-line settings
+    page broken into 12 collapsed sections with sticky save bar).
+  - **Phase 5 — Modals + auth.** Mobile variants of `AddBookModal`,
+    `ExportModal`, and `LoginPage`. Forms render as tall
+    `MobileSheet` instances with sticky two-button footers; 16px
+    input font + 44pt min-height to suppress iOS Safari zoom.
+    `BookSidebar` and `SetupWizard` switch from raw width gates to
+    `useMobileCodepath()` so iPad portrait + any touch device get
+    the full-screen sheet.
+  - **Phase 6 — PWA polish.** `apple-mobile-web-app-*` meta tags
+    for iOS standalone mode, `viewport-fit=cover` + safe-area
+    `env()` insets so the navbar clears the iOS notch,
+    swipe-to-dismiss on `MobileSheet` (touch handlers track drag,
+    scrim opacity fades proportionally, 100px threshold to close).
+    `theme-color` per `prefers-color-scheme` so the address bar
+    matches the app theme.
+
+- **Multi-select + bulk actions on author detail (desktop +
+  mobile).** New `Select` toggle on `DiscAuthorDetailPage` and
+  `MobileAuthorDetailPage` flips book cards into selection mode.
+  Per-section `Select series` / `Select standalone` buttons grab
+  every book in that section in one click (Mark's stated use case:
+  cleaning out the 7+ unwanted series of an author with hundreds of
+  books). Selection persists across cross-library tabs since IDs
+  are page-wide. Bulk action bar exposes Hide / Dismiss / Delete
+  with count-aware confirms, plus Select All / Deselect All. Three
+  new backend endpoints — `POST /api/discovery/books/bulk-hide`,
+  `bulk-dismiss`, `bulk-delete` — operate on `{book_ids: [...]}`.
+  `bulk-delete` partitions Calibre-synced rows out (silently
+  skipped, surfaced in the response) so a partial selection still
+  succeeds.
+
+### Mobile redesign — supporting fixes
+
+- **Hierarchical back button.** Replaced the in-memory navigation
+  history stack with a parent-page map: each mobile page declares
+  its parent via a `to` prop, so the back path is predictable
+  regardless of how the user got there. Author Detail → Authors;
+  every other main page → Dashboard. Unified Dashboard omits the
+  button entirely (it's the root). Labels match the destination so
+  the user can see at a glance.
+- **Author Detail series fetch URL fix.** `MobileSeriesSection` was
+  hitting a non-existent `/series/{id}/books` route; switched to
+  `/series/{id}?slug=…` matching the desktop path.
+- **Touch detection for iPad landscape.** Added `isTouch` to
+  `useViewport` via `(pointer: coarse)` so iPad Pro 12.9"
+  landscape (1366px, outside `isTablet`'s 1024px ceiling) still
+  takes the mobile codepath. `matchMedia` change events handle
+  Magic Keyboard attach/detach at runtime.
+- **`BookSidebar` cover slot.** Two follow-ups after Phase 4 UAT:
+  fixed `aspect-ratio: 2/3` with `flex-shrink: 0` and 600px max-
+  height so unusual cover aspects (banner, square, common in
+  self-pub) letterbox cleanly inside a consistently-sized slot
+  with the blurred-self backdrop visible behind.
+- **Re-enrich on mobile review cards.** Brings parity with the
+  desktop action — chip alongside Edit, confirm before firing.
+- **Phase 1 UAT round 1.** Hamburger nav on iPads + landscape
+  phones (701–1024px), enlarged collapse caret to 44pt circular
+  affordance, Hermes + Pipeline dashboard sections default open,
+  health-pill row wraps instead of horizontal-scrolling.
+
+### Security
+
+- **postcss 8.5.9 → 8.5.12** (CVE-2026-41305 / GHSA-qx2v-qp2m-jg93,
+  XSS via unescaped `</style>` in CSS Stringify output, medium).
+- **serialize-javascript 6.0.2 → 7.0.5** (GHSA-5c6j-r48x-rmvq RCE
+  via `RegExp.flags` and `Date.prototype.toISOString()`, high; plus
+  CVE-2026-34043 / GHSA-qj8w-gfj5-8c6v CPU-exhaustion DoS via
+  crafted array-like objects, medium).
+
+  Both are pulled in transitively (postcss via `vite`,
+  serialize-javascript via `vite-plugin-pwa → workbox-build →
+  @rollup/plugin-terser`); upstream parents haven't shipped bumps
+  yet, so this release uses npm `overrides` in
+  `frontend/package.json` to force the patched versions across the
+  tree. `npm audit` reports 0 vulnerabilities.
+
+### Housekeeping
+
+- **Drop shipped TIER1/TIER2 UAT plans.** One-shot manual test
+  plans for the MouseSearch port (Tier 1 MAM economy + Tier 2 SSE
+  live events). Both shipped and UAT-passed in 2.0.0; the plans no
+  longer match the current code and were removed. History
+  preserves them at `6662b51` (Tier 2) and `d5c92a6` (Tier 1).
+
+---
+
 ## [2.0.0] — 2026-04-24
 
 Major release. Three tiers of MouseSearch-port work (MAM economy bundle,
