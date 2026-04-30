@@ -279,6 +279,113 @@ async def test_matching_series_index_still_dedups(discovery_db):
     assert new == 0
 
 
+async def test_orphan_series_cleanup_keeps_cross_author_referenced_series(discovery_db):
+    """
+    Regression: the orphan-series cleanup at the tail of `_merge_result`
+    used to scope its "is anyone referencing this series" subquery to
+    the SCANNED author's books only. For pen-name-linked pairs that
+    leaves the cross-author references invisible — Arand owns the
+    "Incubus Inc." series row, but only Darren's books reference it.
+    A scan of Arand would see "no Arand books reference Incubus Inc."
+    → DELETE the series row → trip the FK from Darren's books
+    (`books.series_id REFERENCES series(id)`) → roll back the entire
+    scan transaction so every successful merge in the loop is lost.
+
+    After the fix the subquery is unscoped — any book anywhere
+    referencing the series keeps it alive.
+    """
+    from app.discovery.lookup import _merge_result
+    from app.discovery.sources.base import AuthorResult, BookResult
+
+    # The exact production shape: Arand owns the "Incubus Inc." series
+    # row but has no books referencing it. Darren has 3 books that do.
+    arand_id = await _insert_author("William D. Arand")
+    shared_series_id = await _insert_series("Incubus Inc.", arand_id)
+
+    darren_id = await _insert_author("Randi Darren")
+    for idx in (1.0, 2.0, 3.0):
+        await _insert_book(
+            f"Incubus Inc. {int(idx)}", darren_id,
+            series_id=shared_series_id, series_index=idx,
+            owned=0, source="hardcover",
+        )
+
+    # Drive a benign scan for Arand — one new owned book unrelated to
+    # the shared series. Before the fix, the orphan cleanup at the end
+    # raises FK-constraint-failed and `_merge_result` returns (0, 0)
+    # via the outer caller's except clause, but the lookup itself
+    # raises here so we assert directly.
+    result = AuthorResult(
+        name="William D. Arand",
+        external_id="arand-1",
+        books=[
+            BookResult(
+                title="Some Standalone",
+                source="hardcover",
+            ),
+        ],
+    )
+
+    # Should NOT raise. Before fix: FK constraint failed.
+    new, _ = await _merge_result(
+        author_id=arand_id,
+        result=result,
+        source_name="hardcover",
+        languages=["English"],
+        linked_author_ids=[darren_id],
+    )
+
+    # The shared series row must still exist — Darren's books reference it.
+    from app.discovery.database import get_db
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT id FROM series WHERE id = ?", (shared_series_id,)
+        )).fetchone()
+    finally:
+        await db.close()
+    assert row is not None, "Shared cross-author series was deleted"
+
+    # The new standalone landed.
+    assert new == 1
+
+
+async def test_orphan_series_cleanup_still_drops_truly_orphaned_series(discovery_db):
+    """
+    Sanity: the fix must not regress the normal cleanup case. A series
+    row owned by the scanned author with NO books referencing it from
+    any author should still be dropped.
+    """
+    from app.discovery.lookup import _merge_result
+    from app.discovery.sources.base import AuthorResult, BookResult
+
+    arand_id = await _insert_author("William D. Arand")
+    orphan_id = await _insert_series("Cancelled Saga", arand_id)
+    # No books anywhere reference orphan_id.
+
+    result = AuthorResult(
+        name="William D. Arand",
+        external_id="arand-1",
+        books=[BookResult(title="Different Standalone", source="hardcover")],
+    )
+    await _merge_result(
+        author_id=arand_id,
+        result=result,
+        source_name="hardcover",
+        languages=["English"],
+    )
+
+    from app.discovery.database import get_db
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT id FROM series WHERE id = ?", (orphan_id,)
+        )).fetchone()
+    finally:
+        await db.close()
+    assert row is None, "Truly orphaned series should have been deleted"
+
+
 async def test_bare_standalone_fuzzy_match_still_works(discovery_db):
     """
     Sanity: fuzzy match WITHOUT series indices on either side should

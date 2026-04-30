@@ -1253,15 +1253,21 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # ── Orphan series safety net ─────────────────────────────────
         # Defense in depth: even with the lazy upsert above, some other
         # code path could in theory leave a series row pointing at no
-        # books for this author. Scope the cleanup to THIS author's
-        # series only (not a global sweep) so we don't accidentally
-        # touch concurrently-running scans for other authors. Idempotent
-        # — running it twice deletes nothing the second time.
+        # books at all. We only consider series rows owned by THIS
+        # author for deletion (so we don't touch concurrently-running
+        # scans for other authors), but the "is anyone referencing it"
+        # check has to look at books from EVERY author — pen-name and
+        # co-author links park books from one author against another
+        # author's series row, and scoping the subquery to author_id
+        # would pretend those references don't exist and DELETE the
+        # series, then trip `books.series_id REFERENCES series(id)`
+        # and roll back every merge in this scan's transaction.
+        # Idempotent — running it twice deletes nothing the second time.
         cleanup_cur = await db.execute(
             "DELETE FROM series WHERE author_id = ? AND id NOT IN "
             "(SELECT DISTINCT series_id FROM books "
-            " WHERE series_id IS NOT NULL AND author_id = ?)",
-            (author_id, author_id),
+            " WHERE series_id IS NOT NULL)",
+            (author_id,),
         )
         if cleanup_cur.rowcount > 0:
             logger.debug(
