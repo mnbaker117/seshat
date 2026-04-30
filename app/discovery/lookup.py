@@ -481,6 +481,80 @@ def _series_index_conflicts(
         return False
 
 
+def _title_extracted_index(title: str | None) -> float | None:
+    """Pull a series-position number out of a title via regex, if one
+    can be inferred. `_RX_TITLE_SERIES_IDX` is the same regex
+    `_title_to_series_pass` uses to repair untagged sources.
+
+    Catches the bare-trailing-number case ("Super Sales on Super
+    Heroes 4"), the explicit "#N" case, and the "Book N" case. Used
+    by `_fuzzy_match_blocked` as a second-line conflict signal when
+    the source returns the book as a standalone (no `series_index`
+    on the BookResult) but the title encodes a position.
+    """
+    if not title:
+        return None
+    m = _RX_TITLE_SERIES_IDX.search(title)
+    if not m:
+        return None
+    for grp in m.groups():
+        if grp is not None:
+            try:
+                return float(grp)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _fuzzy_match_blocked(bk, row) -> str | None:
+    """Return a short reason string if a fuzzy title match between
+    `bk` (BookResult) and `row` (DB row) should be REJECTED, or
+    None if the match is acceptable.
+
+    Two reject signals on top of the `_fuzzy_match` substring/
+    SequenceMatcher acceptance:
+
+    1. **Omnibus / non-omnibus mismatch**: if one side's title
+       triggers `_is_omnibus` (matches "compilation", "omnibus",
+       "complete trilogy", etc.) and the other doesn't, they're
+       different books regardless of how high the title overlap
+       runs. Catches Hardcover's "Right of Retribution: Compilation:
+       The Starting Point" fuzzy-matching onto the user's owned
+       book #1 "Right of Retribution" via prefix containment.
+
+    2. **Series-position conflict (extended)**: the original
+       `_series_index_conflicts` check only fires when BOTH sides
+       carry an explicit `series_index`. ibdb commonly returns
+       series books as standalones (no series_index tag) with the
+       position encoded in the title — "Super Sales on Super
+       Heroes 4". Without this extension the fuzzy matcher accepts
+       #4 onto an existing #2 row and `_update_existing` overwrites
+       the wrong row's metadata. Fall back to title-extracted
+       indices on either side when the explicit index is missing.
+
+    Returns `None` when the match is acceptable, or a short reason
+    code suitable for log lines (`omnibus_mismatch` /
+    `position_conflict`).
+    """
+    bk_title = bk.title
+    row_title = row["title"]
+    if _is_omnibus(bk_title) != _is_omnibus(row_title):
+        return "omnibus_mismatch"
+    bk_idx = bk.series_index
+    if bk_idx is None:
+        bk_idx = _title_extracted_index(bk_title)
+    row_idx = row["series_index"] if "series_index" in row.keys() else None
+    if row_idx is None:
+        row_idx = _title_extracted_index(row_title)
+    if bk_idx is not None and row_idx is not None:
+        try:
+            if float(bk_idx) != float(row_idx):
+                return "position_conflict"
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _lang_ok(book_lang: str, allowed: list[str]) -> bool:
     """Check if a book's language is in the allowed list."""
     if not allowed: return True
@@ -850,16 +924,23 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             # Omnibus flag promotion (additive only): existing rows that
             # were inserted before _RX_OMNIBUS matched their title — or
             # imported from Calibre, which never sets the flag — get
-            # caught here on the next merge. Match against either title
-            # so we promote whether the regex hits the existing curated
-            # title or the incoming source title. Never clears the flag
-            # (existing 1 stays 1) so a deliberately-set omnibus row
-            # can't be un-flagged by a stricter incoming title. Placed
-            # after the series block so its series_index=NULL overrides
-            # whatever series_index the series block may have set —
-            # omnibus entries shouldn't push other books out of position.
+            # caught here on the next merge. Only check the EXISTING
+            # title, never the incoming. The upstream
+            # `_fuzzy_match_blocked` guard rejects omnibus/non-omnibus
+            # mismatches before they reach this code, but be defensive
+            # anyway: if a fuzzy match somehow accepted an omnibus
+            # incoming onto a non-omnibus existing row (or vice versa),
+            # we should NOT then stamp the existing row with the
+            # incoming's classification — that flips the wrong row's
+            # flag (Mark's "Right of Retribution" → "Right of
+            # Retribution: Compilation: The Starting Point" case from
+            # the v2.2.0 UAT). Never clears the flag (existing 1 stays
+            # 1). Placed after the series block so its
+            # series_index=NULL overrides whatever series_index the
+            # series block may have set — omnibus entries shouldn't
+            # push other books out of position.
             existing_omni = matched_row["is_omnibus"] if "is_omnibus" in matched_row.keys() else 0
-            if not existing_omni and (_is_omnibus(matched_row["title"]) or _is_omnibus(bk.title)):
+            if not existing_omni and _is_omnibus(matched_row["title"]):
                 sets.append("is_omnibus=?"); vals.append(1)
                 sets.append("series_index=?"); vals.append(None)
                 logger.info(
@@ -1033,21 +1114,17 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if matched_row is None:
                     for r in rows:
                         if _fuzzy_match(bk.title, r["title"]):
-                            # Series-index conflict guard: `_fuzzy_match`
-                            # accepts "Incubus Inc." against "Incubus
-                            # Inc. 3" via substring-containment, but
-                            # those are different books (#1 vs #3). If
-                            # both sides carry a series_index and they
-                            # disagree, skip this candidate and keep
-                            # looking — a real match with agreeing
-                            # indices might still be in `rows`.
-                            if _series_index_conflicts(
-                                bk.series_index, r["series_index"],
-                            ):
+                            # Multi-signal reject. Subsumes the old
+                            # series-index-only check and adds (a)
+                            # omnibus/standalone mismatch and (b)
+                            # title-extracted index when a side lacks
+                            # an explicit series_index. See
+                            # `_fuzzy_match_blocked` for the rationale.
+                            reason = _fuzzy_match_blocked(bk, r)
+                            if reason:
                                 logger.debug(
-                                    f"    FUZZY MATCH REJECTED: '{bk.title}' "
-                                    f"(#{bk.series_index}) vs '{r['title']}' "
-                                    f"(#{r['series_index']}) — series indices differ"
+                                    f"    FUZZY MATCH REJECTED ({reason}): "
+                                    f"'{bk.title}' vs '{r['title']}'"
                                 )
                                 continue
                             matched_row = r
@@ -1169,19 +1246,21 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if matched_row is None:
                 for r in rows:
                     if _fuzzy_match(bk.title, r["title"]):
-                        # Same series-index guard as the series-books
-                        # path above. Catches the case where an ibdb/
-                        # Hardcover result reports a book as standalone
-                        # but with a series_index hint — avoids it
-                        # colliding onto a different-numbered existing
-                        # book whose title fuzzy-prefixes.
-                        if _series_index_conflicts(
-                            bk.series_index, r["series_index"],
-                        ):
+                        # Same multi-signal reject as the series-
+                        # books path above. Critical for the
+                        # standalone path because sources like ibdb
+                        # routinely return series books as
+                        # standalones (no series_index tag) with
+                        # the position encoded in the title — the
+                        # title-extracted-index arm of the check
+                        # is what stops "Super Sales on Super
+                        # Heroes 4" from overwriting an existing
+                        # "Super Sales on Super Heroes 2" row.
+                        reason = _fuzzy_match_blocked(bk, r)
+                        if reason:
                             logger.debug(
-                                f"    FUZZY MATCH REJECTED: '{bk.title}' "
-                                f"(#{bk.series_index}) vs '{r['title']}' "
-                                f"(#{r['series_index']}) — series indices differ"
+                                f"    FUZZY MATCH REJECTED ({reason}): "
+                                f"'{bk.title}' vs '{r['title']}'"
                             )
                             continue
                         matched_row = r

@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.discovery.lookup import _series_index_conflicts
+from app.discovery.lookup import (
+    _fuzzy_match_blocked,
+    _series_index_conflicts,
+    _title_extracted_index,
+)
 
 
 # ─── _series_index_conflicts (pure) ──────────────────────────
@@ -59,6 +63,136 @@ class TestSeriesIndexConflicts:
         # raising.
         assert not _series_index_conflicts("abc", 3)  # type: ignore[arg-type]
         assert not _series_index_conflicts(3, "abc")  # type: ignore[arg-type]
+
+
+# ─── _title_extracted_index (pure) ───────────────────────────
+
+class TestTitleExtractedIndex:
+    def test_trailing_number(self):
+        assert _title_extracted_index("Super Sales on Super Heroes 4") == 4.0
+
+    def test_trailing_decimal(self):
+        assert _title_extracted_index("Mistborn 2.5") == 2.5
+
+    def test_hash_prefix(self):
+        assert _title_extracted_index("Series Name #3") == 3.0
+
+    def test_book_n_form(self):
+        assert _title_extracted_index("Right of Retribution Book 2") == 2.0
+
+    def test_no_number_returns_none(self):
+        assert _title_extracted_index("Right of Retribution") is None
+
+    def test_empty_returns_none(self):
+        assert _title_extracted_index("") is None
+        assert _title_extracted_index(None) is None  # type: ignore[arg-type]
+
+
+# ─── _fuzzy_match_blocked (pure) ─────────────────────────────
+
+class TestFuzzyMatchBlocked:
+    """Two reject signals on top of the SequenceMatcher acceptance:
+    omnibus mismatch and title-extracted series-position conflict."""
+
+    def _row(self, title, series_index=None, is_omnibus=0):
+        # Stand-in for an aiosqlite Row — duck-typed via __getitem__
+        # and .keys() like the real one. Tests don't actually need a
+        # real Row, just one that supports the same accessor surface
+        # the production code uses.
+        class _R:
+            def __init__(self, **kw):
+                self._d = kw
+            def __getitem__(self, k):
+                return self._d.get(k)
+            def keys(self):
+                return list(self._d.keys())
+        return _R(title=title, series_index=series_index, is_omnibus=is_omnibus)
+
+    def _bk(self, title, series_index=None):
+        # Stand-in for BookResult — only needs the two attributes the
+        # blocker reads.
+        class _B:
+            pass
+        b = _B()
+        b.title = title
+        b.series_index = series_index
+        return b
+
+    # — Omnibus mismatch —
+
+    def test_incoming_omnibus_blocks_match_to_standalone(self):
+        """Hardcover's 'Right of Retribution: Compilation: The Starting
+        Point' must NOT merge onto the user's owned 'Right of
+        Retribution' standalone. Compilation matches `_RX_OMNIBUS`,
+        the standalone doesn't."""
+        bk = self._bk("Right of Retribution: Compilation: The Starting Point")
+        row = self._row("Right of Retribution")
+        assert _fuzzy_match_blocked(bk, row) == "omnibus_mismatch"
+
+    def test_incoming_standalone_blocks_match_to_omnibus(self):
+        """Symmetric: a standalone-shaped incoming should not merge
+        onto an existing omnibus row either."""
+        bk = self._bk("Right of Retribution")
+        row = self._row("Right of Retribution: Compilation: The Starting Point")
+        assert _fuzzy_match_blocked(bk, row) == "omnibus_mismatch"
+
+    def test_both_omnibus_does_not_block(self):
+        bk = self._bk("Hero Support: Omnibus")
+        row = self._row("Hero Support Omnibus Edition")
+        assert _fuzzy_match_blocked(bk, row) is None
+
+    def test_both_standalone_does_not_block(self):
+        bk = self._bk("Right of Retribution")
+        row = self._row("Right of Retribution")
+        assert _fuzzy_match_blocked(bk, row) is None
+
+    # — Position conflict (title-extracted) —
+
+    def test_incoming_title_4_vs_existing_index_2_blocks(self):
+        """The Super Sales #4 case: ibdb returns #4 as a standalone
+        (no series_index on the BookResult) but the title encodes the
+        position. Existing row has series_index=2. Block."""
+        bk = self._bk("Super Sales on Super Heroes 4", series_index=None)
+        row = self._row("Super Sales on Super Heroes 2", series_index=2.0)
+        assert _fuzzy_match_blocked(bk, row) == "position_conflict"
+
+    def test_incoming_title_4_vs_existing_title_2_blocks(self):
+        """Both sides untagged but title-extractable — block."""
+        bk = self._bk("Super Sales on Super Heroes 4", series_index=None)
+        row = self._row("Super Sales on Super Heroes 2", series_index=None)
+        assert _fuzzy_match_blocked(bk, row) == "position_conflict"
+
+    def test_matching_title_extracted_indices_does_not_block(self):
+        bk = self._bk("Super Sales on Super Heroes 4", series_index=None)
+        row = self._row("Super Sales on Super Heroes 4", series_index=None)
+        assert _fuzzy_match_blocked(bk, row) is None
+
+    def test_one_side_unindexed_does_not_block(self):
+        """When only one side has any index signal, we can't prove
+        they're different — defer to the fuzzy match. Source might
+        legitimately have dropped the position; the existing row
+        might be the canonical of the same book."""
+        bk = self._bk("Right of Retribution", series_index=None)
+        row = self._row("Right of Retribution", series_index=1.0)
+        assert _fuzzy_match_blocked(bk, row) is None
+
+    # — Combined / sanity —
+
+    def test_explicit_series_index_takes_precedence_over_title(self):
+        """If the BookResult has an explicit series_index, use it.
+        Title-extracted index is a fallback for when the explicit
+        one is missing."""
+        bk = self._bk("Super Sales on Super Heroes 4", series_index=2.0)
+        row = self._row("Super Sales on Super Heroes 2", series_index=2.0)
+        assert _fuzzy_match_blocked(bk, row) is None  # both 2.0
+
+    def test_returns_omnibus_reason_first_when_both_apply(self):
+        """If a candidate trips both signals, we report omnibus_mismatch
+        (it's the more specific signal). Either reason rejects the
+        match; the choice only matters for log readability."""
+        bk = self._bk("Super Sales Omnibus 4")
+        row = self._row("Super Sales 2", series_index=2.0)
+        assert _fuzzy_match_blocked(bk, row) == "omnibus_mismatch"
 
 
 # ─── _merge_result integration for pen-name dedup ────────────
