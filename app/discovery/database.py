@@ -452,6 +452,125 @@ def _norm_series_name(name: str) -> str:
     return re.sub(r'\s+', ' ', n).strip()
 
 
+async def _backfill_series_index_from_title(db) -> tuple[int, int]:
+    """Set `series_index` on rows whose title encodes a position the
+    column lost.
+
+    Two cases the helper repairs:
+      - Source emitted "Series N: Title" / "Series Book N: Title" /
+        "Title (Series #N)" but tagged the row as standalone, so the
+        merge inserted with NULL series_index. The end-of-scan
+        title→series pass linked the series_id but `_RX_TITLE_SERIES_IDX`
+        only catches `#N`, `Book N`, or trailing `\\d+$` — none of which
+        fit the prefix-style.
+      - A duplicate row already sits at the canonical position; if so,
+        we drop the loser (un-owned, longer "Book N"-style title, or
+        higher id) instead of setting the index. Mirrors the dedup
+        rules in `_title_to_series_pass`.
+
+    Returns (rows_indexed, rows_deduped). Idempotent — runs each
+    startup but the typical steady-state touch count is 0.
+    """
+    from app.discovery.lookup import (
+        _RX_SERIES_PREFIX_TITLE,
+        _RX_SERIES_PAREN_TITLE,
+        _RX_BOOK_N_SUFFIX,
+        _norm_consensus_series,
+    )
+
+    # Author → series-name → series_id, scoped per-author (a series
+    # name belongs to one author in this DB schema).
+    series_rows = await (await db.execute(
+        "SELECT id, name, author_id FROM series"
+    )).fetchall()
+    sid_by_author_name: dict[tuple[int, str], int] = {}
+    for s in series_rows:
+        if not s["name"] or s["author_id"] is None:
+            continue
+        sid_by_author_name[(s["author_id"], s["name"].lower())] = s["id"]
+        norm = _norm_consensus_series(s["name"])
+        if norm:
+            sid_by_author_name.setdefault((s["author_id"], norm), s["id"])
+
+    targets = await (await db.execute(
+        "SELECT id, title, author_id, series_id, owned "
+        "FROM books "
+        "WHERE series_id IS NOT NULL AND series_index IS NULL "
+        "AND title IS NOT NULL"
+    )).fetchall()
+
+    indexed = 0
+    deduped = 0
+    for t in targets:
+        title = t["title"]
+        # Extract candidate (series_name, series_index) from the title.
+        candidates: list[tuple[str, float]] = []
+        mp = _RX_SERIES_PREFIX_TITLE.match(title)
+        if mp:
+            candidates.append((mp.group(1).strip(), float(mp.group(2))))
+        mq = _RX_SERIES_PAREN_TITLE.search(title)
+        if mq:
+            candidates.append((mq.group(1).strip(), float(mq.group(2))))
+        if not candidates:
+            continue
+
+        # Resolve at least one candidate to a known series for THIS
+        # author and ensure it matches the row's already-set series_id
+        # (defensive: don't relocate a row to a different series).
+        idx = None
+        for s_name, s_idx in candidates:
+            sid = (
+                sid_by_author_name.get((t["author_id"], s_name.lower()))
+                or sid_by_author_name.get(
+                    (t["author_id"], _norm_consensus_series(s_name))
+                )
+            )
+            if sid == t["series_id"]:
+                idx = s_idx
+                break
+        if idx is None:
+            continue
+
+        # Check whether another row already holds (author_id, series_id, idx).
+        existing = await (await db.execute(
+            "SELECT id, title, owned FROM books "
+            "WHERE author_id = ? AND series_id = ? "
+            "AND series_index = ? AND id != ?",
+            (t["author_id"], t["series_id"], idx, t["id"]),
+        )).fetchone()
+
+        if existing is None:
+            await db.execute(
+                "UPDATE books SET series_index = ? WHERE id = ?",
+                (idx, t["id"]),
+            )
+            indexed += 1
+            continue
+
+        # Same-position collision — pick a winner using the same rules
+        # as `_title_to_series_pass`: owned wins, then non-Book-N
+        # title, then lowest id. Higher tuple wins.
+        ex_owned = int(existing["owned"] or 0)
+        in_owned = int(t["owned"] or 0)
+        ex_book_n = bool(_RX_BOOK_N_SUFFIX.search(existing["title"] or ""))
+        in_book_n = bool(_RX_BOOK_N_SUFFIX.search(title or ""))
+        ex_score = (ex_owned, 0 if ex_book_n else 1, -existing["id"])
+        in_score = (in_owned, 0 if in_book_n else 1, -t["id"])
+        if ex_score >= in_score:
+            await db.execute("DELETE FROM books WHERE id = ?", (t["id"],))
+        else:
+            await db.execute("DELETE FROM books WHERE id = ?", (existing["id"],))
+            await db.execute(
+                "UPDATE books SET series_index = ? WHERE id = ?",
+                (idx, t["id"]),
+            )
+        deduped += 1
+
+    if indexed or deduped:
+        await db.commit()
+    return indexed, deduped
+
+
 async def _backfill_omnibus_flag(db) -> int:
     """Set `is_omnibus=1` on existing rows whose title matches the omnibus pattern.
 
@@ -923,6 +1042,20 @@ async def init_db(slug=None):
             _db_logger.info(
                 f"Omnibus backfill flagged {omni_touched} previously-"
                 f"unflagged book row(s)"
+            )
+
+        # ── Step 7: Series-index recovery from title ────────────────
+        # Repairs rows that have series_id set but series_index NULL
+        # because the source emitted them as standalone (Goodreads's
+        # "(Paths of Akashic #5)" tagline is in the title but not
+        # tagged in the API). Extracts the implicit index from the
+        # title and either sets it on the row or — when a duplicate
+        # already sits at that position — dedupes the pair.
+        idx_touched, idx_deduped = await _backfill_series_index_from_title(db)
+        if idx_touched or idx_deduped:
+            _db_logger.info(
+                f"Series-index recovery indexed {idx_touched} row(s), "
+                f"deduped {idx_deduped} same-position pair(s)"
             )
     finally:
         await db.close()

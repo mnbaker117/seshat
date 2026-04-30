@@ -759,6 +759,20 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     return (sid, s_idx)
             return None
 
+        # Second pass: index existing rows by title-extracted position
+        # too, so Goodreads-inserted standalone rows like "The Expanse
+        # (Paths of Akashic #5)" — which carry NULL in series_id /
+        # series_index because Goodreads emits them as standalone but
+        # encode the position in the title — can still be matched as
+        # the canonical row when Hardcover/Kobo arrives later in the
+        # same scan with "Paths of Akashic 5: The Expanse".
+        # `setdefault` keeps the explicitly-stored entry winning if
+        # both forms exist for the same row.
+        for r in rows:
+            extracted = _extract_series_position(r["title"] or "")
+            if extracted is not None:
+                rows_by_series_pos.setdefault(extracted, r)
+
         # Source priority: Goodreads can overwrite series from any other source
         SOURCE_PRIORITY = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6, "manual": 7, "import": 7, "calibre": 0}
         
