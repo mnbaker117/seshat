@@ -98,6 +98,20 @@ mount so Seshat can drop new audiobook files straight into ABS's
 library path — Seshat will trigger a scan on the ABS server as soon
 as the file lands.
 
+### Image variants
+
+Two image tags ship from each commit:
+
+| Tag | Size | Use when |
+|---|---|---|
+| `ghcr.io/mnbaker117/seshat:latest` | ~860MB | You want the **direct Calibre sink** (`calibredb add`). Bundles Calibre's official binary build. |
+| `ghcr.io/mnbaker117/seshat:latest-slim` | ~200MB | You ingest via the **CWA**, **ABS**, or **file-folder** sinks and don't need direct calibredb access. Saves ~660MB. |
+
+If you select the Calibre sink in Settings on the slim image, the
+sink will fail with a clear "calibredb not found" error pointing
+you back here. Switching variants is a `docker pull` away — Seshat's
+state lives entirely on the `/app/data` volume.
+
 ---
 
 ## Architecture

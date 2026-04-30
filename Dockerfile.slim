@@ -1,0 +1,63 @@
+# Seshat — slim variant (no Calibre).
+#
+# Pick this image (`ghcr.io/mnbaker117/seshat:latest-slim`) when you
+# don't need direct calibredb add — i.e. you're ingesting via the
+# CWA sink, the ABS sink, or the file-folder sink. Saves ~600MB
+# vs the full image because the entire Calibre tarball + the system
+# libs Calibre's Qt loader needs are dropped.
+#
+# CalibreSink will fail at runtime with "calibredb not found" if you
+# enable it in Settings on the slim image; the error message in
+# app/sinks/calibre.py is the documented pointer to switch images.
+#
+# Two-stage build: same node:lts frontend stage as the full image,
+# then a lean python:3.12-slim runtime with just sqlite3 (for DB
+# inspection during ops debugging) and the Python deps.
+
+# ─── Stage 1: frontend build ───────────────────────────────────
+FROM node:22-alpine AS frontend-build
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+
+# ─── Stage 2: python runtime ───────────────────────────────────
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    SESHAT_MODE=docker \
+    DATA_DIR=/app/data
+
+WORKDIR /app
+
+# sqlite3 for ad-hoc DB inspection. No Calibre, no Qt, no fonts.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+COPY app ./app
+COPY pyproject.toml ./
+COPY --from=frontend-build /build/dist ./frontend/dist
+
+ARG GIT_SHA=unknown
+RUN echo "${GIT_SHA}" > /app/VERSION
+
+RUN mkdir -p /app/data /staging
+VOLUME ["/app/data"]
+
+EXPOSE 8789
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request,sys; \
+        sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8789/api/health').status == 200 else 1)"
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8789"]

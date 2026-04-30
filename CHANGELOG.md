@@ -7,6 +7,73 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [Unreleased]
+
+### Discovery — Stoham omnibus regression
+
+- **Standalone INSERT now sets `is_omnibus`.** The previous omnibus
+  fix added flag promotion via `_update_existing` and a startup
+  backfill, but the standalone INSERT path had been silently dropping
+  the column since the feature was first written. Goodreads emits
+  titles like "Hero Support: Omnibus" / "Amazonian Master Omnibus" /
+  "The Complete Deadland Saga" as standalones (no series tagging),
+  so they hit that hole and landed at `is_omnibus=0`, then
+  `_title_to_series_pass` parked them next to the real numbered
+  volumes in the series. The series INSERT path was always correct;
+  the standalone path now mirrors it.
+
+### UI — selection ergonomics
+
+- **Authors page Select All on Page.** The selection bar now opens
+  in `selMode` regardless of whether anything is selected, with a
+  "Select All on Page" button beside the count. Action buttons
+  (Scan, ClearMenu, Link) are gated on having ≥1 selected; Link
+  buttons stay gated on ≥2.
+- **Cross-page additive selection.** `selectAllVisible` on the
+  Authors, Library, and MAM pages now merges the visible page slice
+  into the existing selection instead of replacing it. Page →
+  Select All on Page → Page → Select All on Page builds a multi-
+  page selection.
+
+### Settings — Data Management
+
+- **Per-author + global discovery clears.** The Data Management tab
+  picks back up the AthenaScout UX: type-ahead author search with
+  chip multi-select, per-author Clear Source / Clear MAM / Clear
+  Both, and Wipe-All buttons for source data and MAM data. The
+  pipeline-tables clears (tentative_torrents, book_review_queue,
+  etc.) sit below a divider as before.
+
+### Docker image — calibre tarball + slim variant
+
+- **Default `:latest` switched from `apt-get install calibre` to
+  Calibre's official self-contained binary tarball.** The apt path
+  pulled 1.27GB of Qt5 + Mesa + the GUI dependency closure even
+  though headless `calibredb add` / `list --for-machine` use almost
+  none of it. Calibre's binary distribution bundles its own Python
+  + Qt + libs and the apt deps drop to just `sqlite3 libxcb-cursor0
+  libfontconfig1 libxrender1`. Image size 1.47GB → ~860MB, a 41%
+  reduction. Calibre version is now pinned via `ARG CALIBRE_VERSION`
+  with a Renovate annotation for automated bumps.
+
+- **`libgl1` / `libegl1` / `libopengl0` deliberately omitted.** Those
+  alone pull in libllvm19 (~127MB) and mesa-libgallium (~42MB) for
+  the software OpenGL stack, which calibredb's `add` and `list`
+  don't exercise. If a Calibre operation does fail on a missing
+  GL/Qt symbol, `app/sinks/calibre.py:_detect_runtime_lib_failure`
+  inspects calibredb's stderr and emits a structured diagnostic
+  block (image variant, action, stderr snippet, escape-hatch hint)
+  pointing the user at GitHub Issues — so we can collect data and
+  add the lib back if it turns out we need to.
+
+- **New `:latest-slim` image variant.** Drops Calibre entirely.
+  ~200MB total — an 86% reduction vs the current 1.47GB. Pick this
+  if you ingest via the CWA, ABS, or file-folder sinks. The full
+  and slim variants build from the same commit via a workflow
+  matrix; switching is a `docker pull` away.
+
+---
+
 ## [2.1.1] — 2026-04-29
 
 Patch release. Fixes four classes of source-scan correctness bugs

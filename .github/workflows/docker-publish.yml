@@ -17,6 +17,19 @@ jobs:
       contents: read
       packages: write
 
+    # Two image variants per commit:
+    #   - full:  ghcr.io/<repo>:latest         (Calibre bundled, ~860MB)
+    #   - slim:  ghcr.io/<repo>:latest-slim    (no Calibre,      ~225MB)
+    # Suffix + onlatest makes metadata-action emit `latest-slim` /
+    # `<version>-slim` for the slim row alongside the bare tags for full.
+    strategy:
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            suffix: ""
+          - dockerfile: Dockerfile.slim
+            suffix: "-slim"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,6 +46,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -43,6 +58,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

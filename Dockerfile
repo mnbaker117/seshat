@@ -1,13 +1,26 @@
-# Seshat Docker image — Phase 3 production build.
+# Seshat — production Docker image (full Calibre).
 #
-# Includes calibre CLI tools (~500MB) for the post-download pipeline
-# (calibredb add). The calibredb binary talks directly to a Calibre
-# library directory mounted as a volume — it does NOT need the
-# Calibre GUI or content server running.
+# Two image variants are published per push:
+#   - ghcr.io/mnbaker117/seshat:latest        ← built from this Dockerfile
+#   - ghcr.io/mnbaker117/seshat:latest-slim   ← built from Dockerfile.slim,
+#                                               no Calibre, ~225MB. Pick this
+#                                               one if you ingest via CWA, ABS,
+#                                               or the file-folder sink and
+#                                               don't need direct calibredb add.
 #
-# Two-stage build: a small node:lts stage compiles the React frontend
-# (Vite + TypeScript), then we copy `frontend/dist` into the Python
-# stage. This keeps the runtime image free of node_modules + npm.
+# The full image uses Calibre's official self-contained tarball
+# (~650MB) instead of `apt install calibre` (which pulled 1.27GB of
+# Qt5 + Mesa stack via apt). Calibre bundles its own Python + Qt + libs,
+# so apt-side we only install the few small system libraries Calibre's
+# loader expects to find at runtime.
+#
+# Three-stage build:
+#   1. node:22-alpine   compiles the React frontend (Vite + TypeScript)
+#   2. python:3.12-slim downloads + extracts the Calibre tarball
+#   3. python:3.12-slim is the runtime; it copies /opt/calibre from
+#      stage 2 and frontend/dist from stage 1, then layers the Python
+#      app. Stage 1 + 2 caches are discarded so wget/xz/node never
+#      ship in the runtime layer.
 
 # ─── Stage 1: frontend build ───────────────────────────────────
 FROM node:22-alpine AS frontend-build
@@ -18,7 +31,32 @@ COPY frontend/ ./
 RUN npm run build
 
 
-# ─── Stage 2: python runtime ───────────────────────────────────
+# ─── Stage 2: Calibre fetch ────────────────────────────────────
+# Pulls the official Calibre tarball and extracts it. wget + xz only
+# live in this stage so they don't bloat the runtime image.
+#
+# CALIBRE_VERSION is bumped via Renovate's regex manager — the comment
+# below is the dependency declaration. To bump manually:
+#   1. Find the latest tag at https://github.com/kovidgoyal/calibre/releases
+#   2. Update the value below
+#   3. Verify the tarball URL responds with 200:
+#      curl -sI https://download.calibre-ebook.com/<version>/calibre-<version>-x86_64.txz
+FROM python:3.12-slim AS calibre-fetch
+# renovate: datasource=github-releases depName=kovidgoyal/calibre extractVersion=^v(?<version>.+)$
+ARG CALIBRE_VERSION=9.7.0
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        wget \
+        xz-utils \
+        ca-certificates \
+    && wget -nv -O /tmp/calibre.txz \
+        "https://download.calibre-ebook.com/${CALIBRE_VERSION}/calibre-${CALIBRE_VERSION}-x86_64.txz" \
+    && mkdir -p /opt/calibre \
+    && tar xJf /tmp/calibre.txz -C /opt/calibre \
+    && rm /tmp/calibre.txz
+
+
+# ─── Stage 3: python runtime ───────────────────────────────────
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -34,21 +72,36 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # OS deps:
-#   - sqlite3: ad-hoc DB inspection during ops debugging
-#   - calibre: provides calibredb CLI for the post-download pipeline.
-#     ~500MB but needed for Phase 2 Calibre sink integration.
-#   - wget, xdg-utils: calibre installer dependencies
+#   - sqlite3:        ad-hoc DB inspection during ops debugging
+#   - libxcb-cursor0: Qt 6.5+ requires this for the cursor theme even
+#                     in headless contexts where calibredb only loads
+#                     QtCore.
+#   - libfontconfig1: Calibre's font enumeration (used by the metadata
+#                     cover generator) calls into fontconfig at import.
+#   - libxrender1:    Qt's xcb platform plugin pulls libxrender1 even
+#                     when calibredb runs without a display.
 #
-# DEBIAN_FRONTEND=noninteractive is scoped to this RUN via the inline
-# env rather than an ENV directive so it doesn't persist into the
-# runtime image. Quiets debconf's "can't find Term::ReadLine / TERM is
-# not set" cascade when apt has no tty — the fallback it ends at
-# (Noninteractive) is what we want anyway.
+# We deliberately do NOT install libgl1 / libegl1 / libopengl0: those
+# drag in libllvm19 (~127MB) + mesa-libgallium (~42MB) for the software
+# OpenGL stack, and headless calibredb add/list don't exercise GL paths
+# in any real-world test we've run. If a user hits a Qt-platform-plugin
+# failure that signals the GL stack IS needed for some specific Calibre
+# operation, app/sinks/calibre.py:_detect_runtime_lib_failure logs a
+# structured diagnostic pointing at the issue tracker so we can collect
+# data and re-add libgl1/libegl1/libopengl0 if it turns out we need to.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         sqlite3 \
-        calibre \
+        libxcb-cursor0 \
+        libfontconfig1 \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Pre-built Calibre tarball from stage 2. Symlink calibredb onto PATH
+# so app/sinks/calibre.py and app/notify/digests.py find it without
+# any path config.
+COPY --from=calibre-fetch /opt/calibre /opt/calibre
+RUN ln -s /opt/calibre/calibredb /usr/local/bin/calibredb
 
 # Install Python runtime dependencies first so the layer cache stays
 # warm across code changes. Test deps live in requirements-dev.txt
@@ -72,8 +125,8 @@ COPY --from=frontend-build /build/dist ./frontend/dist
 ARG GIT_SHA=unknown
 RUN echo "${GIT_SHA}" > /app/VERSION
 
-# Mount targets. /app/data for settings.json + seshat.db, /calibre
-# for the Calibre library, /staging for the post-download staging area.
+# Mount targets. /app/data for settings.json + seshat.db, /calibre for
+# the Calibre library, /staging for the post-download staging area.
 RUN mkdir -p /app/data /calibre /staging
 VOLUME ["/app/data"]
 
