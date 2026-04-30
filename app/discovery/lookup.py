@@ -732,6 +732,33 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             _normalize(r["name"]): r["name"] for r in author_series_rows if r["name"]
         }
 
+        def _extract_series_position(title: str) -> tuple[int, float] | None:
+            """Parse "<series> N: <title>" or "<title> (<series> #N)" forms
+            and resolve the prefix/parenthetical against this author's
+            known series. Returns (series_id, series_index) on success
+            or None if nothing parseable resolves to a known series.
+
+            Backstops the cross-format duplicate failure: Goodreads's
+            parenthetical form and Hardcover/Kobo's prefix form
+            normalize to disjoint tokens, but both encode the same
+            series-position pair which we use as the dedup key.
+            """
+            candidates: list[tuple[str, float]] = []
+            mp = _RX_SERIES_PREFIX_TITLE.match(title)
+            if mp:
+                candidates.append((mp.group(1).strip(), float(mp.group(2))))
+            mq = _RX_SERIES_PAREN_TITLE.search(title)
+            if mq:
+                candidates.append((mq.group(1).strip(), float(mq.group(2))))
+            for s_name, s_idx in candidates:
+                sid = (
+                    author_series_id_by_name.get(s_name.lower())
+                    or author_series_id_by_name.get(_norm_consensus_series(s_name))
+                )
+                if sid:
+                    return (sid, s_idx)
+            return None
+
         # Source priority: Goodreads can overwrite series from any other source
         SOURCE_PRIORITY = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6, "manual": 7, "import": 7, "calibre": 0}
         
@@ -1145,6 +1172,24 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                             continue
                         matched_row = r
                         break
+            # Series-position fallback for cross-format duplicates.
+            # When a source returns a series book in standalone form
+            # (no series tagging) but encodes the position in the title
+            # — "Paths of Akashic 5: The Expanse" or "The Expanse
+            # (Paths of Akashic #5)" — we extract (series_id,
+            # series_index) from the title and look it up against
+            # existing rows. Mirrors the same-series-position guard
+            # the series path uses; this is the standalone-side
+            # equivalent.
+            if matched_row is None:
+                pos = _extract_series_position(bk.title)
+                if pos is not None and pos in rows_by_series_pos:
+                    matched_row = rows_by_series_pos[pos]
+                    logger.info(
+                        f"    SERIES-POSITION MATCH: '{bk.title}' → "
+                        f"'{matched_row['title']}' via "
+                        f"series_id={pos[0]} #{pos[1]}"
+                    )
             if matched_row:
                 # Linked-author dedup (pen names + co-authors).
                 if matched_row["author_id"] != author_id:
@@ -1257,6 +1302,28 @@ _RX_TITLE_SERIES_IDX = re.compile(
 
 
 _RX_BOOK_N_SUFFIX = re.compile(r"\s+(book|bk)\s+\d+(\.\d+)?\s*$", re.IGNORECASE)
+
+
+# ─── Cross-format series-position dedup ─────────────────────────────
+# Goodreads emits "Title (Series #N)", Hardcover/Kobo emit
+# "Series N: Title" or "Series Book N: Title". `_normalize` strips
+# parens (the Goodreads form) and the "Subtitle" portion after a
+# colon (the Hardcover form), giving wildly different tokens for the
+# same book — `_normalize("The Expanse (Paths of Akashic #5)") =
+# "expanse"` vs `_normalize("Paths of Akashic 5: The Expanse") =
+# "paths of akashic 5"`. Even SequenceMatcher gives 0.24 ratio.
+#
+# These regexes pull the implicit `(series_name, series_index)` tuple
+# out of either layout so we can look up the existing book via
+# `rows_by_series_pos` instead of relying on title fuzziness.
+_RX_SERIES_PREFIX_TITLE = re.compile(
+    r"^(.+?)\s+(?:Book\s+|Vol(?:ume)?\.?\s+)?(\d+(?:\.\d+)?)\s*[:\-]\s+(.+)$",
+    re.IGNORECASE,
+)
+_RX_SERIES_PAREN_TITLE = re.compile(
+    r"\(([^()]+?)[,\s]+(?:Book\s+|Vol(?:ume)?\.?\s+|#)(\d+(?:\.\d+)?)\)",
+    re.IGNORECASE,
+)
 
 
 async def _title_to_series_pass(author_id: int):
