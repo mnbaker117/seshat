@@ -1242,12 +1242,13 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     )
                     continue
             initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
-            await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
-                (bk.title, author_id, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
+            omnibus = _is_omnibus(bk.title)
+            await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?,?)",
+                (bk.title, author_id, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id))
             existing.add(norm); new_books += 1
             if on_new_book:
                 on_new_book()
-            logger.debug(f"    NEW: '{bk.title}' → standalone from {source_name}")
+            logger.debug(f"    NEW: '{bk.title}' → standalone{' [OMNIBUS]' if omnibus else ''} from {source_name}")
 
         # ── Orphan series safety net ─────────────────────────────────
         # Defense in depth: even with the lazy upsert above, some other
