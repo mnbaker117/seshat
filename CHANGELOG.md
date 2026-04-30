@@ -7,6 +7,91 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.1.1] — 2026-04-29
+
+Patch release. Fixes four classes of source-scan correctness bugs
+surfaced by an A→Z full author scan: Kobo false positives, cross-
+author duplicates, mis-flagged omnibuses, and cross-format
+duplicate book entries. Two idempotent startup backfills clean up
+historical residue.
+
+### Discovery — source scan correctness
+
+- **Kobo author validation.** Kobo's `&fcsearchfield=Author` query
+  returned books where the queried name appeared anywhere in
+  credits — translator, foreword, contributor, anthology entries —
+  and the source plugin trusted the result without filtering.
+  Author "Bainin" pulled in 11 books by Greig Beck, Kate Rudolph,
+  Yu Shimizu, etc.; "Baoshu" pulled in books by Liu Cixin and
+  several others. Now: each title node is paired with its result-
+  card `data-testid="authors"` element and rejected if the listed
+  author doesn't match the queried name (or any linked pen-name /
+  co-author). Fuzzy match mirrors Hardcover's `_check_contributor`
+  (period-strip + parts-set).
+
+- **Cross-author owned-ISBN dedup.** The merge candidate set was
+  scoped to the scanned author + linked authors, so a book the
+  user already owned under (say) "Various authors" with the same
+  ISBN couldn't be deduplicated when a source attributed it to a
+  contributor — "Halo: Evolutions" appeared as a duplicate under
+  Tobias S. Buckell. Now: a cross-author owned-ISBN map (excluding
+  the same-author candidate set) is consulted before INSERT in
+  both the series and standalone paths. Conservative boundary —
+  owned-only, so legitimate co-authored discovered rows still
+  coexist for consensus reconciliation.
+
+- **Linked-author dedup log clarity.** `pen_name_links` carries
+  both `pen_name` and `co_author` types and the existing dedup
+  window already pulled both in (so co-author dedup was already
+  active for linked authors), but the log message labeled every
+  hit as `PEN-NAME DEDUP` regardless. Renamed to `LINKED-AUTHOR
+  DEDUP (<link_type>)` and renamed the expansion log to count pen
+  names and co-authors separately.
+
+- **Omnibus flag promotion.** `is_omnibus` was only set on the
+  INSERT path; existing books (Calibre-synced or inserted before
+  the regex matched their title) stayed at 0 forever. Now:
+  `_update_existing` re-evaluates `_is_omnibus` against both the
+  existing and incoming title and promotes the flag additively
+  (never clears).
+
+- **Cross-format series-position dedup.** Goodreads emits
+  `"Title (Series #N)"`, Hardcover/Kobo emit `"Series N: Title"`.
+  `_normalize` strips the parenthetical (Goodreads form) and the
+  subtitle after `:` (Hardcover form) — so the two tokens are
+  disjoint and SequenceMatcher gave a 0.24 ratio. Both layouts
+  encode the same `(series_name, series_index)` tuple though.
+  Now: a new `_extract_series_position()` parses either form,
+  resolves it against the author's known series, and looks up
+  `rows_by_series_pos`. A second pass extends the prefilter with
+  title-extracted positions so Goodreads-inserted standalone rows
+  (which carry NULL `series_index` because Goodreads emits them
+  as standalone but encode the position in the title) still
+  match when Hardcover/Kobo arrive later in the same scan.
+
+### Discovery — startup backfills
+
+- **Omnibus flag backfill** (`_backfill_omnibus_flag`). Idempotent
+  rescan that flips `is_omnibus=1` on rows whose title matches
+  the omnibus regex but were inserted/synced without the flag set
+  (Calibre sync never sets it; older source-scans inserted before
+  `_RX_OMNIBUS` picked up newer keywords). 86 rows flagged on
+  first run against the live DB.
+
+- **Series-index recovery** (`_backfill_series_index_from_title`).
+  Idempotent rescan that walks rows where `series_id` is set but
+  `series_index` is NULL, extracts the implicit index from the
+  title (`"Series N: Title"` or `"Title (Series #N)"`), and
+  either sets it on the row or — when a duplicate already sits
+  at the canonical position — drops the loser using the same
+  ranking rules `_title_to_series_pass` already uses (owned >
+  non-Book-N suffix > lowest id). 10 rows indexed and 2 same-
+  position pairs deduped on first run against the live DB,
+  including the originally-reported Bainin "Paths of Akashic 5:
+  The Expanse" / "The Expanse (Paths of Akashic #5)" collision.
+
+---
+
 ## [2.1.0] — 2026-04-29
 
 Mobile-redesign release. Every desktop page now branches at the top
