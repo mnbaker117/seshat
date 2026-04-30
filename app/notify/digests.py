@@ -328,10 +328,18 @@ async def run_calibre_audit(ctx: DigestContext) -> bool:
         return False
 
     if proc.returncode != 0:
-        _log.warning(
-            "calibre_audit: calibredb list returned %d: %s",
-            proc.returncode, stderr.decode("utf-8", errors="replace")[:200],
+        from app.sinks.calibre import (
+            _detect_runtime_lib_failure,
+            _format_runtime_lib_diagnostic,
         )
+        err = stderr.decode("utf-8", errors="replace")
+        if _detect_runtime_lib_failure(err):
+            _log.error("%s", _format_runtime_lib_diagnostic(err, action="list"))
+        else:
+            _log.warning(
+                "calibre_audit: calibredb list returned %d: %s",
+                proc.returncode, err[:200],
+            )
         return False
 
     try:

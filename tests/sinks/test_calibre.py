@@ -105,3 +105,61 @@ class TestCalibreSink:
 
         assert result.success is False
         assert "not found" in result.error
+
+
+class TestRuntimeLibFailureDetection:
+    """The trimmed apt-deps image is missing libgl1/libegl1/libopengl0
+    on the assumption headless calibredb won't pull GL symbols. If
+    that assumption ever breaks, we want a structured diagnostic in
+    the logs so users can file an actionable issue."""
+
+    def test_qt_plugin_load_failure_matches(self):
+        from app.sinks.calibre import _detect_runtime_lib_failure
+        stderr = (
+            "qt.qpa.plugin: Could not load the Qt platform plugin "
+            "\"xcb\" in \"\" even though it was found."
+        )
+        assert _detect_runtime_lib_failure(stderr) is True
+
+    def test_libgl_missing_matches(self):
+        from app.sinks.calibre import _detect_runtime_lib_failure
+        stderr = (
+            "calibredb: error while loading shared libraries: "
+            "libGL.so.1: cannot open shared object file: No such file"
+        )
+        assert _detect_runtime_lib_failure(stderr) is True
+
+    def test_libegl_missing_matches(self):
+        from app.sinks.calibre import _detect_runtime_lib_failure
+        stderr = "libEGL.so.1: cannot open shared object file"
+        assert _detect_runtime_lib_failure(stderr) is True
+
+    def test_libxcb_cursor_missing_matches(self):
+        from app.sinks.calibre import _detect_runtime_lib_failure
+        stderr = "From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed"
+        assert _detect_runtime_lib_failure(stderr) is True
+
+    def test_ordinary_calibre_error_does_not_match(self):
+        """Bad library path / duplicate book / etc. shouldn't trigger
+        the GL diagnostic — they have nothing to do with system libs."""
+        from app.sinks.calibre import _detect_runtime_lib_failure
+        assert _detect_runtime_lib_failure(
+            "Calibre library path does not exist"
+        ) is False
+        assert _detect_runtime_lib_failure(
+            "Error: book is already in the library"
+        ) is False
+        assert _detect_runtime_lib_failure("") is False
+
+    def test_diagnostic_block_includes_action_and_stderr(self):
+        from app.sinks.calibre import _format_runtime_lib_diagnostic
+        out = _format_runtime_lib_diagnostic(
+            "qt.qpa.plugin: Could not load Qt platform plugin",
+            action="add",
+        )
+        assert "calibredb add" in out
+        assert "qt.qpa.plugin" in out
+        assert "github.com/mnbaker117/seshat/issues" in out
+        # Hint about the libgl1 trade-off should be there so users
+        # know how to escape if they're hitting it.
+        assert "libgl1" in out

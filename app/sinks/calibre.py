@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,71 @@ _log = logging.getLogger("seshat.sinks")
 
 # calibredb binary name. Can be overridden for testing.
 CALIBREDB_CMD = "calibredb"
+
+# Patterns in calibredb's stderr that indicate the bundled-Calibre
+# image is missing a system library Qt's platform plugin loader needs.
+# The default Seshat image deliberately omits the OpenGL/Mesa stack
+# (libgl1, libegl1, libopengl0) because headless `calibredb add` and
+# `calibredb list` don't exercise GL paths in any test we've run —
+# but if a real-world ebook conversion route does pull a GL symbol,
+# we want a clear diagnostic instead of a cryptic Qt traceback.
+#
+# When any of these match, `_detect_runtime_lib_failure` returns
+# True and the caller emits a structured error pointing the user at
+# the GitHub issue tracker so we can collect data on which Calibre
+# operations actually need GL.
+_RX_QT_PLUGIN_FAILURE = re.compile(
+    r"(?i)("
+    r"could not load the qt platform plugin"
+    r"|no qt platform plugin could be initialized"
+    r"|qt\.qpa\.plugin"
+    r"|error while loading shared libraries"
+    # Library names in either form: "libGL.so.1: cannot open ..." or
+    # "... cannot open shared object file: ... libGL.so.1". Bare name
+    # mentions are common in Qt's "xcb-cursor0 is needed" prompt too,
+    # so we match the un-prefixed name as well.
+    r"|lib(gl|egl|opengl|xcb-cursor|fontconfig|xrender)\S*\.so"
+    r"|\bxcb-cursor0?\b"
+    r")"
+)
+
+
+def _detect_runtime_lib_failure(stderr: str) -> bool:
+    """True when calibredb's stderr looks like a missing-system-library
+    failure rather than an ordinary Calibre error (bad library path,
+    metadata clash, etc.).
+
+    Match list is intentionally permissive — false positives are cheap
+    (one extra log line pointing the user at the issue tracker) but
+    false negatives mean a confused user with no actionable signal.
+    """
+    return bool(stderr and _RX_QT_PLUGIN_FAILURE.search(stderr))
+
+
+def _format_runtime_lib_diagnostic(stderr: str, *, action: str) -> str:
+    """Build a multi-line diagnostic block users can paste into a
+    GitHub issue. Includes the matching stderr snippet, the calibredb
+    action that failed, and a hint about the slim apt-deps tradeoff.
+    """
+    snippet = (stderr or "").strip()[:600]
+    return (
+        f"calibredb {action} failed with what looks like a missing "
+        f"system library. The Seshat image ships a trimmed apt set "
+        f"(no libgl1/libegl1/libopengl0 — they pull ~170MB of LLVM/Mesa "
+        f"that headless calibredb usually doesn't need).\n"
+        f"\n"
+        f"If you're hitting this, please open an issue at "
+        f"https://github.com/mnbaker117/seshat/issues with this block:\n"
+        f"---\n"
+        f"action: calibredb {action}\n"
+        f"image: ghcr.io/mnbaker117/seshat:latest (full Calibre)\n"
+        f"stderr:\n{snippet}\n"
+        f"---\n"
+        f"Workaround: switch to a custom image that adds `libgl1 "
+        f"libegl1 libopengl0` back to the apt install, or use the "
+        f"file-folder sink + CWA/ABS to ingest instead of the direct "
+        f"Calibre sink."
+    )
 
 
 class CalibreSink:
@@ -102,7 +168,13 @@ class CalibreSink:
                 )
 
             full_error = f"exit {proc.returncode}: {err_output or output}"
-            _log.warning("calibredb add failed: %s", full_error)
+            if _detect_runtime_lib_failure(err_output):
+                _log.error(
+                    "%s",
+                    _format_runtime_lib_diagnostic(err_output, action="add"),
+                )
+            else:
+                _log.warning("calibredb add failed: %s", full_error)
             return SinkResult(
                 success=False,
                 sink_name=self.name,
