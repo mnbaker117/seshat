@@ -7,7 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [Unreleased]
+## [2.2.0] — 2026-04-30
+
+Minor release. One omnibus correctness fix, two UI ergonomic
+improvements, and a Docker image overhaul that lands a 41%
+size reduction on the default image plus an opt-in
+`:latest-slim` variant for users who don't need direct calibredb.
 
 ### Discovery — Stoham omnibus regression
 
