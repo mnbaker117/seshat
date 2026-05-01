@@ -520,12 +520,21 @@ async def clear_author_scan_data(data: dict = Body(...)):
     of the author. Without this split, a user on the cross-library
     view clicks Clear Source and only the currently-active library
     gets touched, silently leaving the other copy's data behind.
+
+    `author_names`: optional list of author display names. When
+    provided AND content_type is set, each library resolves names to
+    its OWN local author IDs, sidestepping the cross-library ID
+    collision class — see /authors/scan-sources docstring for the
+    Touko Amekawa / Roger Black canary explanation. The author_ids
+    parameter is still accepted as a fallback for callers that don't
+    have names handy.
     """
     author_ids = data.get("author_ids", [])
+    author_names = data.get("author_names")
     clear_source = data.get("clear_source", False)
     clear_mam = data.get("clear_mam", False)
     content_type = data.get("content_type")
-    if not author_ids:
+    if not author_ids and not author_names:
         return {"error": "No authors specified"}
     if not clear_source and not clear_mam:
         return {"error": "Nothing to clear — specify clear_source and/or clear_mam"}
@@ -558,14 +567,35 @@ async def clear_author_scan_data(data: dict = Body(...)):
         finally:
             await db.close()
     else:
+        # Cross-library clear. When author_names was supplied, each
+        # library resolves its OWN local author IDs by name — the
+        # POSTed `author_ids` are merged-response IDs that mean nothing
+        # outside the originating library, so we can't use them across
+        # the iteration. Names are the only reliable cross-library
+        # identifier (and they're already the merge key the cross-
+        # library Authors view uses to aggregate rows).
         for lib in target_libs:
             slug = lib.get("slug")
             if not slug:
                 continue
             db = await get_db(slug)
             try:
+                if author_names:
+                    ph = ",".join(["?" for _ in author_names])
+                    name_rows = await db.execute_fetchall(
+                        f"SELECT id FROM authors WHERE name IN ({ph})",
+                        list(author_names),
+                    )
+                    lib_ids = [r[0] for r in name_rows]
+                    if not lib_ids:
+                        continue
+                else:
+                    # Legacy callers — pass IDs as-is. Subject to the
+                    # cross-library ID-collision bug; new clients
+                    # should send author_names.
+                    lib_ids = author_ids
                 deleted = await _clear_authors_in_library(
-                    db, author_ids, clear_source, clear_mam,
+                    db, lib_ids, clear_source, clear_mam,
                 )
                 await db.commit()
                 if clear_source and deleted > 0:
@@ -579,12 +609,13 @@ async def clear_author_scan_data(data: dict = Body(...)):
             finally:
                 await db.close()
 
+    n_authors = len(author_names) if author_names else len(author_ids)
     logger.info(
-        f"Cleared scan data for {len(author_ids)} authors across {libs_touched} "
+        f"Cleared scan data for {n_authors} authors across {libs_touched} "
         f"libraries (content_type={content_type or 'active'}, "
         f"source={clear_source}, mam={clear_mam}), {total_deleted} books deleted"
     )
-    return {"status": "ok", "authors_cleared": len(author_ids),
+    return {"status": "ok", "authors_cleared": n_authors,
             "books_deleted": total_deleted, "libraries_touched": libs_touched}
 
 

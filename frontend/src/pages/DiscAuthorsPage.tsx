@@ -70,7 +70,13 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   const [fmt, setFmt] = usePersist<string>("ap_fmt", "all");
   const [pg, setPg] = useState(1);
   const [selMode, setSelMode] = useState(false);
-  const [sel, setSel] = useState<Set<number>>(new Set());
+  // sel is keyed by `${library_slug}:${id}` (or just `${id}` for the
+  // active-library path) so cross-library authors with the same numeric
+  // id in different libraries — e.g. ABS lib id=17 (Touko Amekawa) vs
+  // ebook lib id=17 (Roger Black) — don't collide. Bare-id keying
+  // produced wrong-author selections + wrong-name scans because two
+  // distinct merged authors would share the same numeric id.
+  const [sel, setSel] = useState<Set<string>>(new Set());
   const [clearing, setClearing] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [mamOn, setMamOn] = useState(false);
@@ -135,11 +141,19 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   const page = Math.min(pg, totalPages);
   const visible = filtered.slice((page - 1) * perPage, page * perPage);
 
-  const toggleSel = (id: number) =>
+  // Globally-unique key per merged author. The `library_slug:id` form
+  // is unique because each library's IDs are unique within that library
+  // — different libraries can share numeric ids but different (slug, id)
+  // pairs are always distinct authors.
+  const authorKey = (a: Pick<Author, "id" | "library_slug">): string =>
+    a.library_slug ? `${a.library_slug}:${a.id}` : String(a.id);
+
+  const toggleSel = (a: Author) =>
     setSel((p) => {
+      const k = authorKey(a);
       const n = new Set(p);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
       return n;
     });
 
@@ -147,7 +161,15 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   // wiping cross-page selections. Click on each page to accumulate
   // a multi-page selection.
   const selectAllVisible = () =>
-    setSel((p) => new Set([...p, ...visible.map((a) => a.id)]));
+    setSel((p) => new Set([...p, ...visible.map(authorKey)]));
+
+  // Resolve sel back to merged author rows. Used wherever we need to
+  // POST a list of selected authors — we filter `aus` by key instead
+  // of mapping `[...sel]` to ids/names via a lookup table, because
+  // the lookup table approach has the duplicate-id bug this fix is
+  // about.
+  const selectedAuthors = (): Author[] =>
+    aus.filter((a) => sel.has(authorKey(a)));
 
   const reload = () => {
     setLd(true);
@@ -163,12 +185,11 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
 
   const linkAuthors = async (linkType: LinkType) => {
     if (sel.size < 2) return;
-    const ids = [...sel];
-    const canonical = ids[0];
-    const aliases = ids.slice(1);
-    const canonicalName =
-      (aus.find((a) => a.id === canonical) || { name: `#${canonical}` }).name ||
-      `#${canonical}`;
+    const picked = selectedAuthors();
+    if (picked.length < 2) return;
+    const canonical = picked[0].id;
+    const aliases = picked.slice(1).map((a) => a.id);
+    const canonicalName = picked[0].name || `#${canonical}`;
     const label = linkType === "co_author" ? "co-author" : "pen name";
     if (
       !confirm(
@@ -216,8 +237,10 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
       return;
     setClearing(true);
     try {
+      const picked = selectedAuthors();
       await api.post("/discovery/authors/clear-scan-data", {
-        author_ids: [...sel],
+        author_ids: picked.map((a) => a.id),
+        author_names: picked.map((a) => a.name),
         clear_source: type === "source" || type === "both",
         clear_mam: type === "mam" || type === "both",
         ...(scope ? { content_type: scope } : {}),
@@ -239,21 +262,18 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
     if (!confirm(`Scan${scopeLabel} ${sel.size} author(s)?`)) return;
     setScanning(true);
     try {
-      // Resolve names from the merged Authors response. Sending names
-      // alongside IDs lets the cross-library backend skip the ID→name
-      // resolver step, which would otherwise look up each ID against
-      // the active library and pick up the wrong author when an
-      // audiobook-only author's library-scoped ID happens to collide
-      // with an unrelated author's ID in the active ebook library.
-      // (Touko Amekawa's audiobook-lib id == Roger Black's ebook-lib
-      // id was the canary case.)
-      const nameById = new Map(aus.map((a) => [a.id, a.name]));
-      const author_names = [...sel]
-        .map((id) => nameById.get(id))
-        .filter((n): n is string => Boolean(n));
+      // Sending names alongside IDs lets the cross-library backend
+      // skip the ID→name resolver step. Names are resolved by FILTER
+      // on `aus` (not via a Map keyed by id), because cross-library
+      // merged authors can share numeric ids across libraries — e.g.
+      // ebook lib id=17 (Roger Black) collides with ABS lib id=17
+      // (Touko Amekawa). A Map keyed by id loses one of the two; the
+      // filter approach combined with the `library_slug:id` selection
+      // key above keeps both distinct.
+      const picked = selectedAuthors();
       await api.post("/discovery/authors/scan-sources", {
-        author_ids: [...sel],
-        author_names,
+        author_ids: picked.map((a) => a.id),
+        author_names: picked.map((a) => a.name),
         ...(scope ? { content_type: scope } : {}),
       });
       toast.info("Scan started");
@@ -270,9 +290,10 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
     if (!confirm(`MAM scan for ${sel.size} author(s)?`)) return;
     setScanning(true);
     try {
+      const picked = selectedAuthors();
       const r = await api.post<BulkScanResponse>(
         "/discovery/authors/scan-mam",
-        { author_ids: [...sel] },
+        { author_ids: picked.map((a) => a.id) },
       );
       toast.info(r.message || "Scan started");
       setSel(new Set());
@@ -702,13 +723,13 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
           >
             {visible.map((a) => (
               <AuthorCard
-                key={a.id}
+                key={authorKey(a)}
                 a={a}
                 t={t}
-                selected={sel.has(a.id)}
+                selected={sel.has(authorKey(a))}
                 onClick={() =>
                   selMode
-                    ? toggleSel(a.id)
+                    ? toggleSel(a)
                     : onNav("disc-author-detail", navArg(a))
                 }
               />
@@ -718,16 +739,16 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
           <div className="seshat-author-cols" style={{ columns: 2, columnGap: 6 }}>
             {visible.map((a) => (
               <div
-                key={a.id}
+                key={authorKey(a)}
                 style={{ breakInside: "avoid", marginBottom: 4 }}
               >
                 <AuthorRow
                   a={a}
                   t={t}
-                  selected={sel.has(a.id)}
+                  selected={sel.has(authorKey(a))}
                   onClick={() =>
                     selMode
-                      ? toggleSel(a.id)
+                      ? toggleSel(a)
                       : onNav("disc-author-detail", navArg(a))
                   }
                 />
