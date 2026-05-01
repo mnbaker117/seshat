@@ -99,6 +99,20 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
     return () => c.abort();
   }, [q, sort, fmt]);
 
+  // Clear cross-page selection state when the filter context changes.
+  // The selectAllVisible button is intentionally additive across pages
+  // (so paging through 200+ authors and clicking Select All on each
+  // page accumulates a multi-page selection), but if the user switches
+  // letter / search / sort / format, the previous selection is no
+  // longer about the same set of authors. Clearing on filter change
+  // prevents stale IDs from leaking into a new scan dispatch — e.g.
+  // the v2.2.1 UAT bug where Roger Black got scanned during an
+  // "A last name" multi-select because he was selected earlier under
+  // the "B" letter filter.
+  useEffect(() => {
+    setSel(new Set());
+  }, [letter, q, sort, fmt]);
+
   // Filter by letter
   const filtered = useMemo(() => {
     if (!letter) return aus;

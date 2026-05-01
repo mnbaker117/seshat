@@ -675,8 +675,16 @@ async def scan_authors_sources(data: dict = Body(...)):
         db = await get_db()
         try:
             placeholders = ",".join(["?" for _ in author_ids])
+            # ORDER BY sort_name so the scan progresses alphabetically
+            # by last name (e.g. "Anderson, J" → "Brown, K"), matching
+            # what the user sees in the Authors page list. Without the
+            # ORDER BY, SQLite returns rows in physical (rowid) order,
+            # which is insertion order from initial Calibre sync — not
+            # at all what users expect when they multi-select an A-letter
+            # batch and watch the dashboard scan progress.
             rows = await db.execute_fetchall(
-                f"SELECT id, name FROM authors WHERE id IN ({placeholders})",
+                f"SELECT id, name FROM authors WHERE id IN ({placeholders}) "
+                f"ORDER BY sort_name",
                 author_ids,
             )
         finally:
@@ -738,11 +746,17 @@ async def scan_authors_sources(data: dict = Body(...)):
                 if slug != get_active_library():
                     set_active_library(slug)
                 # Resolve each name to the library-local ID then scan.
+                # ORDER BY sort_name so each library's scan progresses
+                # alphabetically by last name. Match the active-library
+                # path's ordering (added in the same commit) so the
+                # dashboard scan progress reads the same regardless of
+                # which path the user triggered.
                 ph = ",".join(["?" for _ in names])
                 db = await get_db()
                 try:
                     lib_rows = await db.execute_fetchall(
-                        f"SELECT id, name FROM authors WHERE name IN ({ph})",
+                        f"SELECT id, name FROM authors WHERE name IN ({ph}) "
+                        f"ORDER BY sort_name",
                         names,
                     )
                 finally:
