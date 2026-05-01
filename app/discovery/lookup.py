@@ -714,7 +714,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         id_ph = ",".join("?" * len(all_author_ids))
         rows = await (await db.execute(
             f"SELECT id, title, source_url, series_id, series_index, source, "
-            f"pub_date, expected_date, description, isbn, author_id, is_omnibus "
+            f"pub_date, expected_date, description, isbn, author_id, is_omnibus, hidden "
             f"FROM books WHERE author_id IN ({id_ph})",
             all_author_ids,
         )).fetchall()
@@ -850,6 +850,17 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # Source priority: Goodreads can overwrite series from any other source
         SOURCE_PRIORITY = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6, "manual": 7, "import": 7, "calibre": 0}
         
+        def _is_hidden(matched_row) -> bool:
+            """Hidden = "garbage bin": skip every source-driven write. The row
+            stays in the DB so dedup still blocks fresh inserts of the same
+            title, but no UPDATE fires (URL, series, metadata, omnibus flag —
+            all suppressed). Un-hiding the book lets the next scan pick it
+            up again normally."""
+            try:
+                return ("hidden" in matched_row.keys()) and (matched_row["hidden"] == 1)
+            except (IndexError, KeyError):
+                return False
+
         def _update_existing(matched_row, bk, series_id=None):
             """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
 
@@ -1167,6 +1178,12 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                             f"author (id={matched_row['author_id']}) — skipping"
                         )
                         continue
+                    if _is_hidden(matched_row):
+                        logger.debug(
+                            f"    SKIP HIDDEN: '{bk.title}' "
+                            f"(id={matched_row['id']}) — no UPDATE, no series claim"
+                        )
+                        continue
                     # Lazy series upsert: only create the series row
                     # now that we know a real book is going to link to it.
                     sid_use = await _ensure_series()
@@ -1291,6 +1308,12 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         f"    LINKED-AUTHOR DEDUP ({lt}): '{bk.title}' "
                         f"matches '{matched_row['title']}' under linked "
                         f"author (id={matched_row['author_id']}) — skipping"
+                    )
+                    continue
+                if _is_hidden(matched_row):
+                    logger.debug(
+                        f"    SKIP HIDDEN: '{bk.title}' "
+                        f"(id={matched_row['id']}) — no UPDATE, no series claim"
                     )
                     continue
                 sql, vals = _update_existing(matched_row, bk)
@@ -1475,9 +1498,12 @@ async def _title_to_series_pass(author_id: int):
         if not series_rows:
             return 0
 
-        # Get all standalone books (no series) for this author
+        # Get all standalone books (no series) for this author. Hidden
+        # books are excluded — once a row is hidden it's a garbage-bin
+        # entry and shouldn't be re-linked into a series by a later
+        # source-driven pass.
         standalone = await (await db.execute(
-            "SELECT id, title FROM books WHERE author_id = ? AND series_id IS NULL",
+            "SELECT id, title FROM books WHERE author_id = ? AND series_id IS NULL AND hidden = 0",
             (author_id,),
         )).fetchall()
         if not standalone:
@@ -1999,7 +2025,7 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None, link_type_by_id=None, start_at=0):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, hidden_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None, link_type_by_id=None, start_at=0):
     """Try a single source with validation and detailed logging.
 
     `start_at` is forwarded to `source.get_author_books()` for the
@@ -2041,8 +2067,12 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
         if has_data:
             full = found
         else:
-            # In full_scan mode, pass empty existing_titles to force page visits
-            scan_existing = set() if full_scan else (existing_titles or set())
+            # In full_scan mode, hidden books still ride the URL-backfill
+            # path so we don't waste a detail-page fetch on them — the
+            # merge layer's `_is_hidden` guard drops the resulting UPDATE.
+            # Non-hidden books fall through to the slow DETAIL fetch (the
+            # whole point of full_scan), since they aren't in the set.
+            scan_existing = (hidden_titles or set()) if full_scan else (existing_titles or set())
             # Signature fallback ladder: newest kwargs first (start_at for
             # Goodreads resume), then owned_only, then older shapes. The
             # TypeError catches are for sources that haven't adopted the
@@ -2231,14 +2261,26 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         )).fetchall()
         our_titles = [r["title"] for r in rows]
         all_rows = await (await db.execute(
-            f"SELECT title FROM books WHERE author_id IN ({id_placeholders})",
+            f"SELECT title, hidden FROM books WHERE author_id IN ({id_placeholders})",
             linked_ids,
         )).fetchall()
+        # `existing_titles` holds EVERY known book (hidden included) so a
+        # source returning a known title still hits the URL-backfill path
+        # and never inserts a fresh unhidden duplicate. `hidden_titles` is
+        # the subset that's been hidden — used only in full_scan mode to
+        # keep hidden rows on the URL-backfill path (no detail fetch)
+        # instead of forcing a refresh visit. The merge layer's
+        # `_is_hidden` guard then drops the resulting backfill UPDATE on
+        # the floor. Net effect: hidden books are a true garbage bin —
+        # known to dedup, invisible to source-driven writes.
         existing_titles = set()
+        hidden_titles = set()
         for r in all_rows:
             t = re.sub(r'[^\w\s]', '', r["title"].lower()).strip()
             t = re.sub(r'\s+', ' ', t)
             existing_titles.add(t)
+            if r["hidden"] == 1:
+                hidden_titles.add(t)
         # Distinct series names the user already has tagged for this
         # author. Hardcover (and any future source with the same hook)
         # uses this to prefer matching series candidates over deeper
@@ -2396,7 +2438,8 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
             n = await asyncio.wait_for(
                 _try_source(
                     source, author_name, author_id, our_titles, languages, spec.name,
-                    existing_titles=existing_titles, full_scan=full_scan,
+                    existing_titles=existing_titles, hidden_titles=hidden_titles,
+                    full_scan=full_scan,
                     owned_only=owned_only, series_collector=series_collector,
                     exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
                     link_type_by_id=link_type_by_id,
@@ -2477,7 +2520,8 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
             n = await asyncio.wait_for(
                 _try_source(
                     source, author_name, author_id, our_titles, languages, spec.name,
-                    existing_titles=existing_titles, full_scan=full_scan,
+                    existing_titles=existing_titles, hidden_titles=hidden_titles,
+                    full_scan=full_scan,
                     owned_only=owned_only, series_collector=series_collector,
                     exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
                     link_type_by_id=link_type_by_id,
