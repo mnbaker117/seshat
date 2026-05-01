@@ -7,6 +7,96 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.2] — 2026-04-30
+
+Patch release. Mark's A→Z author UAT walkthrough kept surfacing
+silent-data-corruption bugs that were only visible because he was
+manually paging through letters. This release closes the whole
+class. Five fixes, all rooted in cross-library Authors view + bulk
+selection interactions.
+
+### UI — alphabetical scan order
+
+`/authors/scan-sources` ran `SELECT WHERE id IN (?,?,?)` with no
+`ORDER BY` clause, so SQLite returned rows in physical (rowid)
+order — initial Calibre-sync insertion order. A multi-select
+batch felt random. Now `ORDER BY sort_name` on both the active-
+library and cross-library code paths so the scan progresses
+alphabetically by last name (matching the user's mental model
+from the Authors page list view).
+
+### UI — bulk-selection clears on filter change
+
+The `selectAllVisible` button is intentionally additive across
+pages so users can build up multi-page selections by paging +
+clicking Select All. The v2.2.0 commit that added this behavior
+didn't account for what should happen when the filter context
+CHANGES (letter sidebar, search box, sort, format chip). Selecting
+under one filter, switching to another, and selecting again would
+union the two — which the user does not expect. Same-letter paging
+stays additive (the intended use case); context switches reset.
+
+### UI — Scan Sources routes through cross-library by content_type
+
+Authors / Library / MAM-page multi-select all defaulted to calling
+`scan-sources` WITHOUT `content_type`, which routes through the
+backend's active-library legacy path. That works fine for single-
+library setups, but the Authors / Books pages are ALWAYS in cross-
+library mode (the fmt chip defaults to "all") and the IDs in the
+selection are merged-response IDs scoped to whichever library each
+row was first encountered in. "Scan Sources" now passes
+`content_type="ebook"` so it goes through the same cross-library
+path "Scan Audio" already used.
+
+### Backend — scan-sources accepts pre-resolved author_names
+
+The cross-library backend path was still calling
+`_resolve_names_for_ids` to translate IDs → names against the
+active library. Same root cause as the UI fix above: IDs from a
+cross-library merged response can collide with unrelated active-
+library authors. The resolver picks up the wrong name and that
+name gets scanned across every ebook library. Fix: the request
+body now accepts `author_names` directly and the backend skips
+the resolver step when names are supplied. Same for
+`/books/scan-sources` (pre-resolved book→author map → names) and
+`/authors/clear-scan-data` (clear-by-name across libraries).
+
+### UI — selection key uses `library_slug:id` instead of bare id
+
+The deepest bug, surfaced by Mark when Roger Black still got
+scanned despite all the above. The cross-library Authors response
+gives each merged author one numeric `id` from whichever library
+was first encountered — and DIFFERENT authors can share the same
+numeric id because each library numbers from 1 independently.
+ABS lib id=17 is Touko Amekawa; ebook lib id=17 is Roger Black.
+The frontend's `nameById = new Map(aus.map(a => [a.id, a.name]))`
+last-write-wins behavior overwrote Touko's name with Roger Black's
+after the alphabetical sort placed "Black, Roger" after "Amekawa,
+Touko". When Mark clicked Touko, the frontend POSTed "Roger Black"
+as her name. Symmetric bug with William D. Arand → "Fuse" silently
+dropping Arand from the scan list because Fuse doesn't exist in
+the ebook library. Fix: switch `sel: Set<number>` to
+`sel: Set<string>` keyed by `${library_slug}:${id}`, which IS
+globally unique. Selection check, `selectAllVisible`, and POST
+payload all derive from `aus.filter(a => sel.has(authorKey(a)))`
+rather than a Map lookup, so duplicate-id rows stay distinct.
+
+### UI — bulk scan-sources progress count reflects actual scans
+
+The cross-library scan-sources backend computed
+`total_tasks = len(target_libs) * len(names)` before running the
+per-library `WHERE name IN (...)` SQL filter. When a name in the
+payload doesn't match any author in the target libraries (the
+audiobook-only-in-ebook-scan case), no `lookup_author` call
+fires for it but the progress total still expected one. Mark's
+"26 selected" produced "x/26" progress that capped at 25 because
+Touko Amekawa was filtered out. Fix: hoist the per-library SQL
+upfront so `total_tasks` is the sum of actual matched authors.
+Response also returns a `requested` field so the UI can show
+"Scanning N of M authors" if there's a delta.
+
+---
+
 ## [2.2.1] — 2026-04-30
 
 Patch release. Two discovery-correctness fixes surfaced during the
