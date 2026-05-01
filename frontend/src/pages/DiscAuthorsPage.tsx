@@ -239,8 +239,21 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
     if (!confirm(`Scan${scopeLabel} ${sel.size} author(s)?`)) return;
     setScanning(true);
     try {
+      // Resolve names from the merged Authors response. Sending names
+      // alongside IDs lets the cross-library backend skip the ID→name
+      // resolver step, which would otherwise look up each ID against
+      // the active library and pick up the wrong author when an
+      // audiobook-only author's library-scoped ID happens to collide
+      // with an unrelated author's ID in the active ebook library.
+      // (Touko Amekawa's audiobook-lib id == Roger Black's ebook-lib
+      // id was the canary case.)
+      const nameById = new Map(aus.map((a) => [a.id, a.name]));
+      const author_names = [...sel]
+        .map((id) => nameById.get(id))
+        .filter((n): n is string => Boolean(n));
       await api.post("/discovery/authors/scan-sources", {
         author_ids: [...sel],
+        author_names,
         ...(scope ? { content_type: scope } : {}),
       });
       toast.info("Scan started");

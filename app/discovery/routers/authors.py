@@ -660,14 +660,26 @@ async def scan_authors_sources(data: dict = Body(...)):
     `content_type`: optional "ebook" / "audiobook". When set, iterate
     libraries of that type and scan each selected author by NAME in
     every matching library. Omitted → legacy active-library-only path.
-    The name-match is intentional: a cross-library selection has
-    library-scoped IDs that mean nothing in other libraries, but the
-    author's display name is the merge key the cross-library view
-    uses to combine rows.
+
+    `author_names`: optional list of pre-resolved author display names.
+    When provided alongside `content_type`, the backend uses those names
+    directly and skips the ID→name resolver. This is the safe path for
+    cross-library selections: the merged Authors view returns each
+    author with an `id` from whichever library was first encountered,
+    so an audiobook-only author (e.g. Touko Amekawa) ends up with the
+    audiobook library's ID. If that ID happens to collide with a
+    different author's ID in the active ebook library (Roger Black's
+    ebook id was 17, Touko's audiobook id was 17), the resolver's
+    active-library lookup picks up the WRONG name and the wrong author
+    gets scanned. Sending names sidesteps the collision entirely. The
+    frontend reads names from its merged Authors response and POSTs
+    them; the resolver fallback path remains for older callers that
+    only have IDs.
     """
     author_ids = data.get("author_ids", [])
+    author_names = data.get("author_names")
     content_type = data.get("content_type")
-    if not author_ids:
+    if not author_ids and not author_names:
         return {"error": "No authors specified"}
 
     if content_type is None:
@@ -723,12 +735,24 @@ async def scan_authors_sources(data: dict = Body(...)):
         return {"status": "started", "total": len(rows)}
 
     # Cross-library scan by content_type — iterate matching libraries
-    # and scan each selected author by NAME in each.
+    # and scan each selected author by NAME in each. Prefer
+    # caller-supplied names (the safe path against ID collisions —
+    # see the docstring); fall back to the legacy ID resolver for
+    # older callers / direct API users.
     target_libs = libraries_for(content_type)
     if not target_libs:
         return {"status": "ok", "total": 0,
                 "message": f"No {content_type} libraries found."}
-    names = await _resolve_names_for_ids(author_ids)
+    if author_names:
+        # Preserve caller order while deduping.
+        seen: set[str] = set()
+        names = []
+        for n in author_names:
+            if n and n not in seen:
+                seen.add(n)
+                names.append(n)
+    else:
+        names = await _resolve_names_for_ids(author_ids)
     if not names:
         raise HTTPException(404, "No matching authors found")
 

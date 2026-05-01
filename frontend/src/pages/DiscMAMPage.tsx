@@ -473,16 +473,27 @@ function DesktopMAMPage({ onNav }: { onNav: NavFn }) {
       return;
     setBusy(true);
     try {
-      // content_type="ebook" routes through the cross-library
-      // name-resolved path on the backend so the scan works correctly
-      // even when the MAM page is fed cross-library merged book IDs
-      // — same fix as the Authors / Library multi-select Scan Sources
-      // buttons. Without this, audiobook-only authors' merged IDs
-      // could collide with unrelated authors in the active ebook
-      // library and scan the wrong people. See v2.2.x notes.
+      // content_type="ebook" + pre-resolved author_names route through
+      // the cross-library name-only path on the backend so the scan
+      // works correctly even when the MAM page is fed cross-library
+      // merged book IDs. Without author_names the backend's resolver
+      // looks up book_ids in the active library and can pick up the
+      // wrong author (or none) when a merged book row's id collides
+      // with an unrelated active-library book. See v2.2.x notes.
+      const author_names = [
+        ...new Set(
+          [...sel]
+            .map((bid) => books.find((b) => b.id === bid)?.author_name)
+            .filter((n): n is string => Boolean(n)),
+        ),
+      ];
       const r = await api.post<BulkScanSourcesResponse>(
         "/discovery/books/scan-sources",
-        { book_ids: [...sel], content_type: "ebook" },
+        {
+          book_ids: [...sel],
+          author_names,
+          content_type: "ebook",
+        },
       );
       if (r.error) {
         alert(`Source scan failed: ${r.error}`);

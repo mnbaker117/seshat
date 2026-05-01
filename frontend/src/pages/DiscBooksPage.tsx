@@ -276,9 +276,27 @@ function DesktopBooksPage({
       return;
     setBusy(true);
     try {
+      // For cross-library scope, send pre-resolved author_names so the
+      // backend skips the book_id→author SQL JOIN. Same rationale as
+      // the Authors page: cross-library merged book IDs aren't valid
+      // active-library IDs, so the JOIN can pick up the wrong author
+      // (or none). Resolve names client-side from `bks` instead.
+      const author_names = scope
+        ? [
+            ...new Set(
+              [...sel]
+                .map((bid) => bks.find((b) => b.id === bid)?.author_name)
+                .filter((n): n is string => Boolean(n)),
+            ),
+          ]
+        : undefined;
       const r = await api.post<ScanSourcesResponse>(
         "/discovery/books/scan-sources",
-        { book_ids: [...sel], ...(scope ? { content_type: scope } : {}) },
+        {
+          book_ids: [...sel],
+          ...(author_names ? { author_names } : {}),
+          ...(scope ? { content_type: scope } : {}),
+        },
       );
       toast.info(
         `Source scan started — ${r.total || 0} authors. Track progress on the Dashboard.`,

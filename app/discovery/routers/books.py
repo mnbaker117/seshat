@@ -606,20 +606,41 @@ async def scan_books_sources(data: dict = Body(...)):
     from app.discovery.lookup import lookup_author
 
     book_ids = data.get("book_ids", [])
+    author_names_in = data.get("author_names")
     content_type = data.get("content_type")
-    if not book_ids:
+    if not book_ids and not author_names_in:
         return {"error": "No books specified"}
 
-    db = await get_db()
-    try:
-        placeholders = ",".join(["?" for _ in book_ids])
-        rows = await (await db.execute(
-            f"SELECT DISTINCT a.id, a.name FROM books b JOIN authors a ON b.author_id=a.id "
-            f"WHERE b.id IN ({placeholders})",
-            book_ids,
-        )).fetchall()
-    finally:
-        await db.close()
+    # Caller-supplied author_names skip the book→author SQL resolver
+    # entirely. Same rationale as `/authors/scan-sources` — when the
+    # user is in cross-library mode, book_ids are scoped to whichever
+    # library each merged book row was first encountered in, and the
+    # active-library JOIN can pick up unrelated books for those IDs
+    # (or miss entirely). Sending pre-resolved author names sidesteps
+    # the lookup. Names-mode REQUIRES content_type because the active-
+    # library `lookup_author(aid, name)` path needs a real aid that we
+    # don't have for synthetic rows; cross-library path uses names only.
+    if author_names_in and not content_type:
+        raise HTTPException(
+            400,
+            "author_names requires content_type — cross-library path only",
+        )
+    if author_names_in:
+        # Synthetic rows; only the cross-library `names` list below
+        # actually consumes these — the active-library code path is
+        # gated off above.
+        rows = [{"id": None, "name": n} for n in author_names_in if n]
+    else:
+        db = await get_db()
+        try:
+            placeholders = ",".join(["?" for _ in book_ids])
+            rows = await (await db.execute(
+                f"SELECT DISTINCT a.id, a.name FROM books b JOIN authors a ON b.author_id=a.id "
+                f"WHERE b.id IN ({placeholders})",
+                book_ids,
+            )).fetchall()
+        finally:
+            await db.close()
     if not rows:
         raise HTTPException(404, "No matching authors found")
 
