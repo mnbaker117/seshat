@@ -566,9 +566,9 @@ function DesktopBooksPage({
               <>
                 <Btn
                   size="sm"
-                  onClick={() => scanSources()}
+                  onClick={() => scanSources("ebook")}
                   disabled={busy}
-                  title="Scans the unique authors of the selected books in the active library"
+                  title="Scans the unique authors of the selected books across every ebook library"
                   style={{
                     background: t.grn + "22",
                     color: t.grnt,

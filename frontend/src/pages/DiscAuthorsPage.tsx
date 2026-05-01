@@ -548,9 +548,9 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
               <>
                 <Btn
                   size="sm"
-                  onClick={() => scanSources()}
+                  onClick={() => scanSources("ebook")}
                   disabled={scanning || clearing || linking}
-                  title="Source scan using the active library's content type"
+                  title="Scan these authors across every ebook library"
                   style={{
                     background: t.grn + "22",
                     color: t.grnt,
