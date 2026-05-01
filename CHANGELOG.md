@@ -7,6 +7,102 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.1] — 2026-04-30
+
+Patch release. Two discovery-correctness fixes surfaced during the
+v2.2.0 author-by-letter UAT walkthrough — Mark only reached the
+A/B range before finding both. Both bugs share a "scan looked
+successful but data was silently lost or corrupted" pattern.
+
+### Discovery — orphan-series cleanup must consider cross-author book references
+
+The orphan-series cleanup at the tail of `_merge_result` was
+scoping its "is anyone referencing this series" subquery to the
+SCANNED author's books only:
+
+```sql
+DELETE FROM series WHERE author_id = ?
+AND id NOT IN (SELECT DISTINCT series_id FROM books
+               WHERE series_id IS NOT NULL AND author_id = ?)
+```
+
+For pen-name-linked authors that's wrong. The architecture parks
+books from one author against another author's series row —
+Arand owns the "Incubus Inc." series row, Darren has 3 books
+referencing it. A scan of Arand sees "no Arand books reference
+Incubus Inc." → DELETE the row → trip the FK from Darren's books
+(`books.series_id REFERENCES series(id)`, no ON DELETE) → SQLite
+raises `FOREIGN KEY constraint failed` → the entire scan
+transaction rolls back. User-visible: every source for Arand
+logged an ERROR and the scan ended with 0 books added even
+though the per-book MERGE UPDATE / MERGE NOOP debug lines all
+succeeded earlier in the loop. The block dates back to commit
+`dd22c43c` (2026-04-16) — latent for ~2 weeks but only fired on
+authors with the cross-author shared-series shape.
+
+Fix drops the `author_id = ?` filter from the subquery. A series
+is orphaned iff no book anywhere references it; that's the
+correct definition.
+
+### Discovery — fuzzy-match guard rejects omnibus mismatches + title-extracted position conflicts
+
+Two bugs surfaced together because they share the same root cause
+(post-`_fuzzy_match` rejection gates were too narrow):
+
+**Omnibus mis-flag.** Hardcover returned both 'Right of
+Retribution' (book #1) and 'Right of Retribution: Compilation:
+The Starting Point' for William D. Arand. The compilation
+fuzzy-matched the user's owned standalone book #1 via prefix
+containment. `_update_existing` then flipped `is_omnibus=1` on
+the standalone because the OR-arm `_is_omnibus(bk.title)`
+matched on `compilation`. The owned book got mis-flagged and
+vanished from the series view as an "extra" omnibus row.
+
+**Cross-position metadata stomp.** ibdb returned 'Super Sales on
+Super Heroes 4' as a standalone (no series_index on the
+BookResult; ibdb routinely emits series books that way). The
+fuzzy matcher accepted it onto the existing 'Super Sales on
+Super Heroes 2' row because the existing series-index conflict
+guard only fires when BOTH sides carry an explicit series_index.
+#4's description / pub_date / cover_url / isbn got merged onto
+the #2 row, and #4 never landed as its own row — the series
+view showed a gap at #4 because "#4 was found, just silently
+overwritten onto #2". Same shape silently corrupted Save State
+Hero #3 → #2 and likely an unknown number of other numbered
+series entries on prior scans.
+
+Single fix covers both:
+
+- New `_title_extracted_index(title)` extracts a position via
+  `_RX_TITLE_SERIES_IDX` (trailing number, "#N", "Book N").
+- New `_fuzzy_match_blocked(bk, row)` returns a short reason
+  code when a fuzzy match should be rejected:
+  - `omnibus_mismatch` — `_is_omnibus(bk.title)` differs from
+    `_is_omnibus(row['title'])`.
+  - `position_conflict` — explicit-or-title-extracted
+    `series_index` on bk differs from explicit-or-title-extracted
+    `series_index` on row. Subsumes the old
+    `_series_index_conflicts` check.
+- Both fuzzy-match call sites in `_merge_result` (series-books
+  path + standalone path) now use the unified blocker.
+- Defensive belt-and-suspenders fix in `_update_existing`: the
+  omnibus flag promotion now only checks the EXISTING title, not
+  the incoming. With the upstream guard rejecting omnibus
+  mismatches before they reach the merge, the OR-arm based on
+  incoming title was redundant.
+
+### Notes for users
+
+After updating, **re-scan any author you've previously scanned**
+where you suspect the series view looks short or where unexpected
+metadata changed. The fuzzy-match bug had been silently merging
+incoming series books onto wrong rows whenever a source returned
+the book as a standalone — affecting any numbered series, not
+just pen-name-linked authors. The orphan-cleanup FK bug was
+narrower (only fired on canonical-side linked authors).
+
+---
+
 ## [2.2.0] — 2026-04-30
 
 Minor release. One omnibus correctness fix, two UI ergonomic

@@ -967,7 +967,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Seshat",
     description="Hermes for the meece — MAM courier and Calibre ingest pipeline",
-    version="2.2.0",
+    version="2.2.1",
     lifespan=lifespan,
 )
 
