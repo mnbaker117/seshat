@@ -795,7 +795,7 @@ function DesktopAuthorDetailPage({
     0,
   );
   const serTotal = (a.series || []).reduce(
-    (n: number, s: Series) => n + (s.book_count || 0),
+    (n: number, s: Series) => n + (s.author_book_count ?? s.book_count ?? 0),
     0,
   );
   const oc = saOwned + serOwned;
