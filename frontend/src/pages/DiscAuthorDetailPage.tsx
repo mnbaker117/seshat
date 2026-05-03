@@ -182,9 +182,19 @@ function IS({
   const ownCount = regular
     ? regular.filter((b) => b.owned === 1).length
     : series.owned_count || 0;
-  const countStr = isMulti
-    ? `${ownCount}/${regCount} · ${series.book_count || 0} total`
-    : `${ownCount}/${regCount}`;
+  // Omnibus-only series (user owns/sees only a collection, no
+  // individual entries by this author) — show "Omnibus" instead of
+  // a misleading "0/0". Falls back to the count once the lazy fetch
+  // resolves, so we use either the live `regular`/`omnibus` arrays
+  // or the server-provided counts before books load.
+  const omnibusOnly =
+    regCount === 0 &&
+    (omnibus ? omnibus.length > 0 : (series.author_omnibus_count || 0) > 0);
+  const countStr = omnibusOnly
+    ? "Omnibus"
+    : isMulti
+      ? `${ownCount}/${regCount} · ${series.book_count || 0} total`
+      : `${ownCount}/${regCount}`;
 
   // Per-section quick-pick. When some-but-not-all books in this
   // series are selected we treat the toggle as "select all"; clicking

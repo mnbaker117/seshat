@@ -168,14 +168,22 @@ async def _author_detail_for_slug(slug: str, aid: int) -> Optional[dict]:
         if not r:
             return None
         a = dict(r)
-        # `HAVING author_book_count > 0` drops series where every book by
-        # this author is hidden. Without it the tile still renders as
-        # "(0/0)" on the detail page after a user hides the last visible
-        # book in a source-scan-populated series.
+        # The HAVING filter drops series where every book by this
+        # author is hidden — without it the tile still renders as
+        # "(0/0)" after a user hides the last visible book in a
+        # source-scan-populated series. The count uses
+        # `author_visible_count` (omnibus included) so a series whose
+        # only book by this author is an omnibus still renders; the
+        # IS section surfaces the omnibus under "Omnibus / Collections".
+        # `author_book_count` (omnibus EXCLUDED) is what the count
+        # badge displays so progress reflects actual entries, not
+        # collections.
         a["series"] = [dict(s) for s in await (await db.execute(
             f"""SELECT s.*,
                 COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as book_count,
                 COUNT(DISTINCT CASE WHEN b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as author_book_count,
+                COUNT(DISTINCT CASE WHEN b.author_id=? AND {HF} THEN b.id END) as author_visible_count,
+                COUNT(DISTINCT CASE WHEN b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=1 THEN b.id END) as author_omnibus_count,
                 SUM(CASE WHEN b.owned=1 AND b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count,
                 SUM(CASE WHEN b.owned=0 AND b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count,
                 CASE WHEN COUNT(DISTINCT b.author_id) > 1 THEN 1 ELSE 0 END as multi_author
@@ -183,9 +191,9 @@ async def _author_detail_for_slug(slug: str, aid: int) -> Optional[dict]:
             JOIN books b ON s.id=b.series_id
             WHERE s.id IN (SELECT DISTINCT series_id FROM books WHERE author_id=? AND series_id IS NOT NULL)
             GROUP BY s.id
-            HAVING author_book_count > 0
+            HAVING author_visible_count > 0
             ORDER BY s.name""",
-            (aid, aid, aid, aid)
+            (aid, aid, aid, aid, aid, aid)
         )).fetchall()]
         standalone = [
             {**dict(b), "library_slug": slug, "content_type": content_type}

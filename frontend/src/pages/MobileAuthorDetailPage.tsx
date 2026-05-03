@@ -115,6 +115,15 @@ function MobileSeriesSection({
   const owned = series.owned_count ?? 0;
   const missing = series.missing_count ?? 0;
   const total = series.book_count ?? 0;
+  // Omnibus-only series — show "Omnibus" instead of "0/0" when this
+  // author's only contribution to the series is a collection. See the
+  // desktop IS section for the full rationale.
+  const omnibusOnly =
+    total === 0 &&
+    (bks
+      ? bks.some((b) => b.is_omnibus)
+      : (series.author_omnibus_count || 0) > 0);
+  const countLabel = omnibusOnly ? "Omnibus" : `${owned}/${total}`;
 
   const ids = bks ? bks.map((b) => b.id) : [];
   const selectedHere = sel ? ids.filter((id) => sel.has(id)).length : 0;
@@ -149,7 +158,7 @@ function MobileSeriesSection({
   return (
     <MobileSection
       title={series.name}
-      count={`${owned}/${total}`}
+      count={countLabel}
       subtitle={
         missing > 0 ? `${missing} missing` : undefined
       }

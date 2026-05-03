@@ -187,6 +187,7 @@ function DesktopBooksPage({
   const onAction = async (act: BookAction, id: number) => {
     const scrollY = window.scrollY;
     if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
+    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide`);
     if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
     if (act === "delete") await api.del(`/discovery/books/${id}`);
     await load(pg);

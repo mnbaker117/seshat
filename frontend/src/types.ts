@@ -206,6 +206,11 @@ export interface Series {
   name: string;
   book_count?: number;
   author_book_count?: number;
+  // `author_omnibus_count` is non-zero only when the series has at
+  // least one omnibus by this author. Used by the author-detail IS
+  // section to show "Omnibus only" instead of "0/0" when the only
+  // book by this author is the omnibus collection.
+  author_omnibus_count?: number;
   owned_count?: number;
   missing_count?: number;
   multi_author?: 0 | 1;

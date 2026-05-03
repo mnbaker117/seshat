@@ -7,6 +7,58 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.4] — 2026-05-03
+
+Patch release. Two UAT-driven fixes from Mark's continued A→Z hide
+walkthrough: a regressed Unhide button, and an omnibus-only series
+that vanished from its author page when the user wired the omnibus
+into the series.
+
+### UI — Unhide button on the Hidden page now actually unhides
+
+`disc-hidden` routes to `<DiscBooksPage>`, whose generic `onAction`
+handler had branches for `hide / dismiss / delete` but **none for
+`unhide`**. Clicking Unhide on a hidden book fired
+`onAction("unhide", id)` from the BookSidebar, the if-chain missed,
+no API call went out, the list reloaded with the book still hidden,
+and the user saw the entry stay put. The dedicated `DiscHiddenPage`
+component had the unhide call but is currently dead code on this
+route. Same dead branch existed in `MobileBooksPage`.
+
+Added the missing `if (act === "unhide") await api.post(.../unhide)`
+branch in both desktop and mobile generic books-page handlers.
+
+### Discovery — author detail surfaces omnibus-only series
+
+Adding a series name to a Calibre-owned omnibus (e.g. setting
+"Master of Thieves" on the omnibus "Master of Thieves: The Complete
+Series") used to leave the book in limbo:
+
+- It moved out of Standalone (`series_id` no longer NULL).
+- It also did not appear under the series on the author detail page.
+
+The author detail series query at `authors.py` filtered series with
+`HAVING author_book_count > 0`, where `author_book_count` was a
+non-omnibus, non-hidden count. The HAVING clause was originally
+introduced to drop series whose every book by an author was hidden;
+it accidentally also dropped series whose every book by an author
+was an omnibus (the title-pattern detector flips `is_omnibus=1` on
+"The Complete Series", "Box Set", "Trilogy: Omnibus", etc.).
+
+The fix splits visibility from progress accounting: HAVING now
+checks `author_visible_count > 0` (omnibus included) so the series
+renders, while the displayed count badges keep using the
+non-omnibus count so progress reflects actual entries rather than
+collections. The IS section already had an "Omnibus / Collections"
+sub-row to surface those rows once visible.
+
+A new `author_omnibus_count` is also returned per series so the
+IS count badge can show "Omnibus" instead of a misleading "0/0"
+when this author's only contribution to the series is a collection.
+The mobile author detail section gets the same treatment.
+
+---
+
 ## [2.2.3] — 2026-05-01
 
 Patch release. Three small UAT-driven fixes — two UI papercuts on the
