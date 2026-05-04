@@ -117,12 +117,19 @@ _RX_SERIES_REF_TITLE = re.compile(r'^.+\s+#\d+\s*$')
 # the is_omnibus flag and their series_index is cleared so they don't
 # push other books out of position.
 _RX_OMNIBUS = re.compile(
-    r'(?i)\b('
-    r'omnibus|complete\s+(?:series|collection|trilogy|saga)'
-    r'|books?\s+\d+\s*[-–&]\s*\d+'  # "Books 1-3", "Book 1 & 2"
-    r'|(?:the\s+)?complete\s+\w+\s+(?:series|trilogy|saga)'
-    r'|compilation|anthology|box\s*set'
-    r')\b'
+    r'(?i)(?:'
+    r'\bomnibus\b'
+    r'|\bcompilation\b|\banthology\b'
+    r'|\bbox\s*set\b|\bboxed\s+set\b'
+    r'|\bfull\s+series\b'
+    r'|\bvolume\s+set\b'
+    r'|\bbooks?\s+\d+\s*[-–&]\s*\d+'  # "Books 1-3", "Book 1 & 2"
+    r'|\b\d+[-\s]book\s+(?:collection|set|bundle|omnibus)\b'  # "6-Book Collection", "3-Book Boxed Set"
+    r'|\bcomplete\s+(?:series|collection|trilogy|saga|anthology|stories|novellas|novels|chronicles|short\s+fiction|graphic\s+novel\s+series)\b'
+    r'|\b(?:the\s+)?complete(?:\s+\w+){1,5}\s+(?:series|trilogy|saga|collection|anthology|edition|stories|chronicles|tales|novels|novellas|set|bundle)\b'
+    r'|:\s*the\s+complete\b'  # subtitle "The Complete ..." — accepts the rare single-book FP
+    r'|\(\s*complete\s*\)'  # bare "(complete)" parenthetical anywhere — series-status annotation pulled into title
+    r')'
 )
 
 # Audiobook / non-ebook format detection. Matches titles and metadata

@@ -220,3 +220,65 @@ class TestBackfillOmnibus:
 
         assert first == 1
         assert second == 0
+
+
+# ─── Regex pattern coverage ───────────────────────────────────
+# Direct regex tests are cheaper than DB round-trips and let us
+# document exactly which titles the omnibus detector is expected
+# to flag. Each parametrised case is a real or representative
+# title pulled from Mark's library scan.
+
+class TestOmnibusRegexCoverage:
+    """Positive matches — every expansion arm of `_RX_OMNIBUS`."""
+
+    @pytest.mark.parametrize("title", [
+        # Existing arms (regression guards)
+        "Hero Support: Omnibus",
+        "Amazonian Master Omnibus",
+        "The Complete Deadland Saga",
+        "Mistborn: The Complete Trilogy",
+        "Super Sales on Super Heroes Books 1-3",
+        "Some Pulp Anthology",
+        "The Expanse Box Set",
+        # New: full series
+        "Elf Date (Full Series): Spicy Elf Dating Fantasy",
+        "Kingdom Evolution: Litrpg Harem Full Series",
+        # New: volume set
+        "16 Volume Set Complete Forgotten Realms Harpers",
+        "Player Slayer: Spicy Gamelit Adventure Volume Set 2",
+        # New: boxed set + N-Book pattern
+        "Dune: The Graphic Novel: The Complete 3-Book Boxed Set: Dune, Muad'Dib, and The Prophet",
+        "School for Good and Evil the Complete 6-Book Collection",
+        # New: widened complete-terminator list
+        "Leena's Story - The Complete Novellas",
+        "Metaphorosis 2021: The Complete Stories",
+        # New: complete + N-words + terminator (was {1}, now {1,5})
+        "Succowbus: The Complete Creamy Collection",
+        "The Complete Princess to Pleasure Slave Chronicles Collection",
+        "Stephen King's The Dark Tower: Beginnings: The Complete Graphic Novel Series",
+        # New: subtitle "The Complete ..." generic
+        "Book of Carter: The Complete Volume",
+        "The Witch Who Came In From The Cold: The Complete Season 2",
+        "The Xothic Legend Cycle: The Complete Mythos Fiction of Lin Carter",
+        # New: "(complete)" at end (with optional trailing close-paren)
+        "Wayward (part 5): A Cozy Slice of Life Harem Romance (Wayward Harem Series (complete))",
+        "My Happy Ending: A Paranormal Harem Serial Fantasy (My Paranormal Girlfriends (Complete) Book 5)",
+    ])
+    def test_matches(self, title: str) -> None:
+        from app.discovery.lookup import _is_omnibus
+        assert _is_omnibus(title), f"expected omnibus match for: {title!r}"
+
+    @pytest.mark.parametrize("title", [
+        # Plain titles must not flag
+        "Stay at Home Hero",
+        "The Final Empire",
+        "Foundation and Empire",
+        # "complete" without a collection-noun terminator
+        "THE COMPLETE BUT LITTLE BOOK ABOUT PROCRASTINATION: A SELF-HELP GUIDE",
+        "The Complete Idiot's Guide to Drawing Superheroes and Villains Illustrated",
+        # "completely" must not trigger the "complete" arms
+        "The Completely Wrong Map",
+    ])
+    def test_does_not_match(self, title: str) -> None:
+        from app.discovery.lookup import _is_omnibus
+        assert not _is_omnibus(title), f"expected no match for: {title!r}"
