@@ -71,7 +71,7 @@ async def _build_status(
     *, force_refresh: bool = False
 ) -> MamStatusResponse:
     settings = load_settings()
-    token = settings.get("mam_session_id", "") or ""
+    token = await mam_cookie.get_active_token()
     last_validated_at = settings.get("mam_last_validated_at")
     validation_ok = bool(settings.get("mam_validation_ok"))
 
@@ -144,7 +144,7 @@ async def validate() -> ValidateResponse:
     automatically when the user re-validates after a refresh.
     """
     settings = load_settings()
-    token = settings.get("mam_session_id", "") or ""
+    token = await mam_cookie.get_active_token()
 
     result = await mam_cookie.validate(token)
     ok = bool(result.get("success"))

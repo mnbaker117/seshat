@@ -605,7 +605,9 @@ async def lifespan(app: FastAPI):
     # silently expire the cookie despite all the rotation plumbing
     # working perfectly. Auto-disabled if no cookie is configured
     # (the keep-alive call would fail with "no MAM session" anyway).
-    if settings.get("mam_session_id"):
+    # Gate on the resolved cookie (encrypted store + settings.json),
+    # not settings.json alone — Sprint 6 migration blanks that field.
+    if mam_cookie:
         keepalive_seconds = float(
             settings.get("cookie_keepalive_interval_hours", 168)
         ) * 3600.0
@@ -626,7 +628,7 @@ async def lifespan(app: FastAPI):
     # Cookie retry: re-attempts grabs stuck in failed_cookie_expired.
     # Runs on a 5-minute interval (configurable). Auto-disabled if
     # neither MAM cookie nor qBit is configured (nothing to retry with).
-    if settings.get("mam_session_id") and settings.get("qbit_url"):
+    if mam_cookie and settings.get("qbit_url"):
         retry_seconds = float(
             settings.get("cookie_retry_interval_seconds", 300)
         )

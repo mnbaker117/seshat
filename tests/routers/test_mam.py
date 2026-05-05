@@ -45,6 +45,22 @@ def isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_PATH", p)
     config._settings_cache["data"] = None
     config._settings_cache["mtime"] = object()
+
+    # Pin token resolution to settings.json for the duration of this
+    # test. v2.2.8 routed status/validate through
+    # `mam_cookie.get_active_token()` which falls through in-memory →
+    # encrypted store → settings.json. Tests don't isolate the auth
+    # DB, so we short-circuit to settings to keep the existing
+    # "seed mam_session_id into the JSON" test contract working.
+    from app.mam import cookie as mam_cookie_mod
+
+    async def _fake_get_active_token():
+        return config.load_settings().get("mam_session_id", "") or ""
+
+    monkeypatch.setattr(
+        mam_cookie_mod, "get_active_token", _fake_get_active_token
+    )
+
     yield p
     config._settings_cache["data"] = None
     config._settings_cache["mtime"] = object()

@@ -43,7 +43,6 @@ from app.discovery.sources.mam import (
     _resolve_mam_languages,
 )
 from app import state
-from app.discovery.sources.mam import get_current_token as mam_get_current_token
 
 
 def _active_content_type(slug: str | None = None) -> str:
@@ -85,25 +84,12 @@ async def _notify_mam_done() -> None:
 async def _get_mam_token() -> str:
     """Get the active MAM token from the best source.
 
-    Priority: in-memory (cookie rotation) → encrypted store → settings.json.
-    Settings.json is the legacy fallback only — Sprint 6 migrated
-    plaintext tokens out of settings.json into the encrypted store
-    AND blanked the original. New tokens saved through Settings now
-    land in the encrypted store directly via `set_secret()` in the
-    /api/settings handler, so reads MUST go through this helper or
-    they'll get empty strings.
+    Thin wrapper around `app.mam.cookie.get_active_token()` —
+    kept for backwards compat with this module's existing callers.
+    See that helper for the canonical resolution priority.
     """
-    token = mam_get_current_token()
-    if token:
-        return token
-    try:
-        from app.secrets import get_secret
-        token = await get_secret("mam_session_id")
-        if token:
-            return token
-    except Exception:
-        pass
-    return load_settings().get("mam_session_id", "")
+    from app.mam.cookie import get_active_token
+    return await get_active_token()
 
 
 async def _mam_ready(s: dict) -> bool:

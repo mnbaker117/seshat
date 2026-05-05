@@ -179,7 +179,8 @@ async def get_stats(slug: str | None = None):
         ll = await (await g("SELECT * FROM sync_log WHERE sync_type='lookup' ORDER BY started_at DESC LIMIT 1")).fetchone()
         s = load_settings()
         mam_stats = None
-        if s.get("mam_enabled") and s.get("mam_session_id"):
+        from app.discovery.routers.mam import _mam_ready
+        if await _mam_ready(s):
             mam_stats = await get_mam_stats(db)
         lib_info = next((l for l in state._discovered_libraries if l["slug"] == target_slug), None)
         content_type = lib_info.get("content_type", "ebook") if lib_info else "ebook"

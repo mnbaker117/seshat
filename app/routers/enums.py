@@ -16,7 +16,6 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.config import load_settings
 from app.mam import enums as mam_enums
 
 router = APIRouter(prefix="/api/v1/enums", tags=["enums"])
@@ -75,8 +74,8 @@ async def get_enums() -> EnumsResponse:
 
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_enums() -> RefreshResponse:
-    settings = load_settings()
-    token = settings.get("mam_session_id", "") or ""
+    from app.mam.cookie import get_active_token
+    token = await get_active_token()
     try:
         count = await mam_enums.refresh(token=token)
         return RefreshResponse(ok=True, count=count)

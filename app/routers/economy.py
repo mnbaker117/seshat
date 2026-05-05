@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from app.config import load_settings, save_settings
 from app.database import get_db
+from app.mam import cookie as mam_cookie
 from app.mam.bonus_buy import (
     BP_PER_PERSONAL_FL,
     BP_PER_UPLOAD_GB,
@@ -181,7 +182,7 @@ class BuyResponse(BaseModel):
 
 @router.post("/vip/buy", response_model=BuyResponse)
 async def vip_buy(body: VipBuyRequest) -> BuyResponse:
-    token = _require_token()
+    token = await _require_token()
     prev_seedbonus = await _fetch_prev_seedbonus(token)
     result = await buy_vip(body.weeks, token=token)
     return await _persist_manual_buy_result(
@@ -196,7 +197,7 @@ async def vip_buy(body: VipBuyRequest) -> BuyResponse:
 
 @router.post("/upload/buy", response_model=BuyResponse)
 async def upload_buy(body: UploadBuyRequest) -> BuyResponse:
-    token = _require_token()
+    token = await _require_token()
     prev_seedbonus = await _fetch_prev_seedbonus(token)
     if body.mode == "max_affordable":
         gb = max_affordable_upload_gb(prev_seedbonus)
@@ -242,7 +243,7 @@ async def personal_fl_buy(body: PersonalFlBuyRequest) -> BuyResponse:
     onto this endpoint benefit from that invalidation: they get a
     free tier on the grab decision without further configuration.
     """
-    token = _require_token()
+    token = await _require_token()
     prev_seedbonus = await _fetch_prev_seedbonus(token)
     result = await buy_personal_freeleech(body.torrent_id, token=token)
 
@@ -323,7 +324,7 @@ async def preflight(body: PreflightRequest) -> PreflightResponse:
     "Buy N GB" one-click button that ships that exact shortfall to
     `/upload/buy`.
     """
-    token = _require_token()
+    token = await _require_token()
     settings = load_settings()
     margin_gb = float(
         settings.get("mam_economy_buffer_gate_safety_margin_gb", 1) or 0
@@ -372,14 +373,13 @@ async def preflight(body: PreflightRequest) -> PreflightResponse:
 # ─── Internals ──────────────────────────────────────────────
 
 
-def _require_token() -> str:
+async def _require_token() -> str:
     """Return the configured MAM token, or 412 if none.
 
     412 (Precondition Failed) distinguishes "Seshat isn't set up for
     MAM yet" from "the MAM call itself failed" (502).
     """
-    settings = load_settings()
-    token = settings.get("mam_session_id", "") or ""
+    token = await mam_cookie.get_active_token()
     if not token:
         raise HTTPException(
             412,

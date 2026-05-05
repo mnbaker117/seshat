@@ -142,6 +142,35 @@ def get_current_token() -> str:
     return _current_token or ""
 
 
+async def get_active_token() -> str:
+    """Resolve the active MAM session token from the canonical sources.
+
+    Priority: in-memory rotated token → encrypted secrets store →
+    settings.json (legacy fallback). This is the only correct way to
+    fetch the cookie for an authenticated MAM API call: reading
+    `settings.json["mam_session_id"]` directly returns whatever value
+    was last written there, which can be weeks stale if the live
+    cookie has been rotating in-memory + encrypted-store while the
+    legacy settings field hasn't been touched. The status / refresh
+    endpoint hit exactly that bug in v2.2.7.
+    """
+    token = get_current_token()
+    if token:
+        return token
+    try:
+        from app.secrets import get_secret
+        token = await get_secret("mam_session_id")
+        if token:
+            return token
+    except Exception:
+        pass
+    try:
+        from app.config import load_settings
+        return load_settings().get("mam_session_id", "") or ""
+    except Exception:
+        return ""
+
+
 def set_rotation_callback(
     callback: Optional[Callable[[str], Awaitable[None]]],
 ) -> None:

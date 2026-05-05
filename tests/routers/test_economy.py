@@ -40,6 +40,21 @@ def isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_PATH", p)
     config._settings_cache["data"] = None
     config._settings_cache["mtime"] = object()
+
+    # Pin token resolution to settings.json. v2.2.8 routed
+    # `_require_token()` through `mam.cookie.get_active_token()` which
+    # cascades in-memory → encrypted store → settings.json. Without
+    # the override, tests would hit whatever token sits in the dev
+    # box's auth DB and could even make real MAM network calls.
+    from app.mam import cookie as mam_cookie_mod
+
+    async def _fake_get_active_token():
+        return config.load_settings().get("mam_session_id", "") or ""
+
+    monkeypatch.setattr(
+        mam_cookie_mod, "get_active_token", _fake_get_active_token
+    )
+
     yield p
     config._settings_cache["data"] = None
     config._settings_cache["mtime"] = object()

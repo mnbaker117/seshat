@@ -152,10 +152,16 @@ async def list_configured() -> dict[str, bool]:
 
 
 async def migrate_from_settings() -> int:
-    """One-time migration: copy secrets from settings.json into the
-    encrypted store, then blank them in settings.json.
+    """Copy secrets from settings.json into the encrypted store, then
+    blank any settings.json key whose value already lives in the store.
 
-    Returns the number of secrets migrated.
+    Returns the number of secrets newly migrated this call. Note this
+    runs at every boot — it's idempotent. The blanking step runs even
+    when no NEW migration happened, because pre-v2.2.8 versions of
+    this routine only blanked settings.json on the first migration
+    and left stale plaintext values stranded thereafter (e.g. an old
+    `mam_session_id` from before the encrypted-store cutover that the
+    rest of the app would then read instead of the live rotated value).
     """
     from app.config import load_settings, save_settings
 
@@ -165,20 +171,33 @@ async def migrate_from_settings() -> int:
     for key in SECRET_KEYS:
         value = settings.get(key)
         if value and isinstance(value, str) and value.strip():
-            # Check if already in the secret store.
             existing = await get_secret(key)
             if existing:
                 continue
             await set_secret(key, value.strip())
             migrated += 1
 
-    # Blank the migrated keys in settings.json.
-    if migrated > 0:
-        settings = dict(load_settings())
-        for key in SECRET_KEYS:
-            if key in settings and settings[key]:
-                settings[key] = ""
+    # Blank settings.json for every secret key that has a live value
+    # in the encrypted store, regardless of whether THIS call was the
+    # one that put it there. The encrypted store is canonical; any
+    # settings.json copy is at best redundant and at worst stale.
+    settings = dict(load_settings())
+    blanked = 0
+    for key in SECRET_KEYS:
+        if not settings.get(key):
+            continue
+        if await get_secret(key):
+            settings[key] = ""
+            blanked += 1
+    if blanked:
         save_settings(settings)
+        _log.info(
+            "Blanked %d stale plaintext secret(s) in settings.json "
+            "(canonical copy lives in encrypted store)",
+            blanked,
+        )
+
+    if migrated > 0:
         _log.info("Migrated %d secret(s) from settings.json to auth DB", migrated)
 
     return migrated

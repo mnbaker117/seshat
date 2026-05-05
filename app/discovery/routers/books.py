@@ -808,7 +808,8 @@ async def scan_books_mam(data: dict = Body(...)):
         return {"error": "No books specified"}
 
     s = load_settings()
-    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+    from app.discovery.routers.mam import _mam_ready, _get_mam_token
+    if not await _mam_ready(s):
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
@@ -832,7 +833,7 @@ async def scan_books_mam(data: dict = Body(...)):
         from app.discovery.routers.mam import _active_content_type
         ct = _active_content_type()
         format_priority = s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority")
-        token = s["mam_session_id"]
+        token = await _get_mam_token()
         lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
         stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
         results = []

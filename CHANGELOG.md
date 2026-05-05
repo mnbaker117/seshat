@@ -7,6 +7,53 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.8] — 2026-05-05
+
+Bug fix: the Hermes Dashboard widget went blank and the MAM Status
+page showed `HTTP 403 from jsonLoad.php`, even though every other MAM
+operation (search, grab, IRC announce, scans) kept working. Root cause
+was that `/api/v1/mam/status` and a handful of other endpoints were
+reading `mam_session_id` straight from `settings.json` instead of the
+live in-memory cookie that gets rotated on every MAM API call. The
+settings.json copy was a stale plaintext value left over from before
+the encrypted-store migration; MAM eventually rejected it as
+`Invalid/missing cookie`. The rest of Seshat already used the canonical
+in-memory token via `mam_cookie.get_current_token()`, which is why
+only the read-only status surface broke.
+
+### Fixed
+
+- `routers/mam.py` `_build_status` and `validate` now read the active
+  token via the new `mam.cookie.get_active_token()` helper
+  (in-memory → encrypted store → settings.json fallback) instead of
+  `settings["mam_session_id"]` directly. This is what unblocks the
+  Hermes widget and the MAM Status page.
+- Same change applied to the other endpoints that had the latent
+  same-pattern bug and would have manifested it on the next migration:
+  `routers/economy.py` `_require_token` (vip/upload/personal-FL buy +
+  preflight), `routers/enums.py` `refresh_enums`, and the bulk
+  multi-author / multi-book MAM scan endpoints under `discovery/routers/`.
+- `secrets.migrate_from_settings()` now blanks `settings.json` for
+  every secret key that has a live encrypted-store value, even when
+  no fresh migration happened on this boot. The pre-2.2.8 routine only
+  blanked on first migration, so a value already in the encrypted
+  store on boot left its plaintext settings.json sibling stranded
+  forever — that's how the stale `mam_session_id` got there.
+- Lifespan keep-alive + cookie-retry gates and the discovery library
+  config / multi-{author,book} scan gates now use the resolved token
+  (`mam_cookie` / `_mam_ready`) rather than `settings["mam_session_id"]`,
+  so they don't false-disable when the new migration blanks the field.
+
+### Migration
+
+No manual steps. On first boot of v2.2.8, `migrate_from_settings`
+silently blanks the stranded plaintext copy in your `settings.json`
+and the affected endpoints start using the live rotated cookie. The
+Hermes widget will repopulate within a few seconds of the next status
+poll.
+
+---
+
 ## [2.2.7] — 2026-05-04
 
 UAT-driven discovery improvements from Mark's continuing
