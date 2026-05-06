@@ -69,7 +69,12 @@ CREATE TABLE IF NOT EXISTS authors (
 CREATE TABLE IF NOT EXISTS series (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    author_id INTEGER NOT NULL,
+    -- author_id is nullable as of v2.3.0: NULL = shared series
+    -- (Halo, Star Wars, etc.). Per-author rows still exist for the
+    -- common case AND for genuine name collisions like Cressman's
+    -- vs Savarovsky's "The Last Paladin". Calibre-sync auto-promotes
+    -- to shared when one Calibre series id has books from 2+ authors.
+    author_id INTEGER,
     hardcover_id TEXT,
     goodreads_id TEXT,
     kobo_id TEXT,
@@ -192,6 +197,76 @@ CREATE TABLE IF NOT EXISTS book_series_suggestions (
     FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
 );
 
+-- v2.3.0 dual-source-of-truth metadata tables. See
+-- docs/v23_metadata_design.md for the full design rationale.
+--
+-- Each Calibre/ABS sync writes a frozen snapshot of every field per
+-- book. The `books` row is the editable Seshat-live view that drifts
+-- via enrichment + manual edits. The Compare/Metadata Manager UI
+-- reads both sides to surface diffs for review.
+CREATE TABLE IF NOT EXISTS books_calibre_snapshot (
+    book_id INTEGER PRIMARY KEY,
+    title TEXT,
+    -- JSON array of {id, name, sort} from Calibre's authors table.
+    -- Stored denormalized rather than FK'd so the snapshot stays a
+    -- faithful reproduction of Calibre's view, independent of how
+    -- Seshat resolves author identity (pen-name links, normalized
+    -- name dedup, etc.).
+    authors_json TEXT,
+    series_name TEXT,
+    series_index REAL,
+    isbn TEXT,
+    cover_path TEXT,
+    description TEXT,
+    tags TEXT,
+    rating INTEGER,
+    language TEXT,
+    publisher TEXT,
+    formats TEXT,
+    pubdate TEXT,
+    synced_at REAL NOT NULL,
+    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS books_abs_snapshot (
+    book_id INTEGER PRIMARY KEY,
+    title TEXT,
+    authors_json TEXT,
+    series_name TEXT,
+    series_index REAL,
+    narrator TEXT,
+    duration_sec REAL,
+    abridged INTEGER,
+    asin TEXT,
+    description TEXT,
+    tags TEXT,
+    cover_path TEXT,
+    language TEXT,
+    publisher TEXT,
+    audio_formats TEXT,
+    pubdate TEXT,
+    synced_at REAL NOT NULL,
+    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+
+-- Unified review queue for diffs the user hasn't decided on yet.
+-- Replaces book_series_suggestions semantically (the Suggestions UI
+-- folds into Metadata Manager). One row per (book, field, source)
+-- triple — a fresh proposal from the same source overwrites prior
+-- ones via UPSERT, so the queue doesn't grow unboundedly under
+-- repeated scans.
+CREATE TABLE IF NOT EXISTS metadata_review_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    source TEXT NOT NULL,
+    proposed_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(book_id, field, source),
+    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_books_author ON books(author_id);
 CREATE INDEX IF NOT EXISTS idx_books_series ON books(series_id);
 CREATE INDEX IF NOT EXISTS idx_books_owned ON books(owned);
@@ -206,6 +281,8 @@ CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status);
 CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON book_series_suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_suggestions_book ON book_series_suggestions(book_id);
+CREATE INDEX IF NOT EXISTS idx_review_queue_book ON metadata_review_queue(book_id);
+CREATE INDEX IF NOT EXISTS idx_review_queue_source ON metadata_review_queue(source);
 """
 
 # Migrations for existing databases
@@ -368,6 +445,70 @@ MIGRATIONS = [
     # Indexed because the sync upsert hits it per-author per-sync.
     "ALTER TABLE authors ADD COLUMN normalized_name TEXT",
     "CREATE INDEX IF NOT EXISTS idx_authors_normalized_name ON authors(normalized_name)",
+    # ── v2.3.0 dual-source-of-truth metadata ─────────────────────
+    # See docs/v23_metadata_design.md. Calibre/ABS syncs write to
+    # snapshot tables; the `books` row is the editable Seshat-live
+    # view. Per-book metadata source preference + per-field user-edit
+    # provenance flag govern auto-flow vs review-queue routing on
+    # subsequent diffs. Existing book_series_suggestions stays in
+    # place during v2.3.0 (data path read-only) and folds into the
+    # Metadata Manager page in v2.3.1.
+    """CREATE TABLE IF NOT EXISTS books_calibre_snapshot (
+        book_id INTEGER PRIMARY KEY,
+        title TEXT,
+        authors_json TEXT,
+        series_name TEXT,
+        series_index REAL,
+        isbn TEXT,
+        cover_path TEXT,
+        description TEXT,
+        tags TEXT,
+        rating INTEGER,
+        language TEXT,
+        publisher TEXT,
+        formats TEXT,
+        pubdate TEXT,
+        synced_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS books_abs_snapshot (
+        book_id INTEGER PRIMARY KEY,
+        title TEXT,
+        authors_json TEXT,
+        series_name TEXT,
+        series_index REAL,
+        narrator TEXT,
+        duration_sec REAL,
+        abridged INTEGER,
+        asin TEXT,
+        description TEXT,
+        tags TEXT,
+        cover_path TEXT,
+        language TEXT,
+        publisher TEXT,
+        audio_formats TEXT,
+        pubdate TEXT,
+        synced_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS metadata_review_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER NOT NULL,
+        field TEXT NOT NULL,
+        old_value TEXT,
+        new_value TEXT,
+        source TEXT NOT NULL,
+        proposed_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+        UNIQUE(book_id, field, source),
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_review_queue_book ON metadata_review_queue(book_id)",
+    "CREATE INDEX IF NOT EXISTS idx_review_queue_source ON metadata_review_queue(source)",
+    # Per-book metadata source preference + per-field user-edit map.
+    # See docs/v23_metadata_design.md "Data model" section.
+    "ALTER TABLE books ADD COLUMN metadata_source_pref TEXT NOT NULL DEFAULT 'seshat'",
+    "ALTER TABLE books ADD COLUMN field_source_map TEXT",
+    "ALTER TABLE books ADD COLUMN user_edited_fields TEXT NOT NULL DEFAULT '[]'",
 ]
 
 
@@ -741,6 +882,177 @@ async def _dedupe_author_rows(db) -> int:
     return deleted
 
 
+async def _migrate_series_author_nullable(db) -> bool:
+    """Make `series.author_id` nullable if it isn't already.
+
+    SQLite has no `ALTER COLUMN DROP NOT NULL`, so we recreate the
+    table. Idempotent: PRAGMA table_info returns notnull=0 once the
+    migration has run, and we early-out then.
+
+    Runs inside a transaction with foreign_keys deferred so the
+    `books.series_id → series.id` FK doesn't reject the DROP. The
+    new table preserves all existing column data; row IDs are
+    preserved via SELECT including `id`, so book FKs stay valid.
+
+    Returns True if the table was rebuilt, False if no-op.
+    """
+    cols = await (await db.execute("PRAGMA table_info(series)")).fetchall()
+    author_id_col = next((c for c in cols if c["name"] == "author_id"), None)
+    if author_id_col is None:
+        # Fresh DB — series table created by SCHEMA already has the
+        # nullable column. Nothing to do.
+        return False
+    if author_id_col["notnull"] == 0:
+        return False  # already nullable
+
+    _db_logger.info(
+        "Migrating series.author_id to nullable (recreating table)"
+    )
+
+    # Capture the actual column list from the live table so the
+    # explicit-column INSERT stays in lockstep with whatever
+    # ALTER TABLE ADD COLUMN entries were applied historically.
+    col_names = [c["name"] for c in cols]
+    col_list = ", ".join(col_names)
+
+    # foreign_keys = OFF would leak — defer instead so we can still
+    # detect actual FK violations on commit.
+    await db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        await db.execute("""
+            CREATE TABLE series_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                author_id INTEGER,
+                hardcover_id TEXT,
+                goodreads_id TEXT,
+                kobo_id TEXT,
+                fictiondb_id TEXT,
+                total_books INTEGER,
+                description TEXT,
+                last_lookup_at REAL,
+                created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                amazon_id TEXT,
+                audiobookshelf_id TEXT,
+                FOREIGN KEY (author_id) REFERENCES authors(id),
+                UNIQUE(name, author_id)
+            )
+        """)
+        await db.execute(
+            f"INSERT INTO series_new ({col_list}) "
+            f"SELECT {col_list} FROM series"
+        )
+        await db.execute("DROP TABLE series")
+        await db.execute("ALTER TABLE series_new RENAME TO series")
+        await db.commit()
+    finally:
+        await db.execute("PRAGMA foreign_keys = ON")
+    return True
+
+
+async def _backfill_metadata_snapshots(db) -> tuple[int, int]:
+    """Seed `books_calibre_snapshot` and `books_abs_snapshot` from the
+    current `books` rows on first boot post-v2.3.0.
+
+    Cold-start assumption: the existing `books` columns are a
+    reasonable representation of what Calibre/ABS last said. They
+    might have drift from prior source-scan overwrites, but that's
+    acceptable — the next real Calibre/ABS sync corrects the snapshot.
+
+    Idempotent: only inserts when the snapshot row doesn't exist.
+    Returns `(calibre_inserted, abs_inserted)`.
+    """
+    import json as _json
+    import time as _time
+
+    now = _time.time()
+
+    # Calibre snapshot — books with source='calibre' AND owned=1.
+    # We pull author name via a join because the snapshot stores
+    # denormalized authors_json (mirrors Calibre's POV, no
+    # pen-name-resolution).
+    cal_rows = await (await db.execute("""
+        SELECT b.id, b.title, b.calibre_id, b.isbn, b.cover_path,
+               b.description, b.tags, b.rating, b.language,
+               b.publisher, b.formats, b.pub_date,
+               b.series_index,
+               a.name AS author_name, a.calibre_id AS author_calibre_id,
+               s.name AS series_name
+        FROM books b
+        LEFT JOIN authors a ON a.id = b.author_id
+        LEFT JOIN series s ON s.id = b.series_id
+        WHERE b.source = 'calibre' AND b.owned = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM books_calibre_snapshot cs WHERE cs.book_id = b.id
+          )
+    """)).fetchall()
+    cal_inserted = 0
+    for r in cal_rows:
+        authors_json = _json.dumps([{
+            "id": r["author_calibre_id"],
+            "name": r["author_name"],
+        }]) if r["author_name"] else None
+        # Calibre stores rating 0-10 (half-star integers); our `books`
+        # column uses REAL. Round to int for snapshot fidelity.
+        rating_int = (
+            int(round(r["rating"])) if r["rating"] is not None else None
+        )
+        await db.execute("""
+            INSERT INTO books_calibre_snapshot
+            (book_id, title, authors_json, series_name, series_index,
+             isbn, cover_path, description, tags, rating, language,
+             publisher, formats, pubdate, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            r["id"], r["title"], authors_json, r["series_name"],
+            r["series_index"], r["isbn"], r["cover_path"],
+            r["description"], r["tags"], rating_int, r["language"],
+            r["publisher"], r["formats"], r["pub_date"], now,
+        ))
+        cal_inserted += 1
+
+    # ABS snapshot — books with audiobookshelf_id populated.
+    abs_rows = await (await db.execute("""
+        SELECT b.id, b.title, b.audiobookshelf_id, b.asin, b.narrator,
+               b.duration_sec, b.abridged, b.description, b.tags,
+               b.cover_path, b.language, b.publisher, b.audio_formats,
+               b.pub_date, b.series_index,
+               a.name AS author_name,
+               s.name AS series_name
+        FROM books b
+        LEFT JOIN authors a ON a.id = b.author_id
+        LEFT JOIN series s ON s.id = b.series_id
+        WHERE b.audiobookshelf_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM books_abs_snapshot abs WHERE abs.book_id = b.id
+          )
+    """)).fetchall()
+    abs_inserted = 0
+    for r in abs_rows:
+        authors_json = _json.dumps([{
+            "id": None, "name": r["author_name"],
+        }]) if r["author_name"] else None
+        await db.execute("""
+            INSERT INTO books_abs_snapshot
+            (book_id, title, authors_json, series_name, series_index,
+             narrator, duration_sec, abridged, asin, description,
+             tags, cover_path, language, publisher, audio_formats,
+             pubdate, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            r["id"], r["title"], authors_json, r["series_name"],
+            r["series_index"], r["narrator"], r["duration_sec"],
+            r["abridged"], r["asin"], r["description"], r["tags"],
+            r["cover_path"], r["language"], r["publisher"],
+            r["audio_formats"], r["pub_date"], now,
+        ))
+        abs_inserted += 1
+
+    if cal_inserted or abs_inserted:
+        await db.commit()
+    return cal_inserted, abs_inserted
+
+
 async def _dedupe_same_series_position(db) -> int:
     """Collapse book rows that occupy the same `(series_id, series_index)`.
 
@@ -972,6 +1284,10 @@ async def init_db(slug=None):
             ("pen_name_links", "link_type", "TEXT NOT NULL DEFAULT 'pen_name'"),
             ("authors", "ibdb_id", "TEXT"),
             ("authors", "google_books_id", "TEXT"),
+            # v2.3.0 metadata source pref + user-edit map.
+            ("books", "metadata_source_pref", "TEXT NOT NULL DEFAULT 'seshat'"),
+            ("books", "field_source_map", "TEXT"),
+            ("books", "user_edited_fields", "TEXT NOT NULL DEFAULT '[]'"),
         ]
         for table, col, coltype in _ensure_columns:
             try:
@@ -993,6 +1309,16 @@ async def init_db(slug=None):
                 if "already exists" not in str(e).lower():
                     _db_logger.warning(f"Index creation failed: {e}")
         await db.commit()
+
+        # ── Step 4.4: v2.3.0 nullable series.author_id ────────────
+        # Pre-v2.3.0 schema had author_id NOT NULL. Make it nullable
+        # so shared series (Halo, Star Wars) can use NULL as the
+        # "shared" sentinel. Idempotent — checks PRAGMA table_info
+        # first and no-ops if already nullable.
+        if await _migrate_series_author_nullable(db):
+            _db_logger.info(
+                "series.author_id is now nullable (v2.3.0 migration)"
+            )
 
         # ── Step 4.5: Backfill authors.normalized_name ─────────────
         # Post-migration, ensure every existing author row has a
@@ -1070,6 +1396,19 @@ async def init_db(slug=None):
             _db_logger.info(
                 f"Series-index recovery indexed {idx_touched} row(s), "
                 f"deduped {idx_deduped} same-position pair(s)"
+            )
+
+        # ── Step 8: v2.3.0 metadata snapshot backfill ─────────────
+        # Cold-start seed of books_calibre_snapshot / books_abs_snapshot
+        # from current `books` rows. Idempotent — only inserts when no
+        # snapshot row exists yet. The next real Calibre/ABS sync
+        # corrects any drift between the seeded snapshot and the
+        # actual source-of-truth state.
+        cal_seeded, abs_seeded = await _backfill_metadata_snapshots(db)
+        if cal_seeded or abs_seeded:
+            _db_logger.info(
+                f"Metadata snapshot backfill: {cal_seeded} Calibre + "
+                f"{abs_seeded} ABS row(s) seeded"
             )
     finally:
         await db.close()
