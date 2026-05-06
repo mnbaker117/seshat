@@ -7,6 +7,38 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.11] — 2026-05-05
+
+Repo owner rename. The GitHub account hosting Seshat moved from
+`mnbaker117` to `malevolenttortoise`. All references in code,
+docs, Docker image tags, badges, error messages, and the Hardcover
+`User-Agent` header now point at the new owner.
+
+GitHub redirects the old owner to the new one for ~1 year, so
+existing pulls, links, and bookmarks keep working — but anything
+new should use `ghcr.io/malevolenttortoise/seshat:latest` (or
+`:latest-slim`) and `github.com/malevolenttortoise/seshat`.
+
+No code changes, no data migration, identical container behavior.
+
+### Changed
+
+- All `ghcr.io/mnbaker117/seshat` references swapped to
+  `ghcr.io/malevolenttortoise/seshat` (compose example, README,
+  Dockerfiles, Unraid template, DEPLOY.md, calibredb error
+  diagnostic block).
+- All `github.com/mnbaker117/seshat` URLs swapped to
+  `github.com/malevolenttortoise/seshat` (README badges, SECURITY
+  advisory link, Unraid template support/project/icon URLs,
+  CHANGELOG release links, NOTICE).
+- `Hardcover` source `User-Agent` updated to the new repo URL.
+- `tests/sinks/test_calibre.py` assertion updated in lockstep with
+  the calibredb diagnostic.
+- `LICENSE` + `NOTICE` copyright holder updated (same legal
+  entity, new pseudonym).
+
+---
+
 ## [2.2.10] — 2026-05-05
 
 Security release. CodeQL triage on the now-public repo flagged 19
@@ -1702,7 +1734,7 @@ integration.
 ## [1.1.0] — 2026-04-14
 
 Quality-of-life release. Thirteen items split across two sprints —
-most are direct cross-ports from [AthenaScout](https://github.com/mnbaker117/AthenaScout)
+most are direct cross-ports from [AthenaScout](https://github.com/malevolenttortoise/AthenaScout)
 v1.1.0's playbook plus Seshat-specific integration + operator
 tooling.
 
@@ -1827,7 +1859,7 @@ tooling.
 ## [1.0.0] — 2026-04-09
 
 Initial public release. See release notes at
-<https://github.com/mnbaker117/seshat/releases/tag/v1.0.0>.
+<https://github.com/malevolenttortoise/seshat/releases/tag/v1.0.0>.
 
-[1.1.0]: https://github.com/mnbaker117/seshat/releases/tag/v1.1.0
-[1.0.0]: https://github.com/mnbaker117/seshat/releases/tag/v1.0.0
+[1.1.0]: https://github.com/malevolenttortoise/seshat/releases/tag/v1.1.0
+[1.0.0]: https://github.com/malevolenttortoise/seshat/releases/tag/v1.0.0
