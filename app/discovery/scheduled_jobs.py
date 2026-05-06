@@ -99,7 +99,7 @@ async def sync_all_libraries() -> None:
                 # (ABS `lastUpdate`) route through the same change-detection
                 # path that Calibre's file mtime uses.
                 current_mtime = (
-                    lib_app.get_mtime(lib)
+                    await lib_app.get_mtime(lib)
                     if lib_app
                     else os.path.getmtime(lib["source_db_path"])
                 )

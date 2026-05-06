@@ -739,7 +739,7 @@ async def lifespan(app: FastAPI):
             try:
                 lib_app = get_app(lib.get("app_type", "calibre"))
                 current_mtime = (
-                    lib_app.get_mtime(lib)
+                    await lib_app.get_mtime(lib)
                     if lib_app
                     else _os.path.getmtime(lib["source_db_path"])
                 )

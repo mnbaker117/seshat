@@ -78,7 +78,7 @@ async def trigger_sync(slug: str | None = None):
             # Update mtime after successful manual sync
             s = load_settings()
             mtimes = s.get("library_mtimes", {})
-            mtimes[target_slug] = app_instance.get_mtime(lib) if app_instance else os.path.getmtime(lib["source_db_path"])
+            mtimes[target_slug] = await app_instance.get_mtime(lib) if app_instance else os.path.getmtime(lib["source_db_path"])
             s["library_mtimes"] = mtimes
             save_settings(s)
             try:

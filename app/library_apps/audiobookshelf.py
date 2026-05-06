@@ -115,19 +115,68 @@ class AudiobookshelfApp(LibraryApp):
         """ABS covers are fetched via the API, not from a local path."""
         return None
 
-    def get_mtime(self, library: dict) -> float:
+    async def get_mtime(self, library: dict) -> float:
         """Use ABS's library `lastUpdate` for change detection.
 
         Returned by `/api/libraries` for each library. Advances on every
         scan that touched the library (add/update/remove/rescan). If the
         value hasn't changed, we skip the sync the same way we skip
         Calibre when `metadata.db`'s mtime hasn't moved.
+
+        Must hit the API on every call: the value cached on `library`
+        at discovery time is frozen at startup. Without the live fetch,
+        every tick after the first sync compared the cached startup
+        value to itself, perpetually short-circuiting the sync — Mark
+        added 66 audiobooks overnight and saw zero scheduled syncs.
+
+        Falls back to the cached value on API failure so a transient
+        ABS outage doesn't cause a no-op sync that overwrites the
+        stored mtime with 0 and forces a full re-sync next tick.
         """
-        last = library.get("abs_last_update")
+        cached = library.get("abs_last_update")
         try:
-            return float(last) if last is not None else 0.0
+            cached_f = float(cached) if cached is not None else 0.0
         except (TypeError, ValueError):
-            return 0.0
+            cached_f = 0.0
+
+        base_url = library.get("abs_base_url")
+        lib_id = library.get("abs_library_id")
+        if not base_url or not lib_id:
+            return cached_f
+
+        api_key = await _get_abs_api_key()
+        if not api_key:
+            return cached_f
+
+        try:
+            client = AudiobookshelfClient(base_url, api_key)
+            libs = await client.list_libraries()
+        except Exception as e:
+            logger.warning(
+                "Audiobookshelf: get_mtime API fetch failed (%s: %s); "
+                "falling back to cached value", type(e).__name__, e,
+            )
+            return cached_f
+
+        for lib in libs:
+            if lib.get("id") == lib_id:
+                fresh = lib.get("lastUpdate")
+                try:
+                    fresh_f = float(fresh) if fresh is not None else 0.0
+                except (TypeError, ValueError):
+                    fresh_f = 0.0
+                # Update the in-memory dict so other readers see the
+                # fresh value too. `state._discovered_libraries` holds
+                # a reference to the same dict.
+                library["abs_last_update"] = fresh_f
+                return fresh_f
+
+        # Library no longer exists in ABS — return cached. Caller's
+        # equality check against `library_mtimes` will treat this as
+        # "unchanged" and skip the sync, which is the right behavior:
+        # we don't want to wipe Seshat state for a transient
+        # mis-listing.
+        return cached_f
 
 
 async def _get_abs_api_key() -> Optional[str]:

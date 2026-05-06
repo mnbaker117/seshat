@@ -156,13 +156,15 @@ class LibraryApp(ABC):
         """
         pass
 
-    def get_mtime(self, library: dict) -> float:
+    async def get_mtime(self, library: dict) -> float:
         """Return a monotonic mtime-like value for change detection.
 
         File-based default reads `source_db_path`'s mtime. API-based
-        apps should override to return a remote timestamp (e.g. ABS's
-        library `lastUpdate`) so the scheduled sync can skip unchanged
-        libraries.
+        apps should override to fetch a *fresh* remote timestamp (e.g.
+        ABS's library `lastUpdate` via `/api/libraries`) so the
+        scheduled sync can skip unchanged libraries — async because
+        remote sources need to hit the network on each tick rather
+        than read a value cached at startup.
         """
         path = library.get("source_db_path")
         if not path:

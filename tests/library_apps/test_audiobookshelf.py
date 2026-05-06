@@ -213,11 +213,75 @@ class TestAudiobookshelfDiscover:
 
         assert abs_mod.AudiobookshelfApp().discover("http://abs:13378") == []
 
-    def test_get_mtime_returns_abs_last_update(self):
-        from app.library_apps.audiobookshelf import AudiobookshelfApp
-        lib = {"abs_last_update": 1776711480506}
-        assert AudiobookshelfApp().get_mtime(lib) == 1776711480506
+    async def test_get_mtime_fetches_live_value_from_api(self, monkeypatch):
+        """The cached `abs_last_update` is frozen at startup — `get_mtime`
+        must hit the API on every tick, otherwise scheduled syncs
+        short-circuit forever after the first sync (canary: Mark added
+        66 audiobooks overnight and saw zero scheduled syncs).
+        """
+        from app.library_apps import audiobookshelf as abs_mod
 
-    def test_get_mtime_missing_returns_zero(self):
+        async def fake_get_key():
+            return "tok"
+        monkeypatch.setattr(abs_mod, "_get_abs_api_key", fake_get_key)
+
+        transport = _mock_transport({
+            "/api/libraries": (200, {"libraries": [
+                {"id": "lib-book", "mediaType": "book", "folders": [],
+                 "lastUpdate": 9999},
+            ]}),
+        })
+        orig = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+        )
+
+        lib = {
+            "abs_base_url": "http://abs:13378",
+            "abs_library_id": "lib-book",
+            "abs_last_update": 1234,  # stale cached value
+        }
+        result = await abs_mod.AudiobookshelfApp().get_mtime(lib)
+        assert result == 9999.0
+        # Cache also refreshed in place.
+        assert lib["abs_last_update"] == 9999.0
+
+    async def test_get_mtime_falls_back_to_cache_on_api_failure(self, monkeypatch):
+        """Transient ABS outage → return the cached value, not 0.
+        Returning 0 would force a full re-sync on the next tick after
+        ABS recovers."""
+        from app.library_apps import audiobookshelf as abs_mod
+
+        async def fake_get_key():
+            return "tok"
+        monkeypatch.setattr(abs_mod, "_get_abs_api_key", fake_get_key)
+
+        async def boom(self):
+            raise httpx.ConnectError("down", request=None)
+        monkeypatch.setattr(abs_mod.AudiobookshelfClient, "list_libraries", boom)
+
+        lib = {
+            "abs_base_url": "http://abs:13378",
+            "abs_library_id": "lib-book",
+            "abs_last_update": 1234,
+        }
+        assert await abs_mod.AudiobookshelfApp().get_mtime(lib) == 1234.0
+
+    async def test_get_mtime_missing_returns_zero(self):
         from app.library_apps.audiobookshelf import AudiobookshelfApp
-        assert AudiobookshelfApp().get_mtime({}) == 0.0
+        assert await AudiobookshelfApp().get_mtime({}) == 0.0
+
+    async def test_get_mtime_no_api_key_falls_back_to_cache(self, monkeypatch):
+        from app.library_apps import audiobookshelf as abs_mod
+
+        async def no_key():
+            return None
+        monkeypatch.setattr(abs_mod, "_get_abs_api_key", no_key)
+
+        lib = {
+            "abs_base_url": "http://abs:13378",
+            "abs_library_id": "lib-book",
+            "abs_last_update": 1234,
+        }
+        assert await abs_mod.AudiobookshelfApp().get_mtime(lib) == 1234.0
