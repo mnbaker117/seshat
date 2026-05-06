@@ -142,8 +142,17 @@ async def mam_status_endpoint():
 
 @router.post("/scan")
 async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
-    """Scan books missing MAM data. Batches of 100 with 5-min pauses.
-    If limit is provided, scan at most that many books total."""
+    """Scan books missing MAM data across ALL discovered libraries.
+
+    Snapshots eligible book IDs from each library's DB at start (the
+    "snapshot guarantee": new books added mid-scan wait for the next
+    run). Then iterates each library, batching at 150 books with a
+    1-min pause between batches and a content_type-aware MAM lookup
+    per library (ebook vs audiobook).
+
+    `limit`, if provided, caps the TOTAL across libraries — earlier
+    libraries fill first, later ones get whatever's left.
+    """
     s = load_settings()
     if not await _mam_ready(s):
         return {"error": "MAM not configured or not enabled"}
@@ -152,31 +161,37 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
 
-    # Snapshot every eligible book ID right now. The scan processes
-    # only this exact list — books added to the DB mid-scan (e.g. by a
-    # concurrent author scan discovering new titles) are NOT picked up
-    # by this run; they wait for the next MAM scan. The alternative —
-    # re-querying `WHERE mam_status IS NULL` per batch — would grow
-    # the queue endlessly under sustained author-scan throughput,
-    # making the scan feel like it never finishes.
-    db = await get_db()
-    try:
-        id_rows = await db.execute_fetchall(
-            "SELECT id FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0 "
-            "ORDER BY owned DESC, id ASC"
-        )
-        all_ids = [r[0] for r in id_rows]
-    finally:
-        await db.close()
+    # Per-library snapshots. List of (lib_dict, [book_id, ...]) so the
+    # async task below has everything it needs without re-querying.
+    # Iteration order matches `_discovered_libraries` (configured order).
+    per_lib_snapshots: list[tuple[dict, list[int]]] = []
+    remaining_budget = limit if limit else None
+    for lib in state._discovered_libraries:
+        if remaining_budget is not None and remaining_budget <= 0:
+            break
+        ldb = await get_db(slug=lib["slug"])
+        try:
+            id_rows = await ldb.execute_fetchall(
+                "SELECT id FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0 "
+                "ORDER BY owned DESC, id ASC"
+            )
+            ids = [r[0] for r in id_rows]
+        finally:
+            await ldb.close()
+        if not ids:
+            continue
+        if remaining_budget is not None:
+            ids = ids[:remaining_budget]
+            remaining_budget -= len(ids)
+        per_lib_snapshots.append((lib, ids))
 
-    if not all_ids:
+    scan_total = sum(len(ids) for _, ids in per_lib_snapshots)
+    if scan_total == 0:
         return {"status": "complete", "message": "No books need scanning — all already have MAM data"}
 
-    snapshot_ids = all_ids[:limit] if limit else all_ids
-    scan_total = len(snapshot_ids)
     state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_total,
                           "found": 0, "possible": 0, "not_found": 0, "errors": 0,
-                          "current_book": "",
+                          "current_book": "", "current_library": "",
                           "status": "scanning", "type": "manual"}
 
     async def _wait_for_other_writers():
@@ -202,100 +217,115 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
 
     async def _do_scan():
         batch_num = 0
-        cursor = 0  # index into snapshot_ids; advances each batch
-        while True:
-            # Wait for Calibre sync (only) before starting next batch
-            await _wait_for_other_writers()
-            cs = load_settings()
-            cs_token = await _get_mam_token()
-            if not cs.get("mam_enabled") or not cs_token:
-                state._mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
-                return
-            db = await get_db()
-            try:
-                # Capture per-batch baselines so the progress closure
-                # can add this batch's incremental stats onto the
-                # totals carried over from prior batches. The variables
-                # must be defined OUTSIDE the closure (rather than read
-                # from state inside it) so each batch's running totals
-                # don't double-count.
-                base_scanned = state._mam_scan_progress["scanned"]
-                base_found = state._mam_scan_progress["found"]
-                base_possible = state._mam_scan_progress["possible"]
-                base_not_found = state._mam_scan_progress["not_found"]
-                base_errors = state._mam_scan_progress["errors"]
-                def _progress(stats):
-                    state._mam_scan_progress.update({
-                        "scanned": base_scanned + stats["scanned"],
-                        "found": base_found + stats["found"],
-                        "possible": base_possible + stats["possible"],
-                        "not_found": base_not_found + stats["not_found"],
-                        "errors": base_errors + stats["errors"],
-                        # Forward the in-flight book title from the
-                        # source layer up to the unified scan widget.
-                        "current_book": stats.get("current_book", ""),
-                    })
-                # Slice the next batch out of the frozen snapshot. The
-                # snapshot guarantee: only IDs captured at scan start
-                # are processed, ever. 150 books per batch is a balance
-                # between throughput and staying clear of MAM rate
-                # limits — small enough that the per-batch failure
-                # blast radius is bounded, large enough that a manual
-                # scan finishes in a reasonable wall-clock time.
-                batch_ids = snapshot_ids[cursor:cursor + 150]
-                if not batch_ids:
-                    state._mam_scan_progress.update({"status": "complete", "running": False})
-                    logger.info(f"MAM scan complete (snapshot exhausted): {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
+        for lib, snapshot_ids in per_lib_snapshots:
+            slug = lib["slug"]
+            lib_name = lib.get("display_name") or lib.get("name") or slug
+            ct = lib.get("content_type", "ebook")
+            state._mam_scan_progress["current_library"] = lib_name
+            cursor = 0  # index into THIS library's snapshot
+            lib_total = len(snapshot_ids)
+            logger.info(
+                f"MAM scan: starting '{lib_name}' "
+                f"({ct}, {lib_total} books)"
+            )
+            while True:
+                # Wait for Calibre sync (only) before starting next batch
+                await _wait_for_other_writers()
+                cs = load_settings()
+                cs_token = await _get_mam_token()
+                if not cs.get("mam_enabled") or not cs_token:
+                    state._mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False, "current_library": ""})
+                    return
+                db = await get_db(slug=slug)
+                try:
+                    # Capture per-batch baselines so the progress closure
+                    # can add this batch's incremental stats onto the
+                    # totals carried over from prior batches AND prior
+                    # libraries. The variables must be defined OUTSIDE
+                    # the closure (rather than read from state inside it)
+                    # so each batch's running totals don't double-count.
+                    base_scanned = state._mam_scan_progress["scanned"]
+                    base_found = state._mam_scan_progress["found"]
+                    base_possible = state._mam_scan_progress["possible"]
+                    base_not_found = state._mam_scan_progress["not_found"]
+                    base_errors = state._mam_scan_progress["errors"]
+                    def _progress(stats):
+                        state._mam_scan_progress.update({
+                            "scanned": base_scanned + stats["scanned"],
+                            "found": base_found + stats["found"],
+                            "possible": base_possible + stats["possible"],
+                            "not_found": base_not_found + stats["not_found"],
+                            "errors": base_errors + stats["errors"],
+                            # Forward the in-flight book title from the
+                            # source layer up to the unified scan widget.
+                            "current_book": stats.get("current_book", ""),
+                        })
+                    # Slice the next batch out of the frozen per-library
+                    # snapshot. The snapshot guarantee: only IDs captured
+                    # at scan start are processed, ever. 150 books per
+                    # batch is a balance between throughput and staying
+                    # clear of MAM rate limits.
+                    batch_ids = snapshot_ids[cursor:cursor + 150]
+                    if not batch_ids:
+                        # Library exhausted — fall through to the
+                        # next library in the outer loop.
+                        await db.close()
+                        break
+                    result = await mam_scan_batch(
+                        db, session_id=cs_token, limit=len(batch_ids),
+                        delay=cs.get("rate_mam", 2), skip_ip_update=True,
+                        format_priority=cs.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority"),
+                        on_progress=_progress,
+                        lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
+                        book_ids=batch_ids,
+                        content_type=ct,
+                    )
+                    if result.get("error"):
+                        # Connection-level errors abort the whole
+                        # cross-library scan; per-book errors are
+                        # already tallied via on_progress and don't
+                        # show up here.
+                        state._mam_scan_progress.update({"status": f"error: {result['error']}", "running": False, "current_library": ""})
+                        return
+                    cursor += len(batch_ids)
+                    await db.execute(
+                        "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
+                        ("mam", time.time(), time.time(), "complete",
+                         result.get("scanned", 0), result.get("found", 0))
+                    )
+                    await db.commit()
+                except Exception as e:
+                    logger.error(f"MAM scan batch error: {e}", exc_info=True)
+                    state._mam_scan_progress.update({"status": f"error: {e}", "running": False, "current_library": ""})
+                    return
+                finally:
                     await db.close()
-                    await _notify_mam_done()
-                    return
-                _ct = _active_content_type()
-                result = await mam_scan_batch(
-                    db, session_id=cs_token, limit=len(batch_ids),
-                    delay=cs.get("rate_mam", 2), skip_ip_update=True,
-                    format_priority=cs.get("audiobook_format_priority" if _ct == "audiobook" else "mam_format_priority"),
-                    on_progress=_progress,
-                    lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
-                    book_ids=batch_ids,
-                    content_type=_ct,
-                )
-                if result.get("error"):
-                    state._mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
-                    return
-                cursor += len(batch_ids)
-                # `total` deliberately stays fixed at the snapshot size
-                # — no recompute. See the snapshot rationale at the
-                # top of the endpoint.
-                await db.execute(
-                    "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
-                    ("mam", time.time(), time.time(), "complete",
-                     result.get("scanned", 0), result.get("found", 0))
-                )
-                await db.commit()
-            except Exception as e:
-                logger.error(f"MAM scan batch error: {e}", exc_info=True)
-                state._mam_scan_progress.update({"status": f"error: {e}", "running": False})
-                return
-            finally:
-                await db.close()
-            if cursor >= scan_total:
-                state._mam_scan_progress.update({"status": "complete", "running": False})
-                logger.info(f"MAM scan complete: {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
-                await _notify_mam_done()
-                return
-            batch_num += 1
-            state._mam_scan_progress["status"] = "paused"
-            # 1-minute pause between batches. Total throughput on a
-            # manual scan: 150 books × 60s overhead = ~2.5 min per
-            # batch including the pause, on top of the per-request
-            # rate limit.
-            logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 1 min")
-            await asyncio.sleep(60)
-            # Wait for Calibre sync (only) to finish before resuming
-            await _wait_for_other_writers()
+                if cursor >= lib_total:
+                    # This library's snapshot is exhausted — break
+                    # to the outer loop so we move on to the next
+                    # library (or finish if this was the last).
+                    break
+                batch_num += 1
+                state._mam_scan_progress["status"] = "paused"
+                # 1-minute pause between batches.
+                logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 1 min")
+                await asyncio.sleep(60)
+                state._mam_scan_progress["status"] = "scanning"
+                # Wait for Calibre sync (only) to finish before resuming
+                await _wait_for_other_writers()
+
+        # All libraries exhausted.
+        state._mam_scan_progress.update({"status": "complete", "running": False, "current_library": ""})
+        logger.info(
+            f"MAM scan complete: {state._mam_scan_progress['scanned']}/"
+            f"{scan_total} scanned, {state._mam_scan_progress['found']} found "
+            f"across {len(per_lib_snapshots)} libraries"
+        )
+        await _notify_mam_done()
 
     state._mam_scan_task = asyncio.create_task(_do_scan())
-    return {"status": "started", "total": scan_total}
+    return {"status": "started", "total": scan_total,
+            "libraries": [lib["slug"] for lib, _ in per_lib_snapshots]}
 
 
 @router.post("/scan/cancel")
