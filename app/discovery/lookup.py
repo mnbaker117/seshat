@@ -1708,6 +1708,15 @@ _RX_PREFIX_VOLUME_MARKER = re.compile(
     re.IGNORECASE,
 )
 
+# A bare volume-marker word inside a parenthetical (e.g. "(Book #3)") is a
+# positional hint, not a series name. Without this guard, Savarovsky's
+# "Guardian's Journey (Book #1)" / "The Last Paladin (Book #4)" all
+# clustered into a single fictitious "Book" series.
+_VOLUME_MARKER_WORDS = frozenset({
+    "book", "bk", "vol", "vol.", "volume", "part",
+    "episode", "ep", "chapter", "tome", "installment",
+})
+
 _MIN_PREFIX_LEN = 4  # short prefixes ("X 1" / "II 2") are too generic
 
 
@@ -1720,7 +1729,11 @@ def _extract_series_signal(title: str) -> tuple[str, float | None] | None:
     explicit-index members.
 
     Order matters:
-      1. Parenthetical "(SeriesName #N)" → use directly.
+      1. Parenthetical "(SeriesName #N)" → use directly. A bare
+         volume-marker name like "(Book #3)" is treated as a
+         positional hint instead and threaded into arm 2's bare-prefix
+         return so "Guardian's Journey (Book #3)" still yields
+         ("Guardian's Journey", 3.0).
       2. Strip parentheticals, split on first colon. Subtitle search
          for volume markers ("Episode 4", "Book 2", "Volume III"…).
       3. Subtitle had no marker → try trailing number on the prefix
@@ -1733,10 +1746,13 @@ def _extract_series_signal(title: str) -> tuple[str, float | None] | None:
         return None
 
     # Arm 1: parenthetical
+    volume_hint: float | None = None
     m = _RX_PAREN_SERIES_REF.search(title)
     if m:
         sname = m.group(1).strip()
-        if len(sname) >= _MIN_PREFIX_LEN:
+        if sname.lower() in _VOLUME_MARKER_WORDS:
+            volume_hint = float(m.group(2))
+        elif len(sname) >= _MIN_PREFIX_LEN:
             return (sname, float(m.group(2)))
 
     # Arm 2: prefix + volume marker. Strip ALL parentheticals first
@@ -1757,7 +1773,9 @@ def _extract_series_signal(title: str) -> tuple[str, float | None] | None:
             return (pm.group(1).strip(), float(pm.group(2)))
         pm = _RX_PREFIX_TRAILING_NUM.match(p)
         if pm:
-            return (pm.group(1).strip(), float(pm.group(2)))
+            base = pm.group(1).strip()
+            if base.lower() not in _VOLUME_MARKER_WORDS:
+                return (base, float(pm.group(2)))
         return (p, None)
 
     if ':' in cleaned:
@@ -1783,15 +1801,22 @@ def _extract_series_signal(title: str) -> tuple[str, float | None] | None:
         if idx is not None and len(base) >= _MIN_PREFIX_LEN:
             return (base, idx)
 
-        # Bare prefix ("Dungeon Depot: Slice of Life ...")
+        # Bare prefix ("Dungeon Depot: Slice of Life ..."). If arm 1
+        # found a "(Book #N)" volume hint earlier, use its index.
         if len(prefix) >= _MIN_PREFIX_LEN:
-            return (prefix, None)
+            return (prefix, volume_hint)
         return None
 
     # No colon — try volume-marker / trailing number on full title
     base, idx = _strip_prefix_marker(cleaned)
     if idx is not None and len(base) >= _MIN_PREFIX_LEN:
         return (base, idx)
+
+    # No structural marker but arm 1 had a volume hint and the cleaned
+    # title is long enough to be a series name on its own ("Guardian's
+    # Journey (Book #1)" → cleaned "Guardian's Journey" → idx 1).
+    if volume_hint is not None and len(cleaned) >= _MIN_PREFIX_LEN:
+        return (cleaned, volume_hint)
 
     return None
 

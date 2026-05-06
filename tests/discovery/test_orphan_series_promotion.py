@@ -59,6 +59,18 @@ class TestExtractSeriesSignal:
         ("Some Saga Vol 3: Aftermath", ("Some Saga", 3.0)),
         ("Some Saga Volume 4: Aftermath", ("Some Saga", 4.0)),
         ("Some Saga Part 2", ("Some Saga", 2.0)),
+        # Parenthetical "(Book #N)" is a positional hint, NOT a series
+        # name. Without this guard Savarovsky's "Guardian's Journey
+        # (Book #1)" / "The Last Paladin (Book #4)" all collapsed into
+        # a fictitious "Book" series.
+        ("Guardian's Journey (Book #1)", ("Guardian's Journey", 1.0)),
+        ("Guardian's Journey (Book #3): A Portal Progression Fantasy Series",
+         ("Guardian's Journey", 3.0)),
+        ("The Last Paladin (Book #4): An Action & Adventure Progression Fantasy Series",
+         ("The Last Paladin", 4.0)),
+        ("The Last Paladin (Book #9): A Portal Progression Fantasy Series",
+         ("The Last Paladin", 9.0)),
+        ("Some Saga (Volume #2)", ("Some Saga", 2.0)),
     ])
     def test_extracts_signal(self, title: str, expected: tuple[str, float | None]) -> None:
         sig = _extract_series_signal(title)
@@ -75,6 +87,10 @@ class TestExtractSeriesSignal:
         "II 2",
         # Single-token title with no colon, no number
         "Manassassin",
+        # Bare volume marker — no series name to extract
+        "Book 4",
+        "Volume 3",
+        "(Book #1)",
     ])
     def test_no_signal(self, title: str) -> None:
         # Either None or a prefix-only signal (idx=None) — both are

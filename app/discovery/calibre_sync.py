@@ -296,19 +296,21 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                     continue
 
                 # Lookup order matters:
-                #   1. Exact LOWER(name) match — fast path for the
-                #      common case where Calibre's series name already
-                #      matches what we have stored.
+                #   1. Exact LOWER(name) match scoped to THIS author
+                #      — fast path for the common case where Calibre's
+                #      series name already matches what we have stored.
                 #   2. Normalized-name match scoped to THIS author —
                 #      catches drift like "The Witcher" vs "Witcher
                 #      Series" without the lazy upsert in lookup.py
-                #      having to clean up after us. Cross-author hits
-                #      are deliberately ignored: two authors who
-                #      happen to share a series name are different
-                #      physical series.
+                #      having to clean up after us.
+                # Cross-author hits are deliberately ignored: two
+                # authors who happen to share a series name are
+                # different physical series (Cressman/Savarovsky "The
+                # Last Paladin"). The `series.UNIQUE(name, author_id)`
+                # composite supports per-author rows.
                 row = await (await db.execute(
-                    "SELECT id FROM series WHERE LOWER(name) = LOWER(?)",
-                    (s["name"],)
+                    "SELECT id FROM series WHERE LOWER(name) = LOWER(?) AND author_id = ?",
+                    (s["name"], our_author_id)
                 )).fetchone()
                 if row:
                     series_map[key] = row["id"]
