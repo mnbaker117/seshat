@@ -7,6 +7,71 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.14] — 2026-05-06
+
+Halo regression fix + forward-compatible schema groundwork for the
+v2.3 line. The schema additions are inert in this release (no code
+reads from the new tables/columns yet); they ship now so the v2.3
+sync rewrite doesn't have to bundle a heavy migration with a heavy
+behavior change.
+
+### Discovery — Calibre sync auto-detects shared series
+
+The v2.2.7 author-scope fix correctly prevented the Cressman/Savarovsky
+"The Last Paladin" merge but had an unintended side-effect: genuinely
+shared series — Halo (75 books across 15 authors), Star Wars Legends,
+franchise novels — got fragmented into one per-author row each. Mark's
+live DB ended up with 15 separate "Halo" series rows after Calibre
+sync.
+
+calibre_sync now pre-aggregates `calibre_series_id → set(seshat_author_id)`
+before the Pass 2 series upsert. The decision per Calibre series id:
+
+- 1 contributor → upsert as `(name, author_id=N)`. Per-author rows
+  stay author-scoped (Cressman/Savarovsky case unchanged).
+- 2+ contributors → upsert as `(name, author_id=NULL)`. Shared row;
+  every book regardless of primary author links to it.
+
+Pass 2 also re-points and deletes any pre-existing per-author rows
+of the same name (the legacy v2.2.7 fragmentation state), restricted
+to authors who actually contribute to *this* Calibre series so
+unrelated same-named series elsewhere aren't swept up. Mark's live
+Halo fragmentation will self-heal on the next Calibre sync after
+upgrading.
+
+### Schema — forward-compatible v2.3 groundwork
+
+Schema-only changes; no behavior. The v2.3 sync rewrite needs these
+in place before it can land, and getting the migrations out the door
+in their own release lets us validate them in isolation.
+
+- `series.author_id` becomes nullable (NULL = shared series).
+  Migration uses a code-driven recreate-table dance because SQLite
+  has no `ALTER COLUMN DROP NOT NULL`. Idempotent — checks
+  `PRAGMA table_info` first; no-op once nullable.
+- New `books_calibre_snapshot` and `books_abs_snapshot` tables —
+  frozen Calibre/ABS metadata per book. Empty in v2.2.14; populated
+  by the v2.3 sync rewrite.
+- New `metadata_review_queue` table — unified diff queue with
+  `UNIQUE(book_id, field, source)` so repeat scans replace prior
+  proposals rather than piling up.
+- New `books` columns: `metadata_source_pref` (default `'seshat'`),
+  `field_source_map` (JSON, populated only in mixed mode),
+  `user_edited_fields` (JSON array, default `'[]'`).
+- Cold-start backfill seeds `books_calibre_snapshot` from current
+  owned-Calibre `books` rows and `books_abs_snapshot` from rows
+  with `audiobookshelf_id` populated. Idempotent — only INSERTs
+  when no snapshot row exists. Runs once at first boot post-2.2.14.
+
+Tests: 12 new in `test_v23_schema.py` + 3 new in
+`test_calibre_sync_series_dedup.py` (multi-author shared, distinct
+ids stay per-author, legacy collapse). Full suite 1359 passing.
+
+See `docs/v23_metadata_design.md` for the v2.3 design spec these
+foundations support.
+
+---
+
 ## [2.2.13] — 2026-05-06
 
 Three fixes from continuing UAT.
