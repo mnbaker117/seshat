@@ -7,6 +7,91 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.13] — 2026-05-06
+
+Three fixes from continuing UAT.
+
+### Discovery — ABS scheduled sync was reading a stale startup-cached lastUpdate
+
+`AudiobookshelfApp.get_mtime` returned `library["abs_last_update"]`,
+populated once at startup from the `/api/libraries` discover() call
+and never refreshed. After the first sync, every scheduled tick
+compared the cached startup value against itself, perpetually
+short-circuiting with "source unchanged, skipping." Mark added 66
+audiobooks overnight, restarted multiple times for updates, and saw
+zero scheduled syncs reflect them — only manual Command Center
+syncs worked, because they bypass the mtime gate.
+
+`LibraryApp.get_mtime` is now async on the base class. The Calibre
+implementation still does `os.path.getmtime` (sync work inside an
+async wrapper). The ABS override hits `/api/libraries` on every
+call, finds the matching library by `abs_library_id`, returns its
+current `lastUpdate`, and refreshes the cached value on `library`
+in place. Falls back to the cached value on API failure / missing
+key / library no longer in ABS — refusing to write 0 into
+`library_mtimes` would force a full re-sync after a transient
+outage, which is worse than a one-tick miss.
+
+Three call sites updated to `await`: `main.py` (startup sync),
+`discovery/scheduled_jobs.py` (interval tick), `discovery/routers/scan.py`
+(manual sync mtime stamp). New tests: live API fetch updates the
+cache, API-failure falls back to cache, no-API-key falls back to
+cache, missing library returns 0.
+
+### MAM — scheduled + manual scans now sweep all libraries
+
+The scheduled MAM scan loop and POST `/api/discovery/mam/scan` both
+operated on the active library only. Mark's audiobooks went
+unscanned through both paths until manual scans against the active
+ABS library — even when the schedule fired correctly.
+
+`mam_scheduler_loop` iterates `state._discovered_libraries` per
+tick. For each library: open its DB via `get_db(slug=...)` (avoids
+flipping global active_library mid-tick and risking UI cross-talk),
+count remaining `mam_status IS NULL` books, run a 150-book batch
+with the library's content_type and the matching format_priority
+(`audiobook_format_priority` vs `mam_format_priority`). Per-tick
+budget: 150 × n_libraries. Aggregate progress accumulates across
+libraries via per-library closure baselines. New `current_library`
+field on the progress dict so the UI can label which library is
+currently in flight.
+
+POST `/scan` does the same: snapshots eligible book IDs from each
+library's DB at scan start (preserving the snapshot guarantee per
+library), then iterates libraries sequentially with 150-book
+batches and 1-min inter-batch pauses. `limit` query param caps the
+TOTAL across libraries — earlier libraries fill first, later ones
+get whatever's left. Response: `{status, total, libraries}` so
+callers can see which libraries were enrolled.
+
+IP-registration failures break out of the loop early (every library
+would hit the same wall). Per-book errors are tallied via
+`on_progress` and don't abort. Cancel honors the same flag the
+single-library code did — checked between libraries and on every
+per-book boundary inside `mam_scan_batch` via `cancel_check`.
+
+Out of scope: `/full-scan` (separate endpoint with per-library
+`mam_scan_log` persistence; remains library-scoped for now),
+`/test-scan` single-batch endpoint, per-author/per-book scans
+(already library-specific by definition).
+
+### Discovery — Cressman/Savarovsky calibre_sync re-merge fix (continued from v2.2.12)
+
+v2.2.12 fixed the calibre_sync series fast-path to be author-scoped,
+preventing a second-rename merge. The on-disk DB splits applied
+during the v2.2.12 release got undone by a Calibre sync against the
+v2.2.10 image (Mark hadn't pulled v2.2.12 yet). Re-applied at
+v2.2.13 release time:
+
+- `seshat_calibre-library.db`: id=609 → Cressman (5 books),
+  id=1735 → Savarovsky (4 books).
+- `seshat_books.db`: id=609 → Cressman, new id=1868 → Savarovsky.
+
+With v2.2.13's calibre_sync code in place, future Calibre renames
+of the Savarovsky series will not re-merge.
+
+---
+
 ## [2.2.12] — 2026-05-06
 
 Two discovery-correctness fixes from Mark's continuing UAT. Both
