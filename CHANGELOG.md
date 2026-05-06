@@ -7,6 +7,42 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.10] — 2026-05-05
+
+Security release. CodeQL triage on the now-public repo flagged 19
+alerts; 9 of them mapped to 4 small code changes worth making, and
+the other 10 were false positives matching the admin-trusted threat
+model documented in `SECURITY.md`. This release ships those 4 fixes;
+the false positives are dismissed in the GitHub Security tab with
+the same reasoning.
+
+### Security
+
+- `metadata/writer.py`: replace deprecated `tempfile.mktemp()` with
+  `NamedTemporaryFile(delete=False)`. Eliminates the create/use
+  TOCTOU race; same atomic-replace semantics. Closes CodeQL #1
+  (`py/insecure-temporary-file`).
+- `routers/delayed.py`: new `_validate_filename()` helper rejects
+  any path-traversal segments (`/`, `\`, NUL) and enforces the
+  expected `<grab_id>_<mam_id>.torrent` regex BEFORE any filesystem
+  call, in both `reinject` and `delete` handlers. Pre-fix, reinject
+  ran the regex AFTER `fpath.exists()` and delete had no validation
+  at all. Closes CodeQL #11–#14 (`py/path-injection`).
+- `routers/covers.py`: switch the allowed-roots check from
+  `str(target).startswith(str(root))` to `target.is_relative_to(root)`.
+  Closes the prefix-match edge case (sibling `/staging-evil/` would
+  have slipped past `startswith("/staging")`). Closes CodeQL #7–#10
+  (`py/path-injection`).
+- `mam/irc.py`: extend the auth-payload redaction in `_send` to
+  cover `PASS` and `OPER` commands, not just `AUTHENTICATE` and
+  `PRIVMSG NickServ`. Defense in depth. Closes CodeQL #5
+  (`py/clear-text-logging-sensitive-data`).
+
+No runtime behavior changes for normal operation — these are all
+hardening of input-validation and resource-handling paths.
+
+---
+
 ## [2.2.9] — 2026-05-05
 
 Documentation and licensing release ahead of public visibility. No
