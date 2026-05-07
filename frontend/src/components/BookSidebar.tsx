@@ -52,7 +52,6 @@ interface EditFields {
   series_name: string;
   series_index: string;
   is_unreleased: boolean;
-  source_url: string;
   mam_url: string;
 }
 
@@ -136,7 +135,6 @@ export function BookSidebar({
     series_name: "",
     series_index: "",
     is_unreleased: false,
-    source_url: "",
     mam_url: "",
   });
   const [saving, setSaving] = useState(false);
@@ -372,7 +370,6 @@ export function BookSidebar({
           ? String(book.series_index)
           : "",
       is_unreleased: !!book.is_unreleased,
-      source_url: book.source_url || "",
       mam_url: book.mam_url || "",
     });
     setEditing(true);
@@ -830,24 +827,14 @@ export function BookSidebar({
               />
               <span style={{ fontSize: 12, color: t.text2 }}>Unreleased</span>
             </div>
-            <div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: t.tg,
-                  textTransform: "uppercase",
-                }}
-              >
-                Source URL
-              </span>
-              <input
-                value={ef.source_url}
-                onChange={(e) => upE("source_url", e.target.value)}
-                placeholder="https://www.goodreads.com/book/show/..."
-                style={ist}
-              />
-            </div>
+            <SourceUrlEditor
+              bookId={book.id}
+              sourceUrlJson={book.source_url}
+              onChange={onEdit}
+              theme={t}
+              ist={ist}
+            />
+
             <div>
               <span
                 style={{
@@ -1805,6 +1792,243 @@ export function BookSidebar({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ─── v2.3.2 source URL editor ───────────────────────────────────────
+//
+// Replaces the single-input free-text source_url field. User sees a
+// labeled row per existing source with a remove button, plus a single
+// "paste any source URL + Add" row at the bottom. Backend
+// (POST/DELETE /api/discovery/books/{bid}/source-urls) handles
+// canonicalization (Goodreads slug-stripping, Amazon /dp/<ASIN>
+// normalization, etc.) so the user just pastes whatever shape the
+// source actually shows.
+
+interface SourceUrlEditorProps {
+  bookId: number;
+  sourceUrlJson?: string;
+  onChange?: () => Promise<void> | void;
+  theme: ReturnType<typeof useTheme>;
+  ist: React.CSSProperties;
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  goodreads: "Goodreads",
+  hardcover: "Hardcover",
+  kobo: "Kobo",
+  amazon: "Amazon",
+  audible: "Audible",
+  ibdb: "IBDB",
+  google_books: "Google Books",
+};
+
+function parseSourceUrlField(raw: string | undefined): Record<string, string> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      // Strip non-string values (defensive — shouldn't happen
+      // but legacy rows occasionally have weird shapes).
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string" && v) out[k] = v;
+      }
+      return out;
+    }
+  } catch {
+    /* fall through to legacy bare-URL handling */
+  }
+  // Legacy plain-string format from pre-v1.x — surface it under
+  // "manual" so the user can see + remove it. The remove call won't
+  // actually match a known source key but the backend tolerates that
+  // case.
+  if (typeof raw === "string" && raw.startsWith("http")) {
+    return { manual: raw };
+  }
+  return {};
+}
+
+function SourceUrlEditor({
+  bookId, sourceUrlJson, onChange, theme: t, ist,
+}: SourceUrlEditorProps) {
+  const [urls, setUrls] = useState<Record<string, string>>(() =>
+    parseSourceUrlField(sourceUrlJson),
+  );
+  const [pendingUrl, setPendingUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Re-sync when the parent passes a different book.
+  useEffect(() => {
+    setUrls(parseSourceUrlField(sourceUrlJson));
+    setPendingUrl("");
+    setErr(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookId, sourceUrlJson]);
+
+  const handleAdd = async () => {
+    const url = pendingUrl.trim();
+    if (!url) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.post<{ source_url: Record<string, string> }>(
+        `/discovery/books/${bookId}/source-urls`,
+        { url },
+      );
+      setUrls(r.source_url || {});
+      setPendingUrl("");
+      if (onChange) await onChange();
+    } catch (e) {
+      const msg = (e as Error).message || "Failed to add URL";
+      // Backend returns a 400 with a useful message on unrecognized
+      // URLs — surface it inline rather than via toast so the user
+      // can fix the paste in place.
+      setErr(msg);
+    }
+    setBusy(false);
+  };
+
+  const handleRemove = async (sourceName: string) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.del<{ source_url: Record<string, string> }>(
+        `/discovery/books/${bookId}/source-urls/${encodeURIComponent(sourceName)}`,
+      );
+      setUrls(r.source_url || {});
+      if (onChange) await onChange();
+    } catch (e) {
+      toast.error((e as Error).message || "Failed to remove URL");
+    }
+    setBusy(false);
+  };
+
+  const orderedKeys = [
+    "goodreads", "hardcover", "kobo", "amazon", "audible",
+    "ibdb", "google_books",
+  ].filter((k) => urls[k]);
+  // Any unknown keys (legacy "manual" or future sources we don't
+  // recognize) get appended at the end so they're visible + removable.
+  const otherKeys = Object.keys(urls).filter(
+    (k) => !orderedKeys.includes(k),
+  );
+  const allKeys = [...orderedKeys, ...otherKeys];
+
+  const labelStyle: React.CSSProperties = {
+    fontSize: 11,
+    fontWeight: 600,
+    color: t.tg,
+    textTransform: "uppercase",
+    minWidth: 90,
+  };
+  const removeBtnStyle: React.CSSProperties = {
+    background: "transparent",
+    border: `1px solid ${t.border}`,
+    color: t.td,
+    borderRadius: 6,
+    padding: "4px 8px",
+    cursor: "pointer",
+    fontSize: 12,
+  };
+
+  return (
+    <div>
+      <span
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          color: t.tg,
+          textTransform: "uppercase",
+          display: "block",
+          marginBottom: 6,
+        }}
+      >
+        Source URLs
+      </span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {allKeys.length === 0 ? (
+          <div style={{ fontSize: 12, color: t.tg, fontStyle: "italic" }}>
+            No source URLs yet. Paste one below to get started.
+          </div>
+        ) : null}
+
+        {allKeys.map((src) => (
+          <div
+            key={src}
+            style={{ display: "flex", alignItems: "center", gap: 6 }}
+          >
+            <span style={labelStyle}>
+              {SOURCE_LABELS[src] || src}
+            </span>
+            <input
+              value={urls[src]}
+              readOnly
+              style={{ ...ist, flex: 1, color: t.td }}
+            />
+            <button
+              type="button"
+              onClick={() => handleRemove(src)}
+              disabled={busy}
+              title={`Remove ${SOURCE_LABELS[src] || src} URL`}
+              style={removeBtnStyle}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={labelStyle}>Add</span>
+          <input
+            value={pendingUrl}
+            onChange={(e) => {
+              setPendingUrl(e.target.value);
+              if (err) setErr(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleAdd();
+              }
+            }}
+            placeholder="Paste any source URL (Goodreads, Hardcover, …)"
+            style={{ ...ist, flex: 1 }}
+          />
+          <button
+            type="button"
+            onClick={handleAdd}
+            disabled={busy || !pendingUrl.trim()}
+            title="Add this URL"
+            style={{
+              ...removeBtnStyle,
+              background: t.accent,
+              color: t.bg,
+              border: `1px solid ${t.accent}`,
+              fontWeight: 700,
+              opacity: busy || !pendingUrl.trim() ? 0.5 : 1,
+            }}
+          >
+            {busy ? <Spin /> : "+"}
+          </button>
+        </div>
+
+        {err ? (
+          <div style={{
+            fontSize: 12,
+            color: t.err,
+            padding: "4px 8px",
+            background: `${t.err}11`,
+            borderRadius: 6,
+            border: `1px solid ${t.err}33`,
+          }}>
+            {err}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
