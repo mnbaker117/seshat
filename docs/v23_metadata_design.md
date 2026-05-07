@@ -485,6 +485,45 @@ the resulting distinct-author count.
   search + cover_book_id). Suite total: 1460 passing (was 1432
   on v2.3.2).
 
+**v2.3.4.1 → v2.3.4.5 (all shipped 2026-05-07)** — five fast-follow
+patches on top of v2.3.4. UAT passed end-to-end:
+
+- **v2.3.4.1** — Calibre WAL-aware mtime + ABS lastUpdate+itemCount
+  composite. Scheduled syncs now catch CWA WAL writes (max-mtime
+  across `.db`/`.db-wal`/`.db-shm`) and ABS item-count changes
+  (composite `f"{lastUpdate}:{numItems}"` survives ABS not bumping
+  lastUpdate on item adds).
+- **v2.3.4.2** — sidebar 500 fix (inner `current_row` shadowed the
+  outer one used by user_edited_fields merge → IndexError on
+  every save). Series Manager hides empty/all-hidden series by
+  default with `?include_empty=true` opt-in.
+- **v2.3.4.3** — bulk-action toast grammar ("Hidden"/"Dismissed"/
+  "Deleted" replacing "Hided"/"Dismissd"). Hidden page gains
+  All/Owned only/Discovered only filter tabs.
+- **v2.3.4.4** — multi-library slug routing across every per-book
+  mutation. Backstory: cross-library id-collision data corruption
+  (Mark edited an audiobook MAM URL, write landed on the same-id
+  Calibre row). Dual-storage saved Calibre proper. Frontend
+  `slugQuery()` helper + BookActionHandler optional slug arg
+  threaded through 8 onAction implementations + bulk-* paths +
+  source-url editor + Compare/pull. Diff comparison is now type-
+  aware (no more `"1.0"` vs `1.0` false flags). Compare panel
+  surfaces a synthetic "Series" row (resolved via JOIN to
+  series.name, snapshot.series_name); pull series_name resolves
+  snapshot name → find-or-create author-scoped series →
+  series_id. Toasts on Edit Saved + Compare pull. See
+  `feedback_seshat_multi_library_slug.md` for the class-of-bug
+  pattern future endpoints must avoid.
+- **v2.3.4.5** — CI fix: docker-publish workflow used `type=semver`
+  which rejects 4-segment tags. v2.3.4.1/2/3/4 tag-push runs were
+  silently failing while branch-push runs kept emitting
+  `:latest-slim`. Switched to `type=match,pattern=v(\d+\.\d+\.\d+
+  (?:\.\d+)?),group=1` so 3-segment AND 4-segment tags both work.
+  Retroactively first publish that emitted `:2.3.4.5` /
+  `:2.3.4.5-slim` / `:2.3` / `:2.3-slim` to GHCR.
+
+---
+
 **v2.3.4 (shipped 2026-05-07)** — Metadata Manager UI + dual-
 storage UI + source-scan write rule + hidden-book correctness:
 
