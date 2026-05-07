@@ -312,14 +312,16 @@ real Calibre/ABS sync corrects the snapshot.
 - No book sidebar UI changes yet — Seshat-live displayed everywhere
   as today.
 
-**Source-scan rule (deferred to v2.3.2)**: rewriting `_merge_result`
+**Source-scan rule (deferred to v2.3.3)**: rewriting `_merge_result`
 to "write-through-on-empty + queue-on-populated" without the UI to
 review queued items would accumulate unread queue rows that the user
 can't act on. The owned-Calibre branch already implements the spirit
 (per-field COALESCE-fill rules preserve user data), and the unowned
 branch's full-overwrite has no curated data to protect. Net effect:
-shipping the rule without the UI is risk without reward. v2.3.2
-lands both together.
+shipping the rule without the UI is risk without reward. v2.3.3
+lands both together — see the v2.3.3 phasing section below for the
+"Source-scan write rule rewrite" line item, which is exactly this
+`_merge_result` change.
 
 **v2.3.1 (shipped 2026-05-06)** — fast-follow patch from v2.2.14
 UAT, before the larger UI work:
