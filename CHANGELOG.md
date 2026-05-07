@@ -7,6 +7,119 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.0] — 2026-05-06
+
+First minor on the v2.3 line. Activates the dual-source-of-truth
+metadata flow that the v2.2.14 schema groundwork put in place, plus
+the user-facing Series Manager. See `docs/v23_metadata_design.md`
+for the full design.
+
+### Discovery — Calibre/ABS sync now writes to snapshot tables
+
+Pre-v2.3, every Calibre or ABS sync overwrote the `books` row's
+metadata columns directly. Manual edits or source-scan enrichment
+got clobbered on the next sync. v2.3.0 splits the writes:
+
+- `books_calibre_snapshot` / `books_abs_snapshot` get a full
+  overwrite per sync — they faithfully mirror what Calibre / ABS
+  said NOW. INSERT OR REPLACE; no merging.
+- `books` (the editable Seshat-live row) is touched per-field by
+  `_apply_calibre_diff` / `_apply_abs_diff`. For each field where
+  the snapshot differs from Seshat-live:
+  - If the field IS in `user_edited_fields` → INSERT OR REPLACE
+    into `metadata_review_queue` with `source='calibre'` (or
+    `'abs'`). UPSERT keyed by `(book_id, field, source)` so repeat
+    contested syncs replace prior pending proposals rather than
+    piling up.
+  - Otherwise → UPDATE the books column directly (auto-flow).
+- Structural fields (`author_id`, `series_id`, `owned`,
+  `calibre_id` / `audiobookshelf_id`, `source`) always write
+  through directly; they're identity-tier, not user-editable.
+
+The Calibre helper guards against `cover_path=None` mid-sync
+(ABS-style transient where the cover wasn't computed yet) — those
+diffs are skipped rather than blowing away an existing cover with
+NULL.
+
+ABS-specific normalization: `abridged` flattens to bool/None from
+the ABS API but the books column stores INTEGER NOT NULL DEFAULT 0.
+`_normalize_abs_value` coerces both sides for the comparison, so a
+no-op resync (False vs None) doesn't generate spurious queue rows.
+
+Until manual edits and source scans start populating
+`user_edited_fields` (which lands with the v2.3.1 sidebar edit UI
+and source-scan rule rewrite), the queue stays empty and Calibre /
+ABS auto-flow everything as before — preserving current behavior
+while the snapshot tables get populated for future use.
+
+### Series Manager
+
+New page under Discovery → Series. Backend exposes six mutation
+endpoints on the existing `/api/discovery/series` router:
+
+- `POST /series/promote` — merge 2+ per-author rows into one shared
+  row (`author_id=NULL`).
+- `POST /series/{sid}/demote` — split a shared row into per-author
+  rows; books re-link by primary author.
+- `PATCH /series/{sid}` — rename. 409 on `(name, author_id)`
+  conflict surfaces `conflict_id` so the caller can offer "merge
+  into existing".
+- `DELETE /series/{sid}` — remove the row; books fall back to
+  standalone (`series_id=NULL, series_index=NULL`).
+- `POST /series/{sid}/books` — bulk-add with optional per-book
+  indices.
+- `DELETE /series/{sid}/books/{book_id}` — detach a single book.
+
+GET `/series` gains a `?shared=true|false` filter so the Series
+Manager can list shared and per-author rows in distinct sections.
+
+The frontend page lists every series with a multi-select for promote,
+per-row demote (shared only) / rename / delete actions. Modal-quality
+prompts use `window.alert / prompt / confirm` for v2.3.0 — the proper
+modal experience lands with v2.3.1's Metadata Manager UI work.
+
+These mutations exist alongside (not in place of) the auto-detect
+path that v2.2.14 added to `calibre_sync`: Calibre's organization
+handles the common shared case (Halo) without user intervention;
+Series Manager covers the cases where Calibre's organization
+doesn't tell us — source-discovered books not yet acquired,
+coincidentally-named series merged in error, undoing an auto-decision
+the user disagreed with.
+
+### What's deferred to v2.3.1
+
+- **Source-scan write rule** (Goodreads / Hardcover / Kobo / IBDB
+  enrichment): the design called for "write through if Seshat-live
+  empty; queue diff if populated". Shipping that without the UI to
+  review queued items would just accumulate unread queue rows. The
+  owned-Calibre branch in `_merge_result` already implements the
+  spirit (per-field COALESCE-fill, smart-description, oldest-pub_date
+  rules preserve user data), and the unowned branch's full-overwrite
+  has no curated data to protect. Net effect: shipping the rule
+  without the UI is risk without reward. v2.3.1 lands both together.
+- **Compare panel + Metadata Manager UI** — the per-book diff view
+  with field-level pull from snapshot to Seshat-live, plus the
+  unified review queue page that replaces Suggestions.
+- **Per-field source toggle** — depends on Compare panel; deferred.
+
+### What's deferred to v2.3.2
+
+- **Push-back to Calibre / ABS** — Seshat → ABS PATCH and
+  Calibre `calibredb set_metadata` for full-image users. Slim image
+  push-back contingent on CWA API research.
+
+### Tests
+
+26 new in `test_calibre_sync_snapshot_diff.py`,
+`test_abs_sync_snapshot_diff.py`, and `test_series_manager.py` covering
+snapshot writes, auto-flow vs queue routing on user-edited fields,
+the cover-path NULL guard, abridged normalization, repeat-contested-sync
+UPSERT semantics, and every Series Manager mutation (promote, demote,
+rename including 409 conflict, delete, membership). Suite 1385
+passing.
+
+---
+
 ## [2.2.14] — 2026-05-06
 
 Halo regression fix + forward-compatible schema groundwork for the
