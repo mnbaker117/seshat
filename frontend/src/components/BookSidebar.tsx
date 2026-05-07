@@ -1809,7 +1809,7 @@ export function BookSidebar({
 
 interface SourceUrlEditorProps {
   bookId: number;
-  sourceUrlJson?: string;
+  sourceUrlJson?: string | null;
   onChange?: () => Promise<void> | void;
   theme: ReturnType<typeof useTheme>;
   ist: React.CSSProperties;
@@ -1825,7 +1825,7 @@ const SOURCE_LABELS: Record<string, string> = {
   google_books: "Google Books",
 };
 
-function parseSourceUrlField(raw: string | undefined): Record<string, string> {
+function parseSourceUrlField(raw: string | null | undefined): Record<string, string> {
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw);
