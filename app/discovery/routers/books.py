@@ -9,6 +9,7 @@ The shared SELECT fragment at the top of this file pre-aggregates
 visible series counts so list endpoints don't fire one correlated
 COUNT subquery per row — see `_SERIES_TOTAL_JOIN` for the rationale.
 """
+import json
 import logging
 import re
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -20,6 +21,7 @@ from app.discovery.cross_library import (
     sort_and_paginate,
     sort_key_for,
 )
+from app.discovery.source_urls import parse_url
 
 logger = logging.getLogger("seshat.discovery")
 
@@ -958,5 +960,112 @@ async def bulk_delete(data: dict = Body(...)):
         )
         await db.commit()
         return {"status": "ok", "deleted": cur.rowcount, "skipped": skipped}
+    finally:
+        await db.close()
+
+
+# ── v2.3.2 source URL editor (book sidebar) ──────────────────────────
+
+
+async def _read_source_urls(db, bid: int) -> dict:
+    """Load `books.source_url` and parse the JSON dict.
+
+    Returns `{}` on missing book (caller decides whether to 404),
+    empty/null column, or malformed JSON. Malformed JSON is
+    silently dropped — pre-v1.x writes used a plain string format,
+    and a few legacy rows may still carry one. The editor will
+    overwrite it on the next change.
+    """
+    row = await (await db.execute(
+        "SELECT source_url FROM books WHERE id = ?", (bid,),
+    )).fetchone()
+    if row is None:
+        return {}
+    raw = row["source_url"]
+    if not raw:
+        return {}
+    try:
+        urls = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return urls if isinstance(urls, dict) else {}
+
+
+@router.post("/books/{bid}/source-urls")
+async def add_source_url(bid: int, data: dict = Body(...)):
+    """Parse a pasted URL, canonicalize it, merge into the book's
+    `source_url` JSON dict.
+
+    Request body: `{"url": "https://..."}`.
+
+    Behavior:
+      * 404 if the book id doesn't exist.
+      * 400 if the URL doesn't match any known source (so the user
+        can fix the paste rather than silently store nothing).
+      * Idempotent: pasting the same URL twice is a no-op write but
+        still returns 200 with the current dict.
+      * If the source already has a URL, the new (canonical) URL
+        replaces it. The user adds a Goodreads URL, later edits and
+        pastes a different Goodreads URL → second one wins. To clear
+        a source's URL entirely, use the DELETE endpoint.
+
+    Returns the updated `source_url` dict so the frontend can
+    re-render without a separate GET.
+    """
+    raw_url = (data.get("url") or "").strip()
+    if not raw_url:
+        raise HTTPException(400, "url is required")
+    parsed = parse_url(raw_url)
+    if parsed is None:
+        raise HTTPException(
+            400,
+            f"Could not identify a known source from URL: {raw_url!r}",
+        )
+    source_name, canonical = parsed
+
+    db = await get_db()
+    try:
+        existing = await (await db.execute(
+            "SELECT id FROM books WHERE id = ?", (bid,),
+        )).fetchone()
+        if existing is None:
+            raise HTTPException(404, f"book {bid} not found")
+        urls = await _read_source_urls(db, bid)
+        urls[source_name] = canonical
+        await db.execute(
+            "UPDATE books SET source_url = ? WHERE id = ?",
+            (json.dumps(urls), bid),
+        )
+        await db.commit()
+        return {"source_url": urls, "added": source_name,
+                "canonical_url": canonical}
+    finally:
+        await db.close()
+
+
+@router.delete("/books/{bid}/source-urls/{source_name}")
+async def remove_source_url(bid: int, source_name: str):
+    """Drop a single source's URL from this book's `source_url` dict.
+
+    Returns the updated dict. 404 if the book doesn't exist; if the
+    source key isn't present, returns 200 with the unchanged dict
+    (idempotent — re-clicking the X button is harmless).
+    """
+    db = await get_db()
+    try:
+        existing = await (await db.execute(
+            "SELECT id FROM books WHERE id = ?", (bid,),
+        )).fetchone()
+        if existing is None:
+            raise HTTPException(404, f"book {bid} not found")
+        urls = await _read_source_urls(db, bid)
+        if source_name in urls:
+            del urls[source_name]
+            await db.execute(
+                "UPDATE books SET source_url = ? WHERE id = ?",
+                (json.dumps(urls) if urls else None, bid),
+            )
+            await db.commit()
+        return {"source_url": urls, "removed": source_name}
     finally:
         await db.close()
