@@ -343,3 +343,208 @@ class TestSharedFilter:
         r = await client.get("/api/discovery/series?shared=false")
         ids = {s["id"] for s in r.json()["series"]}
         assert ids == {900, 901}
+
+
+# ── v2.3.3 list endpoint: pagination + book-title search + cover_book_id
+
+
+class TestListPagination:
+    async def test_response_shape_includes_total_limit_offset(self, client):
+        await _seed()
+        r = await client.get("/api/discovery/series")
+        body = r.json()
+        assert "series" in body
+        assert "total" in body
+        assert "limit" in body
+        assert "offset" in body
+        assert body["total"] == 2
+        assert body["offset"] == 0
+        assert body["limit"] == 50  # default
+
+    async def test_limit_and_offset_paginate(self, client):
+        # Seed 5 standalone series (one author so all are per-author).
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'A Author', 'Author')"
+            )
+            for i in range(1, 6):
+                await db.execute(
+                    "INSERT INTO series (id, name, author_id) "
+                    "VALUES (?, ?, 101)", (900 + i, f"Series {i}"),
+                )
+                await db.execute(
+                    "INSERT INTO books (id, title, author_id, series_id) "
+                    "VALUES (?, ?, 101, ?)",
+                    (i, f"Book {i}", 900 + i),
+                )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get(
+            "/api/discovery/series?limit=2&offset=0&sort=name&sort_dir=asc",
+        )
+        body = r.json()
+        assert body["total"] == 5
+        assert len(body["series"]) == 2
+        names = [s["name"] for s in body["series"]]
+        assert names == ["Series 1", "Series 2"]
+
+        r2 = await client.get(
+            "/api/discovery/series?limit=2&offset=2&sort=name&sort_dir=asc",
+        )
+        body2 = r2.json()
+        assert body2["total"] == 5
+        names2 = [s["name"] for s in body2["series"]]
+        assert names2 == ["Series 3", "Series 4"]
+
+    async def test_limit_caps_at_200(self, client):
+        await _seed()
+        # Over-limit gets rejected by FastAPI Query validation (422).
+        r = await client.get("/api/discovery/series?limit=500")
+        assert r.status_code == 422
+
+
+class TestListSearch:
+    async def test_search_matches_series_name(self, client):
+        await _seed()
+        r = await client.get("/api/discovery/series?search=Halo")
+        ids = {s["id"] for s in r.json()["series"]}
+        assert ids == {900, 901}
+
+    async def test_search_matches_author_name(self, client):
+        await _seed()
+        r = await client.get("/api/discovery/series?search=Buckell")
+        ids = {s["id"] for s in r.json()["series"]}
+        # Only 901 belongs to Buckell.
+        assert ids == {901}
+
+    async def test_search_matches_book_title(self, client):
+        # Series name "Saga", but search for "Reach" should still find it
+        # because book 1 (titled 'Reach') is on the series.
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'Eric Nylund', 'Nylund')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, 'Saga', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id) "
+                "VALUES (1, 'Reach', 101, 900), "
+                "(2, 'Cole', 101, 900)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series?search=Reach")
+        body = r.json()
+        ids = {s["id"] for s in body["series"]}
+        assert ids == {900}
+        # Critical: book_count includes BOTH books, not just the one
+        # whose title matched. Row-level WHERE on b.title would have
+        # broken this — guard against regression.
+        assert body["series"][0]["book_count"] == 2
+
+    async def test_search_total_reflects_filter(self, client):
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'A', 'A')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) VALUES "
+                "(900, 'Halo', 101), "
+                "(901, 'Other', 101)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series?search=Halo")
+        body = r.json()
+        assert body["total"] == 1
+
+
+class TestListCoverBookId:
+    async def test_returns_first_book_id(self, client):
+        # Series 900 has books 1 (index 1.0) and 2 (index 2.0). The
+        # earliest by series_index (book 1) wins.
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'A', 'A')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, 'Halo', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id, "
+                "series_index, cover_path) VALUES "
+                "(1, 'First', 101, 900, 1.0, '/covers/1.jpg'), "
+                "(2, 'Second', 101, 900, 2.0, '/covers/2.jpg')"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series")
+        s = r.json()["series"][0]
+        assert s["cover_book_id"] == 1
+
+    async def test_prefers_book_with_cover(self, client):
+        # First book by index has no cover; second does. The "has
+        # cover" book wins despite later index.
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'A', 'A')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, 'Halo', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id, "
+                "series_index, cover_path, cover_url) VALUES "
+                "(1, 'NoCover', 101, 900, 1.0, NULL, NULL), "
+                "(2, 'WithCover', 101, 900, 2.0, '/c/2.jpg', NULL)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series")
+        s = r.json()["series"][0]
+        assert s["cover_book_id"] == 2
+
+    async def test_null_when_series_has_no_books(self, client):
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, 'Empty', NULL)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series")
+        s = next(x for x in r.json()["series"] if x["id"] == 900)
+        assert s["cover_book_id"] is None

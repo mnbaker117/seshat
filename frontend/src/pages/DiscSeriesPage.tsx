@@ -1,28 +1,32 @@
-// v2.3 Series Manager page.
+// v2.3.3 Series Manager page.
 //
-// Lists every series across the active library with shared/per-author
-// indicator, contributor count, and book count. Supports the four
-// management actions exposed by the backend:
+// Lists every series across the active library with a cover thumbnail,
+// author summary, ownership counts, and shared/per-author indicator.
+// The user-facing actions are:
 //
-//   - Promote: select 2+ per-author rows, merge into one shared row
-//     (covers Halo cases the auto-detect missed because the books
-//     aren't yet in Calibre).
-//   - Demote: split a shared row back into per-author rows.
+//   - Manage members: open a modal that lets the user add or remove
+//     authors. Authority (per-author vs shared) auto-flips on the
+//     backend based on the resulting distinct-author count, so the
+//     old "promote / demote" verbs are no longer surfaced here.
 //   - Rename: change the series name in place. 409 surfaces the
 //     conflict id so the user can opt to merge into the existing.
 //   - Delete: remove the series; books fall back to standalone.
 //
-// Membership editing (add/remove individual books) lives in the
-// existing book-detail sidebar — the Series Manager focuses on
-// row-level structural changes that can't be done one-book-at-a-time.
+// The legacy promote/demote endpoints still exist (used by the
+// calibre_sync auto-detect path and as recovery escape hatches) but
+// nothing on this page calls them directly anymore.
+//
+// Search matches series name, author name, AND book title — so the
+// user can find a series by remembering an entry in it.
 
 import { useEffect, useMemo, useState } from "react";
 import { useTheme } from "../theme";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
 import { usePersist } from "../hooks/usePersist";
+import { ManageMembersModal } from "../components/ManageMembersModal";
 
 interface SeriesRow {
   id: number;
@@ -35,22 +39,29 @@ interface SeriesRow {
   multi_author: number;
   is_shared: number;
   contributor_count: number;
+  cover_book_id: number | null;
 }
 
 interface SeriesListResponse {
   series: SeriesRow[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 type FilterMode = "all" | "shared" | "per-author";
 
+const PAGE_SIZE = 50;
+
 export default function SeriesManagerPage() {
   const t = useTheme();
   const [filter, setFilter] = usePersist<FilterMode>("sm_filter", "all");
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [offset, setOffset] = useState(0);
   const [data, setData] = useState<SeriesListResponse | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState<Record<number, string>>({});
-  const [bulkBusy, setBulkBusy] = useState(false);
+  const [manageTarget, setManageTarget] = useState<SeriesRow | null>(null);
 
   const load = () => {
     setData(null);
@@ -58,107 +69,44 @@ export default function SeriesManagerPage() {
     if (search.trim()) params.set("search", search.trim());
     if (filter === "shared") params.set("shared", "true");
     if (filter === "per-author") params.set("shared", "false");
+    params.set("limit", String(PAGE_SIZE));
+    params.set("offset", String(offset));
     api
       .get<SeriesListResponse>(`/discovery/series?${params}`)
       .then(setData)
       .catch((e) => {
         console.error(e);
-        setData({ series: [] });
+        setData({ series: [], total: 0, limit: PAGE_SIZE, offset: 0 });
       });
   };
 
+  // Debounce the search input so each keystroke doesn't fire a request.
+  useEffect(() => {
+    const tid = setTimeout(() => {
+      setOffset(0);
+      setSearch(searchInput);
+    }, 250);
+    return () => clearTimeout(tid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput]);
+
+  // Reload whenever filter / search / offset settle.
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, search, offset]);
+
+  // Reset offset when filter changes.
+  useEffect(() => {
+    setOffset(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
-  const onSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    load();
-  };
-
-  // Selected per-author rows that share a name are eligible for
-  // promote. We surface the count + warn if names don't match.
-  const selectedRows = useMemo(() => {
-    if (!data) return [] as SeriesRow[];
-    return data.series.filter((s) => selected.has(s.id));
-  }, [data, selected]);
-
-  const promoteEligible = useMemo(() => {
-    if (selectedRows.length < 2) return false;
-    if (selectedRows.some((r) => r.is_shared === 1)) return false;
-    return true;
-  }, [selectedRows]);
-
-  const promoteNamesMatch = useMemo(() => {
-    if (selectedRows.length < 2) return false;
-    const first = selectedRows[0].name.toLowerCase();
-    return selectedRows.every((r) => r.name.toLowerCase() === first);
-  }, [selectedRows]);
-
-  const toggleSelected = (id: number) => {
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-  };
-
-  const clearSelection = () => setSelected(new Set());
-
-  const promote = async () => {
-    if (!promoteEligible) return;
-    const name = promoteNamesMatch
-      ? selectedRows[0].name
-      : window.prompt(
-          "Selected rows have different names. What name should the shared series use?",
-          selectedRows[0].name,
-        );
-    if (!name) return;
-    setBulkBusy(true);
-    try {
-      const res = await api.post<{
-        shared_id: number;
-        promoted_from: number[];
-        books_moved: number;
-      }>("/discovery/series/promote", {
-        series_ids: selectedRows.map((r) => r.id),
-        name,
-      });
-      alert(
-        `Promoted ${res.promoted_from.length} rows into shared series id=${res.shared_id}; ${res.books_moved} books moved.`,
-      );
-      clearSelection();
-      load();
-    } catch (e) {
-      alert(`Promote failed: ${(e as Error).message || e}`);
-    } finally {
-      setBulkBusy(false);
-    }
-  };
-
-  const demote = async (s: SeriesRow) => {
-    if (
-      !window.confirm(
-        `Split "${s.name}" into ${s.contributor_count} per-author rows?`,
-      )
-    )
-      return;
-    setBusy((b) => ({ ...b, [s.id]: "demote" }));
-    try {
-      await api.post(`/discovery/series/${s.id}/demote`);
-      load();
-    } catch (e) {
-      alert(`Demote failed: ${(e as Error).message || e}`);
-    } finally {
-      setBusy((b) => {
-        const n = { ...b };
-        delete n[s.id];
-        return n;
-      });
-    }
-  };
+  const total = data?.total ?? 0;
+  const pageStart = total === 0 ? 0 : offset + 1;
+  const pageEnd = Math.min(offset + PAGE_SIZE, total);
+  const hasPrev = offset > 0;
+  const hasNext = offset + PAGE_SIZE < total;
 
   const rename = async (s: SeriesRow) => {
     const next = window.prompt(`Rename "${s.name}" to:`, s.name);
@@ -168,7 +116,8 @@ export default function SeriesManagerPage() {
       await api.patch(`/discovery/series/${s.id}`, { name: next.trim() });
       load();
     } catch (e) {
-      alert(`Rename failed: ${(e as Error).message || e}`);
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Rename failed: ${msg}`);
     } finally {
       setBusy((b) => {
         const n = { ...b };
@@ -188,14 +137,10 @@ export default function SeriesManagerPage() {
     setBusy((b) => ({ ...b, [s.id]: "delete" }));
     try {
       await api.del(`/discovery/series/${s.id}`);
-      setSelected((sel) => {
-        const n = new Set(sel);
-        n.delete(s.id);
-        return n;
-      });
       load();
     } catch (e) {
-      alert(`Delete failed: ${(e as Error).message || e}`);
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Delete failed: ${msg}`);
     } finally {
       setBusy((b) => {
         const n = { ...b };
@@ -205,14 +150,14 @@ export default function SeriesManagerPage() {
     }
   };
 
-  if (data === null) return <Load />;
-
-  const series = data.series || [];
-  const filterTabs: { id: FilterMode; label: string }[] = [
-    { id: "all", label: "All" },
-    { id: "per-author", label: "Per-Author" },
-    { id: "shared", label: "Shared" },
-  ];
+  const filterTabs: { id: FilterMode; label: string }[] = useMemo(
+    () => [
+      { id: "all", label: "All" },
+      { id: "per-author", label: "Per-Author" },
+      { id: "shared", label: "Shared" },
+    ],
+    [],
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -232,13 +177,12 @@ export default function SeriesManagerPage() {
           <span style={{ fontSize: 22 }}>🗂️</span> Series Manager
         </h1>
         <p style={{ fontSize: 14, color: t.td, marginTop: 4 }}>
-          Promote per-author series rows into shared rows (Halo, Star Wars,
-          franchise novels), split a shared row back into per-author, rename,
-          or delete. Calibre-organized shared series are auto-detected on
-          sync; this page covers the cases where Calibre's organization
-          doesn't tell us — source-discovered books not yet acquired,
-          coincidentally-named series that were merged in error, or undoing a
-          previous decision.
+          Browse every series in the library. Use{" "}
+          <strong>Manage members</strong> to add or remove authors —
+          single-author series flip to <em>shared</em> automatically when a
+          second author is added, and back to <em>per-author</em> when the
+          last contributing author is removed. Rename or delete from the row
+          actions; books fall back to standalone when a series is deleted.
         </p>
       </div>
 
@@ -274,7 +218,7 @@ export default function SeriesManagerPage() {
         ))}
       </div>
 
-      {/* Search + bulk action bar */}
+      {/* Search bar */}
       <div
         style={{
           display: "flex",
@@ -283,46 +227,35 @@ export default function SeriesManagerPage() {
           flexWrap: "wrap",
         }}
       >
-        <form onSubmit={onSearch} style={{ flex: "1 1 300px", maxWidth: 400 }}>
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by series or author name..."
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              fontSize: 14,
-              background: t.bg2,
-              color: t.text,
-              border: `1px solid ${t.border}`,
-              borderRadius: 6,
-            }}
-          />
-        </form>
-
-        {selected.size > 0 ? (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 13, color: t.td }}>
-              {selected.size} selected
-            </span>
-            <Btn
-              onClick={promote}
-              disabled={!promoteEligible || bulkBusy}
-              variant="primary"
-              size="sm"
-            >
-              {bulkBusy ? <Spin /> : null} Promote to shared
-            </Btn>
-            <Btn onClick={clearSelection} variant="ghost" size="sm">
-              Clear
-            </Btn>
-          </div>
+        <input
+          type="search"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search by series, author, or book title…"
+          style={{
+            flex: "1 1 360px",
+            maxWidth: 480,
+            padding: "8px 12px",
+            fontSize: 14,
+            background: t.bg2,
+            color: t.text,
+            border: `1px solid ${t.border}`,
+            borderRadius: 6,
+          }}
+        />
+        {data ? (
+          <span style={{ fontSize: 13, color: t.td, marginLeft: "auto" }}>
+            {total === 0
+              ? "no results"
+              : `showing ${pageStart}–${pageEnd} of ${total}`}
+          </span>
         ) : null}
       </div>
 
+      {data === null ? <Load /> : null}
+
       {/* Empty state */}
-      {series.length === 0 ? (
+      {data && data.series.length === 0 ? (
         <div
           style={{
             background: t.bg2,
@@ -334,150 +267,230 @@ export default function SeriesManagerPage() {
           }}
         >
           <div style={{ fontSize: 32, marginBottom: 8 }}>—</div>
-          <div style={{ fontSize: 14 }}>No series match the current filter.</div>
+          <div style={{ fontSize: 14 }}>
+            {search.trim()
+              ? "No series match this search."
+              : "No series match the current filter."}
+          </div>
         </div>
       ) : null}
 
-      {/* Table */}
-      {series.length > 0 ? (
+      {/* Series list */}
+      {data && data.series.length > 0 ? (
         <div
           style={{
             background: t.bg2,
             border: `1px solid ${t.border}`,
             borderRadius: 12,
             overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: 14,
-            }}
-          >
-            <thead>
-              <tr style={{ background: t.bg, color: t.tf }}>
-                <th style={hth(t)}></th>
-                <th style={hth(t)}>Name</th>
-                <th style={hth(t)}>Author</th>
-                <th style={hth(t)}>Books</th>
-                <th style={hth(t)}>Type</th>
-                <th style={{ ...hth(t), textAlign: "right" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {series.map((s) => {
-                const busyAction = busy[s.id];
-                const isShared = s.is_shared === 1;
-                return (
-                  <tr
-                    key={s.id}
-                    style={{ borderTop: `1px solid ${t.borderL}` }}
-                  >
-                    <td style={td(t)}>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(s.id)}
-                        onChange={() => toggleSelected(s.id)}
-                        disabled={isShared}
-                        title={
-                          isShared
-                            ? "shared rows can't be promoted"
-                            : "select for bulk promote"
-                        }
-                      />
-                    </td>
-                    <td style={{ ...td(t), color: t.text, fontWeight: 500 }}>
-                      {s.name}
-                    </td>
-                    <td style={{ ...td(t), color: t.tf }}>
-                      {isShared ? (
-                        <span style={{ color: t.accent }}>
-                          shared ({s.contributor_count} authors)
-                        </span>
-                      ) : (
-                        s.author_name || "—"
-                      )}
-                    </td>
-                    <td style={{ ...td(t), color: t.tf }}>
-                      {s.book_count} ({s.owned_count} owned, {s.missing_count}{" "}
-                      missing)
-                    </td>
-                    <td style={td(t)}>
-                      <span
-                        style={{
-                          display: "inline-block",
-                          padding: "2px 8px",
-                          borderRadius: 4,
-                          fontSize: 12,
-                          background: isShared ? t.abg : t.bg,
-                          color: isShared ? t.accent : t.tf,
-                          border: `1px solid ${isShared ? t.abr : t.border}`,
-                        }}
-                      >
-                        {isShared ? "Shared" : "Per-Author"}
-                      </span>
-                    </td>
-                    <td style={{ ...td(t), textAlign: "right" }}>
-                      <div
-                        style={{
-                          display: "inline-flex",
-                          gap: 6,
-                        }}
-                      >
-                        {isShared ? (
-                          <Btn
-                            onClick={() => demote(s)}
-                            disabled={!!busyAction}
-                            variant="ghost"
-                            size="sm"
-                          >
-                            {busyAction === "demote" ? <Spin /> : null} Demote
-                          </Btn>
-                        ) : null}
-                        <Btn
-                          onClick={() => rename(s)}
-                          disabled={!!busyAction}
-                          variant="ghost"
-                          size="sm"
-                        >
-                          {busyAction === "rename" ? <Spin /> : null} Rename
-                        </Btn>
-                        <Btn
-                          onClick={() => remove(s)}
-                          disabled={!!busyAction}
-                          variant="ghost"
-                          size="sm"
-                        >
-                          {busyAction === "delete" ? <Spin /> : null} Delete
-                        </Btn>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          {data.series.map((s, idx) => (
+            <SeriesRowCard
+              key={s.id}
+              s={s}
+              first={idx === 0}
+              busyAction={busy[s.id]}
+              onManage={() => setManageTarget(s)}
+              onRename={() => rename(s)}
+              onRemove={() => remove(s)}
+            />
+          ))}
         </div>
+      ) : null}
+
+      {/* Pagination footer */}
+      {data && total > PAGE_SIZE ? (
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Btn
+            variant="ghost"
+            size="sm"
+            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            disabled={!hasPrev}
+          >
+            ← Prev
+          </Btn>
+          <span style={{ fontSize: 13, color: t.tf }}>
+            Page {Math.floor(offset / PAGE_SIZE) + 1} of{" "}
+            {Math.max(1, Math.ceil(total / PAGE_SIZE))}
+          </span>
+          <Btn
+            variant="ghost"
+            size="sm"
+            onClick={() => setOffset(offset + PAGE_SIZE)}
+            disabled={!hasNext}
+          >
+            Next →
+          </Btn>
+        </div>
+      ) : null}
+
+      {/* Manage Members modal */}
+      {manageTarget ? (
+        <ManageMembersModal
+          seriesId={manageTarget.id}
+          seriesName={manageTarget.name}
+          onClose={() => setManageTarget(null)}
+          onChanged={() => load()}
+        />
       ) : null}
     </div>
   );
 }
 
-function hth(t: ReturnType<typeof useTheme>): React.CSSProperties {
-  return {
-    padding: "10px 14px",
-    textAlign: "left",
-    fontWeight: 600,
-    fontSize: 13,
-    color: t.tf,
-    borderBottom: `1px solid ${t.border}`,
-  };
+interface SeriesRowCardProps {
+  s: SeriesRow;
+  first: boolean;
+  busyAction: string | undefined;
+  onManage: () => void;
+  onRename: () => void;
+  onRemove: () => void;
 }
 
-function td(t: ReturnType<typeof useTheme>): React.CSSProperties {
-  return {
-    padding: "10px 14px",
-    color: t.tf,
-  };
+function SeriesRowCard({
+  s,
+  first,
+  busyAction,
+  onManage,
+  onRename,
+  onRemove,
+}: SeriesRowCardProps) {
+  const t = useTheme();
+  const isShared = s.is_shared === 1;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        padding: "12px 16px",
+        borderTop: first ? "none" : `1px solid ${t.borderL}`,
+      }}
+    >
+      {/* Cover thumbnail */}
+      <div
+        style={{
+          width: 72,
+          height: 108,
+          background: t.bg3,
+          borderRadius: 4,
+          overflow: "hidden",
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: t.tg,
+          fontSize: 22,
+        }}
+      >
+        {s.cover_book_id ? (
+          <img
+            src={`/api/discovery/covers/${s.cover_book_id}`}
+            loading="lazy"
+            alt=""
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = "none";
+            }}
+          />
+        ) : (
+          <span>—</span>
+        )}
+      </div>
+
+      {/* Title + meta */}
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          minWidth: 0,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontSize: 16, fontWeight: 600, color: t.text }}>
+            {s.name}
+          </span>
+          <span
+            style={{
+              display: "inline-block",
+              padding: "2px 8px",
+              borderRadius: 4,
+              fontSize: 11,
+              background: isShared ? t.abg : t.bg,
+              color: isShared ? t.accent : t.tf,
+              border: `1px solid ${isShared ? t.abr : t.border}`,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            {isShared ? "Shared" : "Per-Author"}
+          </span>
+        </div>
+        <div style={{ fontSize: 13, color: t.tf }}>
+          {isShared ? (
+            <span>
+              shared across{" "}
+              <span style={{ color: t.accent, fontWeight: 600 }}>
+                {s.contributor_count}
+              </span>{" "}
+              authors
+            </span>
+          ) : (
+            <span>{s.author_name || "—"}</span>
+          )}
+        </div>
+        <div style={{ fontSize: 12, color: t.td }}>
+          {s.book_count} book{s.book_count === 1 ? "" : "s"} —{" "}
+          {s.owned_count} owned, {s.missing_count} missing
+        </div>
+      </div>
+
+      {/* Row actions */}
+      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        <Btn
+          onClick={onManage}
+          disabled={!!busyAction}
+          variant="accent"
+          size="sm"
+        >
+          Manage members
+        </Btn>
+        <Btn
+          onClick={onRename}
+          disabled={!!busyAction}
+          variant="ghost"
+          size="sm"
+        >
+          {busyAction === "rename" ? <Spin /> : null} Rename
+        </Btn>
+        <Btn
+          onClick={onRemove}
+          disabled={!!busyAction}
+          variant="ghost"
+          size="sm"
+        >
+          {busyAction === "delete" ? <Spin /> : null} Delete
+        </Btn>
+      </div>
+    </div>
+  );
 }

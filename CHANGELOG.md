@@ -7,6 +7,147 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.3] — 2026-05-07
+
+The "Series Manager UX rebuild" release. The Series Manager page no
+longer leans on the vague "promote / demote" verbs. Users now manage
+*author membership* per series — the page's authority indicator
+(per-author vs shared) flips automatically based on the resulting
+distinct-author count, so the user never has to think about it
+directly. Cover thumbnails, pagination, and book-title search round
+out the page.
+
+The legacy promote/demote endpoints stay alive — `calibre_sync`'s
+auto-detect still calls them when a Calibre series turns out to span
+multiple authors, and they remain a recovery hatch for power users —
+but nothing on the page UI surfaces them anymore.
+
+### Discovery — author-list membership (replaces promote / demote)
+
+Backend: new helper `_recompute_series_author(db, sids)` in
+`app/discovery/routers/series.py` is the single source of truth for
+the auto-flip rule. Given any set of series ids, it counts distinct
+authors among each series's books:
+
+- **Exactly 1 distinct author** → `series.author_id` set to that
+  author (per-author authority).
+- **2+ distinct authors** → `series.author_id = NULL` (shared).
+- **0 books** → no-op (orphaned series; we leave authority alone so
+  a freshly-emptied row doesn't silently change shape before the
+  caller gets a chance to delete it).
+
+Three new endpoints under `/api/discovery/series/{sid}/`:
+
+- `GET /authors` — distinct authors for the series with per-author
+  book counts. Drives the modal's left panel.
+- `POST /authors` `{author_id, book_ids}` — assigns one author's
+  books to the series. Validates each `book_id` belongs to
+  `author_id`. **Captures source `series_id`s before the UPDATE** so
+  cross-series moves auto-flip both ends — a 2-author shared series
+  whose only contribution by author B moves out flips back to
+  per-author A automatically. `series_index` cleared on the moved
+  books (the index is series-scoped; carrying #6 from the old series
+  into a new one produces gibberish).
+- `DELETE /authors/{author_id}` — detaches every book by that author
+  from the series in one shot; recomputes authority on the series.
+  404 when the author has no books on this series, so URL typos
+  surface clearly.
+
+Existing `POST /series/{sid}/books` and `DELETE /series/{sid}/books/
+{book_id}` were wired to the same helper so authority stays consistent
+regardless of which endpoint mutates membership. The book-level
+endpoint preserves its caller-controlled `indices` contract — only
+the new author-level endpoint clears index-on-move.
+
+UNIQUE(name, author_id) collision on a shared→per-author flip (an
+existing per-author row of the same name) is caught and logged at
+WARNING; authority is left as NULL and the membership change still
+lands. The user can manually resolve via rename or delete. We chose
+this over auto-merging since auto-merging would be destructive
+without consent.
+
+### Discovery — list endpoint: covers, pagination, book-title search
+
+`GET /api/discovery/series` extended:
+
+- **`cover_book_id`** per row. Picks the most cover-worthy book in
+  the series via correlated subquery — books with any cover signal
+  (`cover_path` / `cover_url` / `audiobookshelf_id`) come first,
+  then `series_index ASC NULLS-LAST` (via `COALESCE(idx, 9999)`),
+  then `pub_date ASC`, then `id ASC`. Hidden books excluded so the
+  list doesn't surface a cover the user explicitly pruned. The
+  frontend hits `/api/discovery/covers/{cover_book_id}` directly.
+- **Pagination** — new `limit` (1–200, default 50) + `offset`
+  (≥0, default 0) query params. Response shape gained `total`,
+  `limit`, `offset` alongside the existing `series` array. `total`
+  is the post-filter pre-pagination count via `SELECT COUNT(*) FROM
+  (... GROUP BY s.id ... HAVING ...)`.
+- **Search** now matches series name OR primary author name OR
+  **book title**. The book-title match goes through a `s.id IN
+  (SELECT series_id FROM books WHERE title LIKE ?)` subquery — NOT
+  a row-level `b.title LIKE` clause. The latter would have shrunk
+  the GROUP BY's `book_count` to only the matching books (e.g.
+  searching "Reach" on a 5-book Halo would have reported
+  `book_count=1`). Regression-tested.
+
+### Discovery — Series Manager page UX rebuild
+
+`frontend/src/pages/DiscSeriesPage.tsx` rewritten:
+
+- Dropped the per-row checkbox column + bulk "Promote to shared"
+  button (the multi-row promote flow felt like a no-op in practice
+  and confused the membership mental model).
+- Larger row layout (~12px vertical padding) with a 72×108 cover
+  thumbnail on the left, lazy-loaded against `/api/discovery/covers/
+  {cover_book_id}` with a placeholder when null.
+- Per-row **Manage members** button replaces the old promote /
+  demote flow. Rename + delete row actions stay.
+- Search input now mentions "series, author, or book title" and
+  debounces (250ms) so each keystroke doesn't fire a request.
+- Prev/next pagination at the bottom when `total > 50`. Shows
+  "showing N–M of T" in the header so the user can orient.
+
+New component `frontend/src/components/ManageMembersModal.tsx`:
+
+- Top section: current authors with per-author book count and a
+  Remove button per row. Remove confirms ("Detach K books by X
+  from <series>?") then calls the new DELETE endpoint and refreshes.
+- Bottom section: **Add author** flow — debounced author
+  autocomplete against `/api/discovery/authors?search=`, then a
+  book picker filtered to that author's full library (any series,
+  standalone). Each book row shows a 36×54 cover thumbnail + the
+  book's current series as a small badge ("currently in: <series>"
+  or "standalone"). Books already on the destination series render
+  as disabled "already on this series" rows so the user understands
+  what's already done.
+- Submit calls the new POST endpoint and refreshes both the modal
+  and the parent list.
+- Authority indicator (per-author / shared badge) updates live in
+  the modal header as the count crosses 1 ↔ 2.
+
+### Tests
+
+28 new tests:
+
+- `tests/discovery/test_series_authors.py` (18) — covers GET
+  authors (distinct list + book counts, empty case, 404), POST
+  authors (dest flip to shared, source flip back when emptied,
+  wrong-author rejection, unknown book/author rejection, empty/
+  missing-field rejection), DELETE authors (shared→per-author flip,
+  0-book orphan no-op, 404 on no-author-on-series, 404 on unknown
+  series), book-level endpoint auto-flip (add → dest flips, source
+  flips back; remove → shared→per-author).
+- `tests/discovery/test_series_manager.py` (10) — list pagination
+  (response shape, paginate across 5 seeded series, limit > 200 →
+  422), search (matches series name / author name / **book title**
+  while preserving full `book_count`), `cover_book_id` (returns
+  first by index, prefers books with covers, NULL for empty
+  series).
+
+Suite total: **1460 passing** (was 1432 on v2.3.2).
+
+---
+
 ## [2.3.2] — 2026-05-06
 
 The "scan-quality" release. Two user-visible improvements + one

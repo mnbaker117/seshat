@@ -421,32 +421,69 @@ In v2.3.4+, the same scan-mode shapes apply but writes route
 through the dual-storage flow (Seshat-live + queue diffs for review)
 instead of the current direct-write to `books`.
 
-**v2.3.3** — Series Manager UX rebuild (~1-1.5 weeks):
+**v2.3.3 (shipped 2026-05-07)** — Series Manager UX rebuild:
 
-- Drop the vague "promote / demote" verbs in favor of author-list
-  membership semantics. The user's mental model is "this series has
-  these authors", not "merge these rows together". The current
-  per-row checkbox + bulk-Promote-to-shared button feels unclear in
-  practice; drop it.
-- Per-row "Manage members" action opens a modal with:
-  - Current author list (computed via
-    `SELECT DISTINCT author_id FROM books WHERE series_id = X`).
-  - "Add author" affordance — pick an author, pick which of their
-    books to add to this series.
-  - "Remove author" affordance — drops every book by that author
-    from the series in one shot.
-- Auto-promote / auto-demote triggers off the resulting member
-  count: 1 → 2+ flips `series.author_id` to NULL (shared);
-  2+ → 1 flips it back to the single remaining author (per-author).
-- Each series row gets a cover-image preview pulled from the first
-  available book in the series (route through the existing
-  `/api/discovery/covers/` endpoint).
-- Existing rename + delete row actions stay.
-- Backend: new `POST /api/discovery/series/{sid}/authors` and
-  `DELETE /api/discovery/series/{sid}/authors/{author_id}`. The
-  existing `/series/promote` and `/series/{sid}/demote` stay as
-  low-level escape hatches + auto-detect path callers but are no
-  longer user-facing.
+The user-facing model on the Series Manager page is now "this series
+has these authors" — promote/demote verbs no longer surface in the
+UI. Authority (per-author vs shared) auto-flips server-side based on
+the resulting distinct-author count.
+
+- Backend (`app/discovery/routers/series.py`):
+  - `_recompute_series_author(db, sids)` helper — single source of
+    truth for the auto-flip rule. 1 distinct author → per-author;
+    2+ → NULL (shared); 0 books → no-op. Catches the
+    UNIQUE(name, author_id) collision on the rare shared→per-author
+    case (existing per-author row of the same name) and degrades
+    gracefully with a logger.warning.
+  - New `GET /series/{sid}/authors` — distinct authors for a series
+    with per-author book counts; drives the modal's left panel.
+  - New `POST /series/{sid}/authors` `{author_id, book_ids}` —
+    captures source series IDs **before** the move and recomputes
+    authority on `{dest} ∪ sources` so cross-series book moves flip
+    the source series back to per-author when the move was their
+    last book by a contributing author.
+  - New `DELETE /series/{sid}/authors/{author_id}` — detaches every
+    book by that author from the series; recomputes authority on
+    the series afterward.
+  - Existing `POST /series/{sid}/books` and
+    `DELETE /series/{sid}/books/{book_id}` were wired to the same
+    helper so authority stays consistent regardless of which
+    endpoint mutates membership.
+  - Existing `/series/promote` and `/series/{sid}/demote` stay as
+    low-level escape hatches + auto-detect path callers; the
+    docstring marks them as no-longer-user-facing.
+
+- List endpoint (`GET /series`) gained:
+  - `cover_book_id` per row (most cover-worthy book in the series:
+    prefers books with cover_path/cover_url/audiobookshelf_id, then
+    series_index, then pub_date). Frontend hits
+    `/api/discovery/covers/{cover_book_id}` directly.
+  - Pagination: `limit` (1-200, default 50) + `offset`. Response
+    shape gained `total`, `limit`, `offset` alongside the existing
+    `series` array.
+  - Search now matches series name OR author name OR **book title**.
+    Book-title match goes through a `s.id IN (SELECT series_id FROM
+    books WHERE title LIKE ?)` subquery to keep per-series counts
+    correct (a row-level `b.title LIKE` would have shrunk `book_count`
+    to only the matching books — regression test guards against this).
+
+- Frontend:
+  - `ManageMembersModal.tsx` (new component): two-section modal —
+    current authors with per-row Remove + bottom "Add author" flow
+    (debounced author autocomplete → book picker filtered to that
+    author's full library, including books already on other series
+    so a single click moves them. Books currently on the destination
+    series show as disabled "already on this series").
+  - `DiscSeriesPage.tsx` rewritten: dropped checkbox column + bulk
+    Promote button. Added 72×108 cover thumbnail per row, larger row
+    height (~12px vertical padding), debounced search, per-row
+    "Manage members" button, and prev/next pagination at the bottom
+    when total > 50. Search hint updated to mention book titles.
+
+- Tests: 28 new tests across `test_series_authors.py` (18) +
+  `test_series_manager.py` (10 covering pagination + book-title
+  search + cover_book_id). Suite total: 1460 passing (was 1432
+  on v2.3.2).
 
 **v2.3.4** — Metadata Manager UI + dual-storage UI + source-scan
 write rule (~1.5-2 weeks):
@@ -494,5 +531,10 @@ incrementally.
 | 2026-05-06 | Scan-mode taxonomy | Four entry points enumerated. Three are "incremental" (Command Center, Author detail Re-sync, Author multi-select Scan Sources/Audio) and behave identically modulo scope: URL-backfill on non-mandatory sources, DETAIL on mandatory-but-missing, full-DETAIL on books with 0 URLs. The fourth (Author detail Full Scan) ignores the mandatory flag and re-fetches everything. Cleared-source-data state degenerates naturally into full-DETAIL via the 0-URLs branch — no special handling. |
 | 2026-05-06 | v2.3.2 vs v2.3.3 split | v2.3.2 = scan quality + source URL editor + Series UX rebuild (validated in isolation, no dual-storage UI yet). v2.3.3 = Compare panel + Metadata Manager UI + sidebar populates user_edited_fields + source-scan write rule. v2.3.4 = push-back. Smaller, more incrementally-validatable releases beat one big v2.3.2. |
 | 2026-05-06 | v2.3.2 narrowed further; +1 slot for everything else | v2.3.2 ships scan-quality (mandatory-source detail-fetch + per-source `existing_titles` gating) + source URL editor + scan-mode taxonomy verification only. Series Manager UX rebuild moves from v2.3.2 to v2.3.3 (it's a UX-only release; benefits from independent UAT). Metadata Manager UI moves to v2.3.4. Push-back to v2.3.5. Each release is smaller and more focused; the scan-quality work is the most user-visible change so it ships first. |
+| 2026-05-07 | Cross-series book moves auto-flip BOTH ends | When a book moves from series Y to series X via the new POST `/series/{sid}/authors` (or the existing book-level POST `/series/{sid}/books` after wiring), `_recompute_series_author` is called on `{X} ∪ {sources}` — the moved books' previous series_ids captured before the UPDATE. Without this, source series with 2 contributing authors that lose their only book by author B would stay flagged "shared" despite now having only A's books left. |
+| 2026-05-07 | series_index cleared on author-level moves, preserved on book-level | POST `/series/{sid}/authors` clears `series_index` to NULL on the moved books (the index is series-scoped; carrying a #6 from the old series into a new one produces gibberish). The existing book-level POST `/series/{sid}/books` keeps its caller-controlled `indices` contract — that endpoint is used by code that knows what indices to set. |
+| 2026-05-07 | UNIQUE(name, author_id) collision on shared→per-author flip | If a series flipping from shared to per-author would collide with an existing per-author row of the same name, `_recompute_series_author` catches the IntegrityError, leaves authority as NULL, and logs a warning. The membership change still lands. User can manually resolve via rename or delete. Pragmatic over auto-merging (which would be destructive without consent). |
+| 2026-05-07 | Cover-pick ordering for series rows | Per-series cover_book_id picks: books with any cover signal (cover_path / cover_url / audiobookshelf_id) first, then series_index ASC NULLS-LAST (via COALESCE 9999), then pub_date ASC, then id ASC. Correlated subquery — fine at our scale (hundreds of series). Hidden books excluded so the list doesn't surface a cover the user explicitly pruned. |
+| 2026-05-07 | Book-title search via subquery, not row-level WHERE | A row-level `b.title LIKE ?` would shrink the GROUP BY's `book_count` to only matching books (e.g. searching "Reach" on a 5-book Halo would report book_count=1). Implemented as `s.id IN (SELECT series_id FROM books WHERE title LIKE ?)` so per-series aggregations stay correct. Regression-tested. |
 
 Update this table as decisions evolve during implementation.
