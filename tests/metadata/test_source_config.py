@@ -11,6 +11,7 @@ from app.metadata.source_config import (
     derive_enrich_priority,
     derive_scan_priority,
     get_source_rate_limit,
+    is_source_mandatory,
     migrate_legacy_settings,
     sync_legacy_keys,
 )
@@ -281,3 +282,78 @@ class TestSyncLegacy:
         sync_legacy_keys(settings)
         # The wider IRC gate stays False.
         assert settings["mam_enabled"] is False
+
+
+class TestMandatoryFlag:
+    """v2.3.2 per-source `mandatory` flag: governs the per-source
+    `existing_titles` gating in the source-scan loop. Default true
+    on the primary tier (Goodreads/Hardcover for ebook;
+    Audible/Hardcover for audiobook), false elsewhere."""
+
+    def test_fresh_install_seeds_mandatory_field(self):
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        sources = settings["metadata_sources"]
+        # Every known source has the field after migration.
+        for name in sources:
+            assert "mandatory" in sources[name], \
+                f"source {name!r} missing mandatory key"
+
+    def test_default_mandatory_primary_tier(self):
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        # Primary tier defaults true.
+        assert is_source_mandatory(settings, "goodreads") is True
+        assert is_source_mandatory(settings, "hardcover") is True
+        assert is_source_mandatory(settings, "audible") is True
+        # Secondary / supplementary defaults false.
+        assert is_source_mandatory(settings, "kobo") is False
+        assert is_source_mandatory(settings, "amazon") is False
+        assert is_source_mandatory(settings, "ibdb") is False
+        assert is_source_mandatory(settings, "google_books") is False
+        # MAM is not part of the source-scan registry; mandatory
+        # default is false.
+        assert is_source_mandatory(settings, "mam") is False
+
+    def test_user_override_persists(self):
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        # User clears Goodreads's mandatory bit.
+        settings["metadata_sources"]["goodreads"]["mandatory"] = False
+        # User flips Kobo on.
+        settings["metadata_sources"]["kobo"]["mandatory"] = True
+        assert is_source_mandatory(settings, "goodreads") is False
+        assert is_source_mandatory(settings, "kobo") is True
+
+    def test_missing_field_falls_back_to_ship_default(self):
+        """An upgraded settings.json from before v2.3.2 won't have
+        the `mandatory` key on existing entries. The accessor must
+        fall back to the ship-with default rather than False, so
+        users get the intended behavior without an explicit migration
+        write."""
+        settings = {
+            "metadata_sources": {
+                "goodreads": {
+                    "rate_limit": 2.0,
+                    "ebook_enrich": True, "ebook_scan": True,
+                    "audiobook_enrich": True, "audiobook_scan": True,
+                    # `mandatory` deliberately absent.
+                },
+                "kobo": {
+                    "rate_limit": 3.0,
+                    "ebook_enrich": True, "ebook_scan": True,
+                    "audiobook_enrich": False, "audiobook_scan": False,
+                },
+            },
+        }
+        # Goodreads ship-default: True. Kobo ship-default: False.
+        assert is_source_mandatory(settings, "goodreads") is True
+        assert is_source_mandatory(settings, "kobo") is False
+
+    def test_unknown_source_returns_false(self):
+        """A source the app doesn't know about — defensive fallback
+        rather than crash. Unknown sources can't be mandatory because
+        the scan loop won't run them anyway."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        assert is_source_mandatory(settings, "nonexistent") is False

@@ -83,18 +83,28 @@ KNOWN_SOURCES: dict[str, dict[str, Any]] = {
 # Ship-with defaults derived from live-observed behaviour. Applied
 # on fresh-install (no legacy settings present). Users can toggle
 # anything after the fact via the Metadata Sources panel.
+#
+# `mandatory` (v2.3.2): when True, the source-scan layer fast-paths
+# only on books THIS source has already URL'd. Books missing this
+# source's URL trigger a DETAIL fetch every scan until the source
+# either matches them or is no longer enabled. When False, the
+# source fast-paths on any book that has at least one URL from any
+# enabled source — preserves the pre-v2.3.2 behavior for
+# supplementary sources where DETAIL on every unmatched book would
+# be wasted effort. Default True on the primary tier (Goodreads /
+# Hardcover for ebook; Audible for audiobook), False elsewhere.
 _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, bool]] = {
-    "mam":         {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True},
-    "goodreads":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True},
-    "amazon":      {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False},
-    "hardcover":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True},
-    "kobo":        {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False},
-    "ibdb":        {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": False, "audiobook_scan": False},
+    "mam":         {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": False},
+    "goodreads":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
+    "amazon":      {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
+    "hardcover":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
+    "kobo":        {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
+    "ibdb":        {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
     # Google Books defaults off for audiobook enrich — rate-limited
     # and carries no audiobook-specific fields (narrator, duration,
     # ASIN). Keeps firing for ebook grabs where it's useful.
-    "google_books": {"ebook_enrich": True, "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False},
-    "audible":     {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": True,  "audiobook_scan": True},
+    "google_books": {"ebook_enrich": True, "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
+    "audible":     {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
 }
 
 
@@ -248,6 +258,7 @@ def _build_source_entry(
     defaults = _DEFAULT_NEW_INSTALL_STATE.get(name, {
         "ebook_enrich": False, "ebook_scan": False,
         "audiobook_enrich": False, "audiobook_scan": False,
+        "mandatory": False,
     })
 
     # Read legacy scan toggle: `<name>_enabled`. Three cases:
@@ -290,6 +301,7 @@ def _build_source_entry(
         "ebook_scan": bool(ebook_scan),
         "audiobook_enrich": bool(audiobook_enrich),
         "audiobook_scan": bool(audiobook_scan),
+        "mandatory": bool(defaults.get("mandatory", False)),
     }
 
 
@@ -359,6 +371,26 @@ def get_source_rate_limit(settings: dict, name: str) -> float:
     except (TypeError, ValueError):
         meta = KNOWN_SOURCES.get(name, {})
         return float(meta.get("default_rate", 1.0))
+
+
+def is_source_mandatory(settings: dict, name: str) -> bool:
+    """Return True when the source-scan layer should keep doing
+    DETAIL fetches on books missing this source's URL, even when
+    other sources have already URL'd the book.
+
+    Falls back to the v2.3.2 ship-with default for the source when
+    the entry is missing the `mandatory` key — keeps upgraded
+    settings.json files (pre-v2.3.2) behaving sensibly without
+    requiring an explicit migration write. Sources unknown to the
+    app default to False.
+    """
+    entry = (settings.get("metadata_sources") or {}).get(name) or {}
+    raw = entry.get("mandatory")
+    if raw is None:
+        return bool(_DEFAULT_NEW_INSTALL_STATE.get(name, {}).get(
+            "mandatory", False,
+        ))
+    return bool(raw)
 
 
 # ─── Dual-write (keep legacy keys in sync) ────────────────────

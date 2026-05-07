@@ -2643,7 +2643,7 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         )).fetchall()
         our_titles = [r["title"] for r in rows]
         all_rows = await (await db.execute(
-            f"SELECT title, hidden FROM books WHERE author_id IN ({id_placeholders})",
+            f"SELECT title, hidden, source_url FROM books WHERE author_id IN ({id_placeholders})",
             linked_ids,
         )).fetchall()
         # `existing_titles` holds EVERY known book (hidden included) so a
@@ -2657,12 +2657,34 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         # known to dedup, invisible to source-driven writes.
         existing_titles = set()
         hidden_titles = set()
+        # v2.3.2 mandatory-source gating: track per-source which titles
+        # have already been URL'd, plus the union ("any source has it").
+        # The source loop below picks `existing_titles` per source based
+        # on the source's `mandatory` flag — mandatory sources fast-path
+        # only on titles THIS source has URL'd, so "Quarks and Qi"
+        # missing a Goodreads URL still triggers a Goodreads DETAIL
+        # fetch on every scan instead of being silently skipped.
+        per_source_titles_with_url: dict[str, set[str]] = {}
+        titles_with_any_url: set[str] = set()
         for r in all_rows:
             t = re.sub(r'[^\w\s]', '', r["title"].lower()).strip()
             t = re.sub(r'\s+', ' ', t)
             existing_titles.add(t)
             if r["hidden"] == 1:
                 hidden_titles.add(t)
+            # Parse source_url JSON to extract per-source URL ownership.
+            raw_urls = r["source_url"]
+            if raw_urls:
+                try:
+                    urls = json.loads(raw_urls)
+                except (json.JSONDecodeError, TypeError):
+                    urls = {}
+                if isinstance(urls, dict) and urls:
+                    titles_with_any_url.add(t)
+                    for src_name in urls:
+                        per_source_titles_with_url.setdefault(
+                            src_name, set()
+                        ).add(t)
         # Distinct series names the user already has tagged for this
         # author. Hardcover (and any future source with the same hook)
         # uses this to prefer matching series candidates over deeper
@@ -2816,11 +2838,34 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         # end of the scan from individually blowing the global budget.
         timeout = min(spec.timeout_sec, max(1.0, PER_AUTHOR_BUDGET_SEC - elapsed))
 
+        # v2.3.2 per-source existing_titles gating. In full_scan mode
+        # the existing logic still applies (hidden_titles only — see
+        # _try_source); in incremental mode we narrow the fast-path
+        # set per source based on its `mandatory` flag.
+        # - Mandatory source: fast-path only on books THIS source has
+        #   already URL'd. Books missing this source's URL still go
+        #   through DETAIL fetch every scan until matched.
+        # - Non-mandatory source: fast-path on any book with at least
+        #   one URL from any enabled source. Preserves pre-v2.3.2
+        #   behavior so supplementary sources (Google Books, IBDB,
+        #   Amazon) don't waste DETAIL fetches on books they'll
+        #   probably never match.
+        from app.metadata.source_config import is_source_mandatory
+        if full_scan:
+            existing_for_source = existing_titles
+        elif is_source_mandatory(settings, spec.name):
+            existing_for_source = per_source_titles_with_url.get(
+                spec.name, set(),
+            )
+        else:
+            existing_for_source = titles_with_any_url
+
         try:
             n = await asyncio.wait_for(
                 _try_source(
                     source, author_name, author_id, our_titles, languages, spec.name,
-                    existing_titles=existing_titles, hidden_titles=hidden_titles,
+                    existing_titles=existing_for_source,
+                    hidden_titles=hidden_titles,
                     full_scan=full_scan,
                     owned_only=owned_only, series_collector=series_collector,
                     exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
@@ -2925,11 +2970,24 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
                 f"resuming from book {start_at}/{total_books} with "
                 f"{retry_timeout:.0f}s budget"
             )
+            # Mirror the v2.3.2 per-source existing_titles selection
+            # used by the main loop so a mandatory source's retry
+            # also keeps DETAIL-fetching books missing this source's
+            # URL rather than fast-pathing them.
+            if full_scan:
+                retry_existing = existing_titles
+            elif is_source_mandatory(settings, spec.name):
+                retry_existing = per_source_titles_with_url.get(
+                    spec.name, set(),
+                )
+            else:
+                retry_existing = titles_with_any_url
             try:
                 n = await asyncio.wait_for(
                     _try_source(
                         source, author_name, author_id, our_titles, languages, spec.name,
-                        existing_titles=existing_titles, hidden_titles=hidden_titles,
+                        existing_titles=retry_existing,
+                        hidden_titles=hidden_titles,
                         full_scan=full_scan,
                         owned_only=owned_only, series_collector=series_collector,
                         exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
