@@ -300,32 +300,101 @@ real Calibre/ABS sync corrects the snapshot.
 
 ## Phasing
 
-**v2.3.0** — data model + pull-side sync + Series Manager (~1.5-2 weeks):
+**v2.3.0** — data model + Calibre/ABS dual-storage + Series Manager
+(~1.5-2 weeks):
 - Schema migrations (snapshot tables, nullable series.author_id,
   source pref, user_edited_fields, review queue).
 - One-time backfill.
 - Calibre/ABS sync rewrite to write to snapshots.
 - Auto-flow vs queue-for-review logic per (3) above.
-- Source-scan rule: write-through-on-empty + queue-on-populated.
 - Auto-detect shared series in Calibre sync.
 - Series Manager page (browse + promote/demote + membership edit).
 - No book sidebar UI changes yet — Seshat-live displayed everywhere
   as today.
 
-**v2.3.1** — Metadata Manager UI + per-field pull (~1-2 weeks):
-- Compare panel in book sidebar.
-- Per-field "pull from snapshot" action.
-- Metadata Manager page replacing Suggestions.
+**Source-scan rule (deferred to v2.3.2)**: rewriting `_merge_result`
+to "write-through-on-empty + queue-on-populated" without the UI to
+review queued items would accumulate unread queue rows that the user
+can't act on. The owned-Calibre branch already implements the spirit
+(per-field COALESCE-fill rules preserve user data), and the unowned
+branch's full-overwrite has no curated data to protect. Net effect:
+shipping the rule without the UI is risk without reward. v2.3.2
+lands both together.
+
+**v2.3.1 (shipped 2026-05-06)** — fast-follow patch from v2.2.14
+UAT, before the larger UI work:
+- ntfy `Title` header unicode crash fix (em-dash + smart quotes etc.
+  folded to ASCII; bodies still UTF-8).
+- Goodreads source-scan multi-retry loop with progress-stall
+  detection. Eric Vall canary went from 174/359 (single retry) to
+  expected near-completion.
+- `PER_AUTHOR_BUDGET_SEC` 15min → 25min for prolific-author headroom.
+
+The originally-planned v2.3.1 (Metadata Manager UI + per-field pull)
+moved to v2.3.2 to keep the patch release small and shippable.
+
+**v2.3.2** — Series Manager UX redesign + Metadata Manager UI +
+per-field pull + source-scan rule (~2-3 weeks):
+
+Series Manager UX rebuild:
+- Replace the vague "promote / demote" verbs with author-list
+  membership semantics. The user's mental model is "this series has
+  these authors", not "merge these rows together". The current
+  per-row checkbox + bulk-Promote-to-shared button feels unclear in
+  practice; drop it.
+- Per-row "Manage members" action opens a modal with:
+  - Current author list (computed via
+    `SELECT DISTINCT author_id FROM books WHERE series_id = X`).
+  - "Add author" affordance — pick an author, pick which of their
+    books to add to this series.
+  - "Remove author" affordance — drops every book by that author
+    from the series in one shot.
+- Auto-promote / auto-demote triggers off the resulting member
+  count: 1 → 2+ flips `series.author_id` to NULL (shared);
+  2+ → 1 flips it back to the single remaining author (per-author).
+- Each series row gets a cover-image preview pulled from the first
+  available book in the series (route through the existing
+  `/api/discovery/covers/` endpoint). Visual continuity at a glance
+  + a "representative" image for the series.
+- Existing rename + delete row actions stay.
+
+Backend additions for the Series Manager rebuild:
+- `POST /api/discovery/series/{sid}/authors` with
+  `{"author_id": N, "book_ids": [...]}` — assign listed books by
+  that author to the series. If the resulting distinct-author count
+  crosses 1 → 2+, set `series.author_id = NULL` automatically and
+  return the new shared state in the response.
+- `DELETE /api/discovery/series/{sid}/authors/{author_id}` —
+  detach every book by that author from the series. If the
+  resulting distinct-author count drops 2+ → 1, set
+  `series.author_id = <last_remaining_author>` automatically.
+- The existing `POST /series/promote` and `POST /series/{sid}/demote`
+  stay in place (still used by the auto-detect path in calibre_sync
+  and as low-level escape hatches), but are no longer the user-facing
+  entry points.
+
+Metadata Manager + Compare panel (carried from originally-planned
+v2.3.1):
+- Compare panel in book sidebar — per-field side-by-side Seshat vs
+  Calibre snapshot vs ABS snapshot, with per-field "← pull from
+  Calibre" / "← pull from ABS" actions.
+- Metadata Manager page replacing Suggestions — three review queues
+  (Calibre diffs, ABS diffs, source-scan diffs), bulk accept/reject.
 - Per-field source toggle (only if Compare panel doesn't cover the
   use case).
+- Sidebar edit UI populates `user_edited_fields` when the user
+  changes a field, otherwise auto-flow eats every edit on next sync.
+- Source-scan write rule rewrite: write-through-on-empty +
+  queue-on-populated for Goodreads/Hardcover/Kobo/IBDB. Lands
+  alongside the UI so reviewer noise has somewhere to go.
 
-**v2.3.2** — push-back (~1 week + research):
+**v2.3.3** — push-back (~1 week + research):
 - ABS push-back via PATCH API.
 - Calibre push-back via calibredb (full image).
 - CWA push-back research; ship if feasible, otherwise document
   as slim-image limitation.
 
-Total estimate: ~4-5 weeks of focused work, validated incrementally.
+Total estimate: ~5-6 weeks from v2.3.0, validated incrementally.
 
 ## Open questions / decisions log
 
@@ -338,5 +407,9 @@ Total estimate: ~4-5 weeks of focused work, validated incrementally.
 | 2026-05-06 | Push-back support | Yes, deferred to v2.3.2; ABS always supported, Calibre full-image yes via calibredb, slim image research-deferred |
 | 2026-05-06 | Bundle Series Manager into v2.3 | Yes, in v2.3.0 |
 | 2026-05-06 | Halo-style shared series detection | Auto-detect from Calibre's books_series_link multi-author signal during sync |
+| 2026-05-06 | Source-scan rule timing | Originally targeted v2.3.1; now v2.3.2 alongside the Metadata Manager UI. Owned-book branch already preserves user data via per-field rules (COALESCE-fill / smart-description / oldest-pub_date); unowned branch has no curated data to protect. Shipping queue routing without the UI to review = noise without value. |
+| 2026-05-06 | v2.3.1 scope (mid-line) | Patch release with ntfy unicode fix + Goodreads multi-retry loop + per-author budget bump, ahead of the larger v2.3.2 UI work. Original v2.3.1 plan (Compare panel + Metadata Manager) shifted to v2.3.2; original v2.3.2 (push-back) shifted to v2.3.3. |
+| 2026-05-06 | Series Manager UX model | Replace "promote / demote" verbs with author-list membership. The mental model is "this series has these authors", driven by per-row "Manage members" → add/remove authors. Promote/demote happens automatically based on the resulting distinct-author count (1 → 2+ = shared; 2+ → 1 = per-author). Drop the multi-row checkbox + bulk-Promote button; rename + delete row actions stay. Cover preview from first book in the series for visual identity. |
+| 2026-05-06 | Series author add/remove semantics | "Add author Y to series X" = assign at least one book by Y to series X (user-selected from a book list). "Remove author Y" = detach every book by Y from series X. The series's author list is implicit, computed from `SELECT DISTINCT author_id FROM books WHERE series_id = X` — no separate `series_authors` table needed. |
 
 Update this table as decisions evolve during implementation.
