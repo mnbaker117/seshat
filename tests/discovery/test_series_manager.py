@@ -311,6 +311,8 @@ class TestMembership:
 
 class TestSharedFilter:
     async def test_shared_true_returns_shared_only(self, client):
+        # Seed a shared series WITH a book — post-v2.3.4.2 the
+        # default list filters out series with zero visible books.
         from app.discovery.database import get_db
         await _seed()
         db = await get_db()
@@ -318,6 +320,10 @@ class TestSharedFilter:
             await db.execute(
                 "INSERT INTO series (id, name, author_id) "
                 "VALUES (902, 'Halo Universe', NULL)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id) "
+                "VALUES (3, 'Universe Book', 101, 902)"
             )
             await db.commit()
         finally:
@@ -335,6 +341,10 @@ class TestSharedFilter:
             await db.execute(
                 "INSERT INTO series (id, name, author_id) "
                 "VALUES (902, 'Halo Universe', NULL)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id) "
+                "VALUES (3, 'Universe Book', 101, 902)"
             )
             await db.commit()
         finally:
@@ -455,6 +465,8 @@ class TestListSearch:
         assert body["series"][0]["book_count"] == 2
 
     async def test_search_total_reflects_filter(self, client):
+        # Series need at least one visible book to appear in the
+        # default list (v2.3.4.2 filter).
         from app.discovery.database import get_db
         db = await get_db()
         try:
@@ -466,6 +478,11 @@ class TestListSearch:
                 "INSERT INTO series (id, name, author_id) VALUES "
                 "(900, 'Halo', 101), "
                 "(901, 'Other', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id) VALUES "
+                "(1, 'Reach', 101, 900), "
+                "(2, 'Different', 101, 901)"
             )
             await db.commit()
         finally:
@@ -534,6 +551,9 @@ class TestListCoverBookId:
         assert s["cover_book_id"] == 2
 
     async def test_null_when_series_has_no_books(self, client):
+        # Empty series are filtered from the default list (v2.3.4.2).
+        # Use include_empty=true to surface them — confirms the cover
+        # falls back to NULL.
         from app.discovery.database import get_db
         db = await get_db()
         try:
@@ -545,6 +565,115 @@ class TestListCoverBookId:
         finally:
             await db.close()
 
-        r = await client.get("/api/discovery/series")
+        r = await client.get("/api/discovery/series?include_empty=true")
         s = next(x for x in r.json()["series"] if x["id"] == 900)
         assert s["cover_book_id"] is None
+
+
+class TestEmptySeriesFilter:
+    """v2.3.4.2: hide series with zero visible books from the default
+    list. Both fully-hidden series (Mark's '2B Trilogy' canary —
+    3 books, all hidden) and orphaned series (no books at all) drop
+    out unless the caller passes include_empty=true."""
+
+    async def test_fully_hidden_series_is_excluded_by_default(self, client):
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'Ann Aguirre', 'Aguirre')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, '2B Trilogy', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id, hidden) VALUES "
+                "(1, 'b1', 101, 900, 1), "
+                "(2, 'b2', 101, 900, 1), "
+                "(3, 'b3', 101, 900, 1)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Default list excludes the all-hidden series.
+        r = await client.get("/api/discovery/series")
+        ids = {s["id"] for s in r.json()["series"]}
+        assert ids == set()
+
+        # include_empty=true surfaces it for cleanup.
+        r2 = await client.get("/api/discovery/series?include_empty=true")
+        ids2 = {s["id"] for s in r2.json()["series"]}
+        assert 900 in ids2
+
+    async def test_orphaned_series_is_excluded_by_default(self, client):
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, 'Orphan', NULL)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series")
+        assert r.json()["total"] == 0
+
+        r2 = await client.get("/api/discovery/series?include_empty=true")
+        assert r2.json()["total"] == 1
+
+    async def test_visible_series_appears_in_both_modes(self, client):
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'A', 'A')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) "
+                "VALUES (900, 'Real', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id) "
+                "VALUES (1, 'Book', 101, 900)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        for qs in ["", "?include_empty=true"]:
+            r = await client.get(f"/api/discovery/series{qs}")
+            assert r.json()["total"] == 1, f"failed for qs={qs!r}"
+
+    async def test_has_missing_implies_visible_books(self, client):
+        # has_missing=true was already tighter than the new default
+        # filter (missing_count > 0 implies book_count > 0). Confirm
+        # the v2.3.4.2 change didn't accidentally collapse both.
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (id, name, sort_name) VALUES "
+                "(101, 'A', 'A')"
+            )
+            await db.execute(
+                "INSERT INTO series (id, name, author_id) VALUES "
+                "(900, 'AllOwned', 101), (901, 'HasMissing', 101)"
+            )
+            await db.execute(
+                "INSERT INTO books (id, title, author_id, series_id, owned) VALUES "
+                "(1, 'a', 101, 900, 1), "
+                "(2, 'b', 101, 901, 0)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/series?has_missing=true")
+        ids = {s["id"] for s in r.json()["series"]}
+        assert ids == {901}

@@ -169,6 +169,26 @@ class TestUserEditedFields:
         assert r.status_code == 200
         assert await _user_edited(bid) == []
 
+    async def test_save_with_mam_url_in_payload_does_not_500(self, client):
+        # v2.3.4.2 regression: the inner mam_url branch reassigned
+        # `current_row` to a 1-col row (mam_url only), shadowing the
+        # outer current_row that the user_edited_fields merge reads
+        # from. The BookSidebar form re-sends every field on every
+        # save, so any save that included mam_url tripped IndexError
+        # on `current_row["user_edited_fields"]`.
+        bid = await _seed_book(description="d1")
+        r = await client.put(
+            f"/api/discovery/books/{bid}",
+            json={
+                "title": "Updated Title",
+                "description": "d1",  # unchanged
+                "mam_url": "",         # form always sends this
+            },
+        )
+        assert r.status_code == 200, r.text
+        # title flagged as user-edited; description unchanged stays out.
+        assert await _user_edited(bid) == ["title"]
+
     async def test_404_on_unknown_book(self, client):
         r = await client.put(
             "/api/discovery/books/99999",

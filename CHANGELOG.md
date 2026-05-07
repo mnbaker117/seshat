@@ -7,6 +7,88 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.4.2] — 2026-05-07
+
+Fast-follow patch from continuing v2.3.4 UAT. Two bug fixes.
+
+### Discovery — book sidebar save 500 on every edit
+
+`PUT /api/discovery/books/{bid}` was returning 500 on every save
+that included `mam_url` in the payload — and the BookSidebar form
+re-sends every field on every save, so this was every save in
+practice. Mark hit it the moment he tried to edit a title to test
+the v2.3.4 Compare panel diff flow.
+
+Root cause: the v2.3.4 user_edited_fields tracking added a SELECT
+at the top of `update_book` storing the row into `current_row`,
+plus a read at the bottom that does
+`current_row["user_edited_fields"]`. Pre-v2.3.4 there was already
+a separate inner block that diffed `mam_url` and reassigned
+`current_row` to a 1-column row of just `mam_url`. The
+reassignment shadowed the outer row; when the bottom merge ran,
+the row didn't have `user_edited_fields` and `sqlite3.Row`
+subscript raised `IndexError: No item with that key`.
+
+Pre-v2.3.4 the shadow was harmless (nothing later read other
+columns). v2.3.4 made it lethal. Fix: rename the inner
+`current_row` to `mam_row` so the outer scope stays intact.
+Regression test added that simulates the BookSidebar save shape
+(title change + mam_url field both in payload).
+
+### Discovery — Series Manager hides empty / fully-hidden series
+
+UAT canary: Mark's "2B Trilogy" by Ann Aguirre showed in the
+Series Manager list with "0 books, 0 owned, 0 missing". The
+series row had three real books linked, but he'd hidden all three
+at some prior point. The list's `book_count` column already
+filtered hidden books (via the `HF` macro), so the row showed
+zeros — but the row itself stayed visible because the HAVING
+clause didn't filter on count.
+
+Same shape applied to genuinely-orphaned series (15 of them in
+Mark's library) — series rows that auto-detect created but no
+book ever linked to. Both kinds of series are unmanageable from
+the Series Manager UI: there's no Manage Members content to act
+on, and the Books page already excludes them.
+
+Fix: list endpoint defaults to `HAVING book_count > 0`, hiding
+both fully-hidden and zero-book series. New `?include_empty=true`
+query param surfaces them for cleanup (delete row action still
+works on every series regardless). `has_missing=true` already
+implies a non-zero count so it's left as the tighter filter when
+set. New `TestEmptySeriesFilter` class covers all four cases.
+
+### Tests
+
+5 new (4 in test_series_manager.py for the empty-series filter +
+1 in test_user_edited_fields.py for the mam_url-shadow regression).
+Three existing tests updated to seed visible books on series they
+expect to surface (the v2.3.4.2 default filter requires it). Suite
+total: **1527 passing** (was 1522 on v2.3.4.1).
+
+### Notes for the user
+
+- **Calibre count clarity.** Your "Seshat shows 2,832 vs Calibre
+  2,844" was not a sync gap — `2832 = 2851 owned − 19 hidden`.
+  Live SQLite count of Calibre's own metadata.db is 2,850 books
+  (CWA may be ahead of the Calibre UI's count). v2.3.4.1's
+  WAL-aware mtime fix is working. The 19 hidden owned books are
+  ones you've explicitly hidden in Seshat over the course of UAT;
+  Calibre's UI count includes them. The two views are now
+  consistent given that distinction.
+
+- **Empty Metadata Manager is intended.** Calibre / ABS / source-
+  scan diff queues are populated only when (a) a sync proposes a
+  change to a field present in `user_edited_fields` (which until
+  this patch you couldn't populate due to the 500), or (b) a
+  full-scan source pass finds a populated-and-different value on
+  a book whose Seshat-live field already has data. With v2.3.4.2
+  the save flow works again; once you do field edits on books
+  that Calibre / ABS will later re-sync, those diffs will show up
+  in the Metadata Manager queue.
+
+---
+
 ## [2.3.4.1] — 2026-05-07
 
 Fast-follow patch — scheduled syncs weren't catching new books on

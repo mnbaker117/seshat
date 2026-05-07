@@ -181,6 +181,7 @@ async def list_series(
     shared: bool = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    include_empty: bool = Query(False),
 ):
     """List series with author info, owned/missing counts, multi-author
     flag, plus a `cover_book_id` per row for thumbnail rendering.
@@ -251,7 +252,21 @@ async def list_series(
         elif shared is False:
             where_clauses.append("s.author_id IS NOT NULL")
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        having_sql = " HAVING missing_count > 0" if has_missing else ""
+        # v2.3.4.2: hide series with zero VISIBLE books from the
+        # default list — captures both fully-hidden series ("2B
+        # Trilogy" — Mark hid all 3 books, the row stayed at
+        # book_count=0) and genuinely-orphaned series with no
+        # books at all (auto-detect or rename leftovers). Pass
+        # `include_empty=true` to surface them for cleanup.
+        # `has_missing` already implies book_count > 0 since
+        # missing_count counts visible books too — keep it as the
+        # tighter filter when set.
+        having_clauses: list[str] = []
+        if has_missing:
+            having_clauses.append("missing_count > 0")
+        elif not include_empty:
+            having_clauses.append("book_count > 0")
+        having_sql = (" HAVING " + " AND ".join(having_clauses)) if having_clauses else ""
         d = "DESC" if sort_dir == "desc" else "ASC"
         order_sql = {
             "missing": f" ORDER BY missing_count {d}",

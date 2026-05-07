@@ -512,10 +512,16 @@ async def update_book(bid: int, data: dict = Body(...)):
         # user genuinely changed the URL.
         if "mam_url" in data:
             incoming = (data["mam_url"] or "").strip()
-            current_row = await (await db.execute(
+            # Don't shadow the outer `current_row` — the v2.3.4
+            # user_edited_fields merge at the bottom of this handler
+            # reads the title/description/etc. fields from it. Pre-
+            # v2.3.4 this block reassigned `current_row` to a 1-col
+            # row of just `mam_url`, which was harmless until the
+            # outer reader needed other columns. v2.3.4.2 fast-follow.
+            mam_row = await (await db.execute(
                 "SELECT mam_url FROM books WHERE id=?", (bid,)
             )).fetchone()
-            current = ((current_row["mam_url"] if current_row else "") or "").strip()
+            current = ((mam_row["mam_url"] if mam_row else "") or "").strip()
             if incoming != current:
                 if incoming:
                     mam_match = re.match(r'https?://(?:www\.)?myanonamouse\.net/t/(\d+)', incoming)
