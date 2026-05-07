@@ -11,7 +11,7 @@
 // shared via a hook. Kept additive while we iterate; eligible for
 // a useBooksPageData() extraction in a follow-up.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { useTheme } from "../theme";
 import { usePersist } from "../hooks/usePersist";
 import { BookSidebar } from "../components/BookSidebar";
@@ -143,11 +143,11 @@ export default function MobileBooksPage({
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  const onAction = async (act: BookAction, id: number) => {
-    if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
-    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide`);
-    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
-    if (act === "delete") await api.del(`/discovery/books/${id}`);
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
+    if (act === "hide") await api.post(`/discovery/books/${id}/hide${slugQuery(slug)}`);
+    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide${slugQuery(slug)}`);
+    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss${slugQuery(slug)}`);
+    if (act === "delete") await api.del(`/discovery/books/${id}${slugQuery(slug)}`);
     await load(pg);
   };
 

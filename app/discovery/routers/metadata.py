@@ -71,15 +71,20 @@ def _parse_user_edited(raw: str | None) -> list[str]:
 
 
 @router.get("/books/{bid}/compare")
-async def book_compare(bid: int):
+async def book_compare(bid: int, slug: str | None = Query(None)):
     """Return Seshat-live + Calibre snapshot + ABS snapshot for one
     book, side-by-side. Per-field `calibre_diff` / `abs_diff` flags
     let the UI highlight cells that differ from Seshat-live.
 
     Snapshot rows may be missing (book never came from Calibre / ABS)
     — those columns return null and `*_diff` is false everywhere.
+
+    `slug` query param routes the read to a specific library —
+    snapshots are per-library so passing the book's library_slug
+    avoids reading a different library's row that happens to share
+    the numeric id (see books.update_book for the same rationale).
     """
-    db = await get_db()
+    db = await get_db(slug)
     try:
         book_row = await (await db.execute(
             "SELECT * FROM books WHERE id = ?", (bid,),
@@ -87,6 +92,19 @@ async def book_compare(bid: int):
         if not book_row:
             raise HTTPException(404, f"book {bid} not found")
         book = dict(book_row)
+        # Resolve Seshat-live series name via the series table — the
+        # books column is series_id (FK), but the snapshot tables
+        # store series_name as text. The Compare panel surfaces the
+        # name so the user can pull a Calibre/ABS series back to
+        # Seshat-live (Mark's UAT 2026-05-07: post-recovery he had
+        # to re-attach the series manually because Compare didn't
+        # show it).
+        seshat_series_name: str | None = None
+        if book.get("series_id"):
+            srow = await (await db.execute(
+                "SELECT name FROM series WHERE id = ?", (book["series_id"],),
+            )).fetchone()
+            seshat_series_name = srow["name"] if srow else None
         cal_row = await (await db.execute(
             "SELECT * FROM books_calibre_snapshot WHERE book_id = ?", (bid,),
         )).fetchone()
@@ -123,6 +141,40 @@ async def book_compare(bid: int):
                 "user_edited": books_col in user_edited,
             })
 
+        # v2.3.4.4: synthetic Series row — books table has series_id,
+        # snapshots have series_name. Compare displays the resolved
+        # name; pull resolves snapshot's name → series_id via
+        # find-or-create. Inserted right after the Series # row so
+        # the two related fields render together in the UI.
+        cal_series = cal.get("series_name") if cal else None
+        abs_series = abs_.get("series_name") if abs_ else None
+        if not (
+            seshat_series_name in (None, "")
+            and cal_series in (None, "")
+            and abs_series in (None, "")
+        ):
+            series_field = {
+                "field": "series_name",
+                "label": "Series",
+                "seshat": seshat_series_name,
+                "calibre": cal_series,
+                "abs": abs_series,
+                "calibre_diff": cal is not None
+                    and cal_series != seshat_series_name,
+                "abs_diff": abs_ is not None
+                    and abs_series != seshat_series_name,
+                "user_edited": "series_name" in user_edited,
+            }
+            # Insert just before series_index for a logical UI order.
+            inserted = False
+            for i, f in enumerate(fields_out):
+                if f["field"] == "series_index":
+                    fields_out.insert(i, series_field)
+                    inserted = True
+                    break
+            if not inserted:
+                fields_out.append(series_field)
+
         return {
             "book_id": bid,
             "user_edited_fields": user_edited,
@@ -135,7 +187,7 @@ async def book_compare(bid: int):
 
 
 @router.post("/books/{bid}/pull")
-async def book_pull(bid: int, payload: dict = Body(...)):
+async def book_pull(bid: int, payload: dict = Body(...), slug: str | None = Query(None)):
     """Pull one or more snapshot fields into Seshat-live.
 
     Request body:
@@ -170,11 +222,12 @@ async def book_pull(bid: int, payload: dict = Body(...)):
     else:
         col_map = {b: a for b, _, a, _ in COMPARE_FIELDS if a is not None}
 
-    db = await get_db()
+    db = await get_db(slug)
     try:
-        # 404 the book early.
+        # 404 the book early. Read author_id too for series resolution.
         b_row = await (await db.execute(
-            "SELECT id, user_edited_fields FROM books WHERE id = ?", (bid,),
+            "SELECT id, author_id, user_edited_fields FROM books WHERE id = ?",
+            (bid,),
         )).fetchone()
         if not b_row:
             raise HTTPException(404, f"book {bid} not found")
@@ -192,6 +245,38 @@ async def book_pull(bid: int, payload: dict = Body(...)):
         vals: list = []
         applied: list[str] = []
         for f in fields:
+            # v2.3.4.4: special-case series_name — books column is
+            # series_id (FK), snapshot has series_name (text). Resolve
+            # the snapshot name to a series row (find-or-create
+            # author-scoped) and write series_id.
+            if f == "series_name":
+                snap_name = (snap.get("series_name") or "").strip()
+                if not snap_name:
+                    # Snapshot has no series — clear the link.
+                    sets.append("series_id=?")
+                    vals.append(None)
+                    applied.append(f)
+                    continue
+                # Find or create author-scoped series row. Mirrors the
+                # lookup used by `update_book` and the calibre_sync
+                # pass — author_id matches the book's primary author.
+                aid = b_row["author_id"]
+                srow = await (await db.execute(
+                    "SELECT id FROM series WHERE LOWER(name) = LOWER(?) "
+                    "AND author_id = ?", (snap_name, aid),
+                )).fetchone()
+                if srow:
+                    sid = srow["id"]
+                else:
+                    cur = await db.execute(
+                        "INSERT INTO series (name, author_id) VALUES (?, ?)",
+                        (snap_name, aid),
+                    )
+                    sid = cur.lastrowid
+                sets.append("series_id=?")
+                vals.append(sid)
+                applied.append(f)
+                continue
             if f not in col_map:
                 raise HTTPException(
                     400, f"field '{f}' not pullable from {source}",

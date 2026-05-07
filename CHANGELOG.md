@@ -7,6 +7,123 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.4.4] — 2026-05-07
+
+UAT-driven multi-library safety + Compare panel polish.
+
+### Discovery — slug-routing on every per-book mutation
+
+Mark's UAT canary: he edited an audiobook's MAM URL in the sidebar.
+The save returned 200 but appeared to do nothing. Closer look: the
+PUT landed on the **Calibre ebook** with the same numeric id (his
+calibre-library and abs-audio-library both had a row at id=68 — the
+ebook and audiobook of "Accidental Champion 5", and "Horizon" the
+ebook by Tabitha Lord at calibre_id=70). Calibre's metadata.db
+(authoritative for ebooks) was untouched, but Seshat's working copy
+of Calibre book 68 ("Horizon") had its title, description,
+pub_date, isbn, series_id, and series_index overwritten with the
+audiobook's values. Manual recovery: cleared user_edited_fields,
+restored fields from Calibre's metadata.db at calibre_id=70, fixed
+the audiobook's MAM URL on the right library row.
+
+The dual-storage architecture from v2.3.0 saved this — Calibre
+remained the authoritative source and we could rebuild the Seshat
+copy from it. Push-back (v2.3.5) is the only path that would have
+written back to Calibre proper, and that's user-triggered.
+
+Fix: every per-book mutation endpoint accepts an optional `slug`
+query param. When provided, the backend routes to that library's
+DB instead of the active library:
+
+  - PUT  /books/{bid}                         (the canary path)
+  - POST /books/{bid}/{hide,unhide,dismiss}
+  - DELETE /books/{bid}
+  - POST /books/{bid}/source-urls
+  - DELETE /books/{bid}/source-urls/{source}
+  - POST /books/bulk-{hide,dismiss,delete}
+  - GET  /books/{bid}/compare
+  - POST /books/{bid}/pull
+
+Frontend: `BookSidebar` derives a `slugQs` from `book.library_slug`
+and appends it to every mutation. `BookActionHandler` signature
+gained an optional `slug` arg; the eight `onAction` implementations
+across desktop + mobile pages were updated to pass it through. Bulk
+handlers in `DiscAuthorDetailPage` / `MobileAuthorDetailPage` route
+via the page's `active_library_slug`. New `slugQuery(slug?)` helper
+in `api.ts` keeps the conditional `?slug=...` suffix in one place.
+
+Self-healing: backwards compatible. Single-library installs and
+legacy callers without `library_slug` fall through to the active
+library — same behavior as before. Multi-library callers route
+correctly.
+
+### Discovery — diff comparison is type-aware
+
+The BookSidebar form re-sends every field on every save. The
+v2.3.4 user_edited_fields tracking did `v != current_row[k]` which
+tripped on type roundtrips: `"1.0"` (form-string) vs `1.0` (DB
+REAL) compared as different, and `""` (form-empty) vs `None`
+(DB-NULL) compared as different. Mark's book 68 corruption
+ended up with 5 false-positive flags in `user_edited_fields`
+beyond the one real `title` change. New `_norm_for_diff(field, v)`
+helper normalizes both sides before comparing — empty strings
+become None; series_index gets float-coerced. Pure UI re-saves
+of unchanged data no longer flag fields as user-edited.
+
+### Discovery — Compare panel surfaces series name
+
+Pre-v2.3.4.4 the Compare panel showed "Series #" (the index) but
+not the series name itself. The books column is `series_id` (FK)
+while the snapshot tables store `series_name` (text), so a direct
+column-to-column comparison didn't apply. After Mark's recovery
+of book 68, he had to re-attach the Horizon series manually
+because Compare wouldn't show or pull it.
+
+Fix: the Compare endpoint now resolves `books.series_id` via JOIN
+to `series.name` and adds a synthetic "Series" row alongside the
+existing rows. The Pull endpoint special-cases `field=="series_name"`:
+finds-or-creates an author-scoped series row by name (mirroring
+the calibre_sync upsert), then writes `books.series_id`. Empty
+snapshot series_name → clears `books.series_id` to NULL.
+
+### UI/UX — toasts on save + pull
+
+`saveEdit` in BookSidebar fires `toast.success("Edit saved")`
+after a successful save. `CompareModal.pull` fires
+`toast.success("Pulled <field> from Calibre|ABS")` after each
+successful pull. Mark's UAT request — until v2.3.4.4 the only
+feedback for a successful save was the form closing, which made
+it ambiguous whether anything actually saved.
+
+### Tests
+
+5 new across 2 files:
+
+- `test_metadata_compare.py` (+4) — TestCompareSeries: synthetic
+  series row appears in the Compare response with the right
+  diff flags; pull series_name creates a series row + links the
+  book; pull series_name reuses an existing author-scoped series
+  row instead of creating a duplicate; pull empty series clears
+  books.series_id.
+- `test_user_edited_fields.py` (+1) — type-aware diff regression:
+  series_index "1.0" string vs 1.0 REAL is NOT flagged; "" vs
+  NULL on expected_date is NOT flagged.
+
+Suite total: **1536 passing** (was 1531 on v2.3.4.3).
+
+### Notes
+
+- Single-library installs are unaffected — the `slug` param defaults
+  to None which routes to the active library, matching pre-v2.3.4.4
+  behavior.
+- The hide/unhide/delete onAction-handler signature is now `(action,
+  id, slug?)`. Existing callsites that pass only `(action, id)` keep
+  working but won't be slug-aware until updated to pass the third arg.
+  All call sites in this repo were updated; external consumers (none
+  in v2.3.x) would need to extend.
+
+---
+
 ## [2.3.4.3] — 2026-05-07
 
 UAT polish — bulk-action toast grammar + Hidden page owned filter.

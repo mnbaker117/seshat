@@ -5,7 +5,7 @@
 // the author exists in multiple libraries, then per-series sections
 // (books load on first expand) and a standalone-books section.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { useTheme } from "../theme";
 import { fmtDuration, fmtNum } from "../lib/format";
 import { BookSidebar } from "../components/BookSidebar";
@@ -328,9 +328,9 @@ export default function MobileAuthorDetailPage({
     }, 200);
   };
 
-  const onAction = async (act: BookAction, id: number) => {
-    if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
-    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
+    if (act === "hide") await api.post(`/discovery/books/${id}/hide${slugQuery(slug)}`);
+    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss${slugQuery(slug)}`);
     await loadA();
   };
 
@@ -372,7 +372,10 @@ export default function MobileAuthorDetailPage({
         deleted?: number;
         skipped?: number;
         error?: string;
-      }>(`/discovery/books/bulk-${kind}`, { book_ids: ids });
+      }>(
+        `/discovery/books/bulk-${kind}${slugQuery(a?.active_library_slug)}`,
+        { book_ids: ids },
+      );
       if (r.error) {
         toast.error(r.error);
       } else if (kind === "delete") {

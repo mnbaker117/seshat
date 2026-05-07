@@ -1,7 +1,7 @@
 // Mobile-native hidden books page. Tiny — just a card list of
 // hidden books with the Unhide action surfaced via the BookSidebar.
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { useTheme } from "../theme";
 import { BookSidebar } from "../components/BookSidebar";
 import { MobileBookCard, MobileBackButton } from "../components/mobile";
@@ -39,8 +39,8 @@ export default function MobileHiddenPage({ onNav }: { onNav: NavFn }) {
     }, 200);
   };
 
-  const onAction = async (act: BookAction, id: number) => {
-    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide`);
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
+    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide${slugQuery(slug)}`);
     await load();
   };
 

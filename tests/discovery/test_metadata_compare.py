@@ -405,3 +405,120 @@ class TestQueueBulk:
         # Per-id results so the caller can resolve.
         statuses = {row["id"]: row["ok"] for row in body["results"]}
         assert statuses == {valid: True, 9999: False}
+
+
+# ── v2.3.4.4: series_name on Compare + pull resolves series_id ───────
+
+
+class TestCompareSeries:
+    async def test_compare_surfaces_series_name(self, client):
+        from app.discovery.database import get_db
+        await _seed_book()
+        await _seed_calibre_snapshot()
+        # Add Calibre series_name to the snapshot directly.
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE books_calibre_snapshot SET series_name=?, series_index=? "
+                "WHERE book_id=1", ("Horizon", 1.0),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.get("/api/discovery/books/1/compare")
+        body = r.json()
+        # synthetic series_name row should appear with calibre value.
+        sf = next(f for f in body["fields"] if f["field"] == "series_name")
+        assert sf["seshat"] is None  # book has no series_id yet
+        assert sf["calibre"] == "Horizon"
+        assert sf["calibre_diff"] is True
+        assert sf["label"] == "Series"
+
+    async def test_pull_series_name_creates_series_and_links_book(self, client):
+        from app.discovery.database import get_db
+        await _seed_book()
+        await _seed_calibre_snapshot()
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE books_calibre_snapshot SET series_name=? WHERE book_id=1",
+                ("Horizon",),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        r = await client.post(
+            "/api/discovery/books/1/pull",
+            json={"source": "calibre", "fields": ["series_name"]},
+        )
+        assert r.status_code == 200, r.text
+
+        # Series row was created and book is linked.
+        row = await _book_row(1)
+        assert row["series_id"] is not None
+        db = await get_db()
+        try:
+            srow = await (await db.execute(
+                "SELECT name, author_id FROM series WHERE id=?",
+                (row["series_id"],),
+            )).fetchone()
+        finally:
+            await db.close()
+        assert srow["name"] == "Horizon"
+        assert srow["author_id"] == 101  # the seeded author
+
+    async def test_pull_series_name_reuses_existing_series_row(self, client):
+        from app.discovery.database import get_db
+        await _seed_book()
+        await _seed_calibre_snapshot()
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE books_calibre_snapshot SET series_name=? WHERE book_id=1",
+                ("Horizon",),
+            )
+            # Pre-existing series row for the same author + name.
+            cur = await db.execute(
+                "INSERT INTO series (name, author_id) VALUES (?, ?)",
+                ("Horizon", 101),
+            )
+            existing_sid = cur.lastrowid
+            await db.commit()
+        finally:
+            await db.close()
+
+        await client.post(
+            "/api/discovery/books/1/pull",
+            json={"source": "calibre", "fields": ["series_name"]},
+        )
+        row = await _book_row(1)
+        assert row["series_id"] == existing_sid
+
+    async def test_pull_empty_series_clears_link(self, client):
+        # Snapshot has no series → pulling sets books.series_id = NULL.
+        from app.discovery.database import get_db
+        await _seed_book()
+        await _seed_calibre_snapshot()
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "INSERT INTO series (name, author_id) VALUES (?, ?)",
+                ("Old Series", 101),
+            )
+            old_sid = cur.lastrowid
+            await db.execute(
+                "UPDATE books SET series_id=? WHERE id=1", (old_sid,),
+            )
+            # snapshot has no series_name (default NULL).
+            await db.commit()
+        finally:
+            await db.close()
+
+        await client.post(
+            "/api/discovery/books/1/pull",
+            json={"source": "calibre", "fields": ["series_name"]},
+        )
+        row = await _book_row(1)
+        assert row["series_id"] is None

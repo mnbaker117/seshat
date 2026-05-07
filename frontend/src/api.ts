@@ -94,3 +94,15 @@ export const api = {
     );
   },
 };
+
+// v2.3.4.4: helper for slug-aware per-book mutations. Multi-library
+// installs (Calibre + ABS) can have the same numeric book id in two
+// libraries; without `?slug=` the backend uses the active library
+// which can write to a different library's row (Mark's UAT
+// 2026-05-07: an audiobook MAM URL edit landed on the same-id
+// Calibre ebook). Append the result to any `/discovery/books/{id}`
+// URL — empty string when slug is undefined keeps single-library
+// callers working unchanged.
+export function slugQuery(slug?: string | null): string {
+  return slug ? `?slug=${encodeURIComponent(slug)}` : "";
+}

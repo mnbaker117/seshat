@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTheme } from "../theme";
 import type { Theme } from "../theme";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
@@ -198,12 +198,12 @@ function DesktopBooksPage({
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  const onAction = async (act: BookAction, id: number) => {
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
     const scrollY = window.scrollY;
-    if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
-    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide`);
-    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
-    if (act === "delete") await api.del(`/discovery/books/${id}`);
+    if (act === "hide") await api.post(`/discovery/books/${id}/hide${slugQuery(slug)}`);
+    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide${slugQuery(slug)}`);
+    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss${slugQuery(slug)}`);
+    if (act === "delete") await api.del(`/discovery/books/${id}${slugQuery(slug)}`);
     await load(pg);
     setTimeout(() => window.scrollTo(0, scrollY), 100);
   };

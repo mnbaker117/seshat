@@ -48,7 +48,11 @@ export type NavFn = (page: string, arg?: number | string | null) => void;
 // BookViews emit upward. Centralized so a renamed/added action is
 // caught at every consumer instead of silently ignored.
 export type BookAction = "hide" | "unhide" | "dismiss" | "delete";
-export type BookActionHandler = (action: BookAction, bookId: number) => void | Promise<void>;
+// v2.3.4.4: optional `slug` arg routes the mutation to a specific
+// library DB. Required in multi-library installs (Calibre + ABS) to
+// avoid writing to a different library's row that happens to share
+// the numeric id. Pages built on a single library may omit it.
+export type BookActionHandler = (action: BookAction, bookId: number, slug?: string) => void | Promise<void>;
 
 // Bulk-send callback used by the MAM page + book sidebar to push
 // books into the pipeline. Returns void; errors surface as toasts.

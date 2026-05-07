@@ -169,6 +169,41 @@ class TestUserEditedFields:
         assert r.status_code == 200
         assert await _user_edited(bid) == []
 
+    async def test_form_resending_unchanged_strings_does_not_flag(self, client):
+        # v2.3.4.4 type-aware diff regression. The BookSidebar form
+        # re-sends every field on every save; for series_index the
+        # form sends "1.0" (string) while the DB stores 1.0 (REAL).
+        # Pre-v2.3.4.4 these compared as different (str != float) and
+        # series_index got falsely flagged as user-edited (Mark's
+        # book 68 incident — 5 false-positive flags from the audiobook
+        # save). The fix normalizes both sides before comparing.
+        from app.discovery.database import get_db
+        bid = await _seed_book(description="Original")
+        # Set series_index = 1.0 on the seeded book.
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE books SET series_index=?, expected_date=? WHERE id=?",
+                (1.0, None, bid),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Form re-sends series_index as the string "1.0" and an empty
+        # expected_date — neither is an actual user change.
+        r = await client.put(
+            f"/api/discovery/books/{bid}",
+            json={
+                "description": "Original",  # unchanged
+                "series_index": "1.0",       # string roundtrip
+                "expected_date": "",          # empty string vs stored NULL
+            },
+        )
+        assert r.status_code == 200, r.text
+        # No fields should have been flagged.
+        assert await _user_edited(bid) == []
+
     async def test_save_with_mam_url_in_payload_does_not_500(self, client):
         # v2.3.4.2 regression: the inner mam_url branch reassigned
         # `current_row` to a 1-col row (mam_url only), shadowing the

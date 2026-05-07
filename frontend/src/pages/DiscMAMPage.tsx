@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "../theme";
 import type { Theme } from "../theme";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
@@ -362,10 +362,10 @@ function DesktopMAMPage({ onNav }: { onNav: NavFn }) {
     }
   };
 
-  const onAction = async (act: BookAction, id: number) => {
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
     const scrollY = window.scrollY;
-    if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
-    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
+    if (act === "hide") await api.post(`/discovery/books/${id}/hide${slugQuery(slug)}`);
+    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss${slugQuery(slug)}`);
     await load(pg);
     setTimeout(() => window.scrollTo(0, scrollY), 100);
   };

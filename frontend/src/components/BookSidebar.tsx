@@ -125,6 +125,14 @@ export function BookSidebar({
   // so iPad portrait doesn't get the cramped 420px side panel. Width
   // alone misses iPad landscape (>1024px); pointer:coarse covers it.
   const isMobile = useMobileCodepath(vp);
+  // v2.3.4.4: slug query suffix for every per-book mutation.
+  // Without it the backend uses the active library, which can write
+  // to a different library's row that happens to share the numeric
+  // book id (Mark's UAT canary 2026-05-07: an audiobook MAM URL
+  // edit landed on the same-id Calibre ebook row).
+  const slugQs = book.library_slug
+    ? `?slug=${encodeURIComponent(book.library_slug)}`
+    : "";
   const [mounted, setMounted] = useState(false);
   const [editing, setEditing] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
@@ -264,7 +272,7 @@ export function BookSidebar({
         action === "approve"
           ? { mam_url: book.mam_url || "" }
           : { mam_url: "" };
-      await api.put(`/discovery/books/${book.id}`, payload);
+      await api.put(`/discovery/books/${book.id}${slugQs}`, payload);
       toast.success(action === "approve" ? "Approved as Found" : "Removed");
       // Close immediately — the sidebar's book prop won't refresh in
       // place, and awaiting onEdit() before unlocking the UI made the
@@ -380,7 +388,8 @@ export function BookSidebar({
   const saveEdit = async () => {
     setSaving(true);
     try {
-      await api.put(`/discovery/books/${book.id}`, ef);
+      await api.put(`/discovery/books/${book.id}${slugQs}`, ef);
+      toast.success("Edit saved");
       setEditing(false);
       if (onEdit) await onEdit();
     } catch (e) {
@@ -850,6 +859,7 @@ export function BookSidebar({
             </div>
             <SourceUrlEditor
               bookId={book.id}
+              librarySlug={book.library_slug}
               sourceUrlJson={book.source_url}
               onChange={onEdit}
               theme={t}
@@ -1741,7 +1751,7 @@ export function BookSidebar({
             size="sm"
             variant="accent"
             onClick={() => {
-              onAction("unhide" as BookAction, book.id);
+              onAction("unhide" as BookAction, book.id, book.library_slug);
               onClose();
             }}
           >
@@ -1763,7 +1773,7 @@ export function BookSidebar({
           <Btn
             size="sm"
             onClick={() => {
-              onAction("dismiss" as BookAction, book.id);
+              onAction("dismiss" as BookAction, book.id, book.library_slug);
               onClose();
             }}
           >
@@ -1772,7 +1782,7 @@ export function BookSidebar({
           <Btn
             size="sm"
             onClick={() => {
-              onAction("hide" as BookAction, book.id);
+              onAction("hide" as BookAction, book.id, book.library_slug);
               onClose();
             }}
           >
@@ -1786,7 +1796,7 @@ export function BookSidebar({
                   `Delete "${book.title}" permanently? This cannot be undone.`,
                 )
               ) {
-                onAction("delete" as BookAction, book.id);
+                onAction("delete" as BookAction, book.id, book.library_slug);
                 onClose();
               }
             }}
@@ -1818,6 +1828,7 @@ export function BookSidebar({
         <CompareModal
           bookId={book.id}
           bookTitle={book.title}
+          librarySlug={book.library_slug}
           onClose={() => setCompareOpen(false)}
           onChanged={() => {
             // Refresh the parent list so the sidebar's `book` prop
@@ -1848,6 +1859,7 @@ export function BookSidebar({
 
 interface SourceUrlEditorProps {
   bookId: number;
+  librarySlug?: string;
   sourceUrlJson?: string | null;
   onChange?: () => Promise<void> | void;
   theme: ReturnType<typeof useTheme>;
@@ -1891,8 +1903,11 @@ function parseSourceUrlField(raw: string | null | undefined): Record<string, str
 }
 
 function SourceUrlEditor({
-  bookId, sourceUrlJson, onChange, theme: t, ist,
+  bookId, librarySlug, sourceUrlJson, onChange, theme: t, ist,
 }: SourceUrlEditorProps) {
+  const slugQs = librarySlug
+    ? `?slug=${encodeURIComponent(librarySlug)}`
+    : "";
   const [urls, setUrls] = useState<Record<string, string>>(() =>
     parseSourceUrlField(sourceUrlJson),
   );
@@ -1915,7 +1930,7 @@ function SourceUrlEditor({
     setErr(null);
     try {
       const r = await api.post<{ source_url: Record<string, string> }>(
-        `/discovery/books/${bookId}/source-urls`,
+        `/discovery/books/${bookId}/source-urls${slugQs}`,
         { url },
       );
       setUrls(r.source_url || {});
@@ -1936,7 +1951,7 @@ function SourceUrlEditor({
     setErr(null);
     try {
       const r = await api.del<{ source_url: Record<string, string> }>(
-        `/discovery/books/${bookId}/source-urls/${encodeURIComponent(sourceName)}`,
+        `/discovery/books/${bookId}/source-urls/${encodeURIComponent(sourceName)}${slugQs}`,
       );
       setUrls(r.source_url || {});
       if (onChange) await onChange();

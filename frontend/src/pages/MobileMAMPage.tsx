@@ -7,7 +7,7 @@
 //   - Bulk-select mode (admin-y; revisit in Phase 6)
 // Send-to-pipeline is still available per-card via MobileBookCard.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { useTheme } from "../theme";
 import { usePersist } from "../hooks/usePersist";
 import { BookSidebar } from "../components/BookSidebar";
@@ -265,9 +265,9 @@ export default function MobileMAMPage({ onNav }: { onNav: NavFn }) {
     }, 200);
   };
 
-  const onAction = async (act: BookAction, id: number) => {
-    if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
-    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
+    if (act === "hide") await api.post(`/discovery/books/${id}/hide${slugQuery(slug)}`);
+    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss${slugQuery(slug)}`);
     await load(pg);
   };
 

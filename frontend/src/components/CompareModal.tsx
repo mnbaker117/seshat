@@ -12,7 +12,8 @@
 
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme";
-import { api, ApiError } from "../api";
+import { api, ApiError, slugQuery } from "../api";
+import { toast } from "../lib/toast";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 
@@ -38,6 +39,7 @@ interface CompareResponse {
 interface CompareModalProps {
   bookId: number;
   bookTitle: string;
+  librarySlug?: string;
   onClose: () => void;
   onChanged: () => void; // parent refresh hook (sidebar re-fetches the book)
 }
@@ -45,17 +47,19 @@ interface CompareModalProps {
 export function CompareModal({
   bookId,
   bookTitle,
+  librarySlug,
   onClose,
   onChanged,
 }: CompareModalProps) {
   const t = useTheme();
+  const slugQs = slugQuery(librarySlug);
   const [data, setData] = useState<CompareResponse | null>(null);
   const [busy, setBusy] = useState<string>(""); // `${field}|${source}`
   const [err, setErr] = useState("");
 
   const refresh = () => {
     api
-      .get<CompareResponse>(`/discovery/books/${bookId}/compare`)
+      .get<CompareResponse>(`/discovery/books/${bookId}/compare${slugQs}`)
       .then(setData)
       .catch((e) => {
         setErr(`Failed to load: ${(e as Error).message}`);
@@ -76,10 +80,13 @@ export function CompareModal({
     setBusy(key);
     setErr("");
     try {
-      await api.post(`/discovery/books/${bookId}/pull`, {
+      await api.post(`/discovery/books/${bookId}/pull${slugQs}`, {
         source,
         fields: [field],
       });
+      toast.success(
+        `Pulled ${field} from ${source === "calibre" ? "Calibre" : "ABS"}`,
+      );
       onChanged();
       refresh();
     } catch (e) {

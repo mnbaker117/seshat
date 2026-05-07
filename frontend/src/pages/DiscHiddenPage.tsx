@@ -7,7 +7,7 @@
 // them.
 import { useState, useEffect } from "react";
 import { useTheme } from "../theme";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
 import { BList } from "../components/BookViews";
@@ -65,9 +65,9 @@ function DesktopHiddenPage({ onNav }: { onNav: NavFn }) {
     }
   };
 
-  const onAction = async (act: BookAction, id: number) => {
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
     const scrollY = window.scrollY;
-    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide`);
+    if (act === "unhide") await api.post(`/discovery/books/${id}/unhide${slugQuery(slug)}`);
     await load();
     setTimeout(() => window.scrollTo(0, scrollY), 100);
   };

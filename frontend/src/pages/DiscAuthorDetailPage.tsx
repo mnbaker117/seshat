@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "../theme";
 import type { Theme } from "../theme";
-import { api } from "../api";
+import { api, slugQuery } from "../api";
 import { Ic } from "../icons";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
@@ -721,11 +721,11 @@ function DesktopAuthorDetailPage({
       window.removeEventListener("seshat:scan-completed", onDone);
   }, [loadA]);
 
-  const onAction = async (act: BookAction, id: number) => {
+  const onAction = async (act: BookAction, id: number, slug?: string) => {
     const scrollY = window.scrollY;
-    if (act === "hide") await api.post(`/discovery/books/${id}/hide`);
-    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss`);
-    if (act === "delete") await api.del(`/discovery/books/${id}`);
+    if (act === "hide") await api.post(`/discovery/books/${id}/hide${slugQuery(slug)}`);
+    if (act === "dismiss") await api.post(`/discovery/books/${id}/dismiss${slugQuery(slug)}`);
+    if (act === "delete") await api.del(`/discovery/books/${id}${slugQuery(slug)}`);
     await loadA();
     setTimeout(() => window.scrollTo(0, scrollY), 100);
   };
@@ -770,7 +770,10 @@ function DesktopAuthorDetailPage({
         deleted?: number;
         skipped?: number;
         error?: string;
-      }>(`/discovery/books/bulk-${kind}`, { book_ids: ids });
+      }>(
+        `/discovery/books/bulk-${kind}${slugQuery(a?.active_library_slug)}`,
+        { book_ids: ids },
+      );
       if (r.error) {
         toast.error(r.error);
       } else if (kind === "delete") {

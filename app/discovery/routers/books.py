@@ -371,8 +371,15 @@ async def _series_id_for_book(db, bid: int) -> int | None:
 
 
 @router.post("/books/{bid}/hide")
-async def hide(bid: int):
-    db = await get_db()
+async def hide(bid: int, slug: str | None = Query(None)):
+    """`slug=` routes the write to a specific library. Without it the
+    active library is used — but in a multi-library install (Calibre
+    + ABS) a book id is per-library and not globally unique, so the
+    sidebar should always pass the book's `library_slug` to avoid
+    silently mutating a different library's row that happens to share
+    the id (Mark's UAT canary 2026-05-07: edited an audiobook's
+    mam_url, write landed on the same-id Calibre book instead)."""
+    db = await get_db(slug)
     try:
         sid = await _series_id_for_book(db, bid)
         await db.execute("UPDATE books SET hidden=1 WHERE id=?", (bid,))
@@ -388,8 +395,9 @@ async def hide(bid: int):
 
 
 @router.post("/books/{bid}/unhide")
-async def unhide(bid: int):
-    db = await get_db()
+async def unhide(bid: int, slug: str | None = Query(None)):
+    """See `hide` for slug-routing rationale."""
+    db = await get_db(slug)
     try:
         sid = await _series_id_for_book(db, bid)
         await db.execute("UPDATE books SET hidden=0 WHERE id=?", (bid,))
@@ -447,8 +455,9 @@ async def get_hidden(search: str = Query(None), sort: str = Query("title"), sort
 
 
 @router.post("/books/{bid}/dismiss")
-async def dismiss(bid: int):
-    db = await get_db()
+async def dismiss(bid: int, slug: str | None = Query(None)):
+    """See `hide` for slug-routing rationale."""
+    db = await get_db(slug)
     try:
         await db.execute("UPDATE books SET is_new=0 WHERE id=?", (bid,))
         await db.commit()
@@ -458,8 +467,19 @@ async def dismiss(bid: int):
 
 
 @router.put("/books/{bid}")
-async def update_book(bid: int, data: dict = Body(...)):
-    db = await get_db()
+async def update_book(bid: int, data: dict = Body(...), slug: str | None = Query(None)):
+    """Update fields on a book row.
+
+    `slug` query param routes the write to a specific library. The
+    sidebar should always pass it (the book carries a `library_slug`
+    in multi-library mode) — without it the active library is used,
+    which can write to a different library's row that happens to
+    share the numeric id (Mark's UAT canary 2026-05-07: edited an
+    audiobook's mam_url, write landed on the same-id Calibre row,
+    overwriting title/description/pub_date/etc. with audiobook
+    values until manually recovered).
+    """
+    db = await get_db(slug)
     try:
         # v2.3.4: track which fields the user actually changed so the
         # auto-flow logic in `_apply_calibre_diff` /
@@ -484,6 +504,26 @@ async def update_book(bid: int, data: dict = Body(...)):
             raise HTTPException(404, f"book {bid} not found")
         edited_now: set[str] = set()
 
+        def _norm_for_diff(field: str, value):
+            """Normalize a field for diff comparison so the BookSidebar
+            form re-sending the same data doesn't get tracked as an
+            edit. Pre-v2.3.4.4 we tripped on type roundtrips:
+              - "" (form) vs None (stored) → flagged as edit.
+              - "1.0" (form-string) vs 1.0 (stored REAL) → flagged.
+              - "2026-05-07" (form) vs "2026-05-07" (stored) → fine.
+            Mark's book 68 incident left 5 false-positive flags in
+            user_edited_fields beyond the one real `title` change."""
+            if value is None:
+                return None
+            if isinstance(value, str) and not value.strip():
+                return None
+            if field == "series_index":
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+            return value
+
         fields = []; vals = []
         for k in ["title", "description", "pub_date", "expected_date", "isbn", "cover_url", "series_index", "source_url"]:
             if k in data:
@@ -502,8 +542,9 @@ async def update_book(bid: int, data: dict = Body(...)):
                 # — it's structural (per-source URL ownership) and
                 # has its own dedicated editor that does its own
                 # canonical-form comparison.
-                if k in TRACKED_FIELDS and v != current_row[k]:
-                    edited_now.add(k)
+                if k in TRACKED_FIELDS:
+                    if _norm_for_diff(k, v) != _norm_for_diff(k, current_row[k]):
+                        edited_now.add(k)
         # Handle MAM URL — validate format and update status. The
         # BookSidebar form re-sends every field on every save, so we
         # only act when the incoming value actually differs from
@@ -960,9 +1001,13 @@ async def scan_books_mam(data: dict = Body(...)):
 
 
 @router.delete("/books/{bid}")
-async def delete_book(bid: int):
-    """Delete a book entry — only non-Calibre (discovered/imported) books can be deleted."""
-    db = await get_db()
+async def delete_book(bid: int, slug: str | None = Query(None)):
+    """Delete a book entry — only non-Calibre (discovered/imported) books can be deleted.
+
+    See `hide` for `slug` query-param rationale (multi-library id
+    collision).
+    """
+    db = await get_db(slug)
     try:
         row = await (await db.execute("SELECT id, source, owned, calibre_id, series_id FROM books WHERE id=?", (bid,))).fetchone()
         if not row:
@@ -987,11 +1032,14 @@ async def delete_book(bid: int):
 # silently skips Calibre-synced rows rather than failing the whole
 # call, since a partial selection is still a useful outcome.
 @router.post("/books/bulk-hide")
-async def bulk_hide(data: dict = Body(...)):
+async def bulk_hide(data: dict = Body(...), slug: str | None = Query(None)):
+    """See `hide` for slug-routing rationale. The author-detail
+    multi-select bar should pass `slug` so a bulk-hide on an ABS
+    author doesn't write to a same-id Calibre row."""
     book_ids = data.get("book_ids", [])
     if not book_ids:
         return {"error": "No books specified"}
-    db = await get_db()
+    db = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
         # Capture distinct series ids before the hide so we can
@@ -1016,11 +1064,12 @@ async def bulk_hide(data: dict = Body(...)):
 
 
 @router.post("/books/bulk-dismiss")
-async def bulk_dismiss(data: dict = Body(...)):
+async def bulk_dismiss(data: dict = Body(...), slug: str | None = Query(None)):
+    """See `hide` for slug-routing rationale."""
     book_ids = data.get("book_ids", [])
     if not book_ids:
         return {"error": "No books specified"}
-    db = await get_db()
+    db = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
         await db.execute(f"UPDATE books SET is_new=0 WHERE id IN ({placeholders})", book_ids)
@@ -1031,11 +1080,12 @@ async def bulk_dismiss(data: dict = Body(...)):
 
 
 @router.post("/books/bulk-delete")
-async def bulk_delete(data: dict = Body(...)):
+async def bulk_delete(data: dict = Body(...), slug: str | None = Query(None)):
+    """See `hide` for slug-routing rationale."""
     book_ids = data.get("book_ids", [])
     if not book_ids:
         return {"error": "No books specified"}
-    db = await get_db()
+    db = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
         # Partition the requested IDs into deletable vs Calibre-protected
@@ -1103,7 +1153,7 @@ async def _read_source_urls(db, bid: int) -> dict:
 
 
 @router.post("/books/{bid}/source-urls")
-async def add_source_url(bid: int, data: dict = Body(...)):
+async def add_source_url(bid: int, data: dict = Body(...), slug: str | None = Query(None)):
     """Parse a pasted URL, canonicalize it, merge into the book's
     `source_url` JSON dict.
 
@@ -1134,7 +1184,7 @@ async def add_source_url(bid: int, data: dict = Body(...)):
         )
     source_name, canonical = parsed
 
-    db = await get_db()
+    db = await get_db(slug)
     try:
         existing = await (await db.execute(
             "SELECT id FROM books WHERE id = ?", (bid,),
@@ -1155,14 +1205,16 @@ async def add_source_url(bid: int, data: dict = Body(...)):
 
 
 @router.delete("/books/{bid}/source-urls/{source_name}")
-async def remove_source_url(bid: int, source_name: str):
+async def remove_source_url(bid: int, source_name: str, slug: str | None = Query(None)):
     """Drop a single source's URL from this book's `source_url` dict.
 
     Returns the updated dict. 404 if the book doesn't exist; if the
     source key isn't present, returns 200 with the unchanged dict
     (idempotent — re-clicking the X button is harmless).
+
+    See `hide` for `slug` query-param rationale.
     """
-    db = await get_db()
+    db = await get_db(slug)
     try:
         existing = await (await db.execute(
             "SELECT id FROM books WHERE id = ?", (bid,),
