@@ -160,6 +160,55 @@ def _normalize_set(value: list[str] | str) -> set[str]:
     return out
 
 
+def score_match_with_breakdown(
+    *,
+    record_title: str,
+    record_authors: list[str],
+    search_title: str,
+    search_authors: list[str] | str,
+    known_series: str = "",
+) -> dict:
+    """Compute confidence + return all the components that fed into it.
+
+    Same logic as `score_match` but returns a dict with every signal
+    so the MAM debug-match endpoint can show *why* a result scored the
+    way it did. Keep `score_match` as a thin wrapper around this so
+    there's a single source of truth.
+    """
+    effective_record = record_title
+    series_stripped = False
+    series_boost = 0.0
+
+    if known_series and record_title:
+        series_lower = known_series.lower().strip()
+        record_lower = record_title.lower()
+        if series_lower in record_lower:
+            series_boost = 0.10
+            series_stripped = True
+            effective_record = re.sub(
+                re.escape(known_series), "", record_title, flags=re.IGNORECASE
+            ).strip()
+            effective_record = re.sub(r"[\s:—–-]+$", "", effective_record).strip()
+            effective_record = re.sub(r"^[\s:—–-]+", "", effective_record).strip()
+
+    ts = title_similarity(effective_record, search_title)
+    au = author_overlap(record_authors, search_authors)
+    raw = 0.7 * ts + 0.3 * au + series_boost
+    final = min(raw, 1.0)
+
+    return {
+        "record_title": record_title,
+        "effective_record_title": effective_record,
+        "search_title": search_title,
+        "series_stripped": series_stripped,
+        "title_similarity": round(ts, 4),
+        "author_overlap": round(au, 4),
+        "series_boost": round(series_boost, 4),
+        "raw_score": round(raw, 4),
+        "confidence": round(final, 4),
+    }
+
+
 def score_match(
     *,
     record_title: str,
@@ -178,26 +227,10 @@ def score_match(
     if the series name was found (proves the result is about the same
     series, not a coincidental title match).
     """
-    effective_record = record_title
-    series_boost = 0.0
-
-    if known_series and record_title:
-        # Strip the series name from the result title for cleaner scoring.
-        # Amazon: "The Triangulum Fold: The Fold Series Book 8"
-        # MAM series: "The Fold" → strip → "The Triangulum Fold: Series Book 8"
-        series_lower = known_series.lower().strip()
-        record_lower = record_title.lower()
-        if series_lower in record_lower:
-            # Series name found in result — boost confidence and strip it.
-            series_boost = 0.10
-            # Remove the series name and clean up leftover punctuation.
-            effective_record = re.sub(
-                re.escape(known_series), "", record_title, flags=re.IGNORECASE
-            ).strip()
-            effective_record = re.sub(r"[\s:—–-]+$", "", effective_record).strip()
-            effective_record = re.sub(r"^[\s:—–-]+", "", effective_record).strip()
-
-    ts = title_similarity(effective_record, search_title)
-    au = author_overlap(record_authors, search_authors)
-    raw = 0.7 * ts + 0.3 * au + series_boost
-    return min(raw, 1.0)
+    return score_match_with_breakdown(
+        record_title=record_title,
+        record_authors=record_authors,
+        search_title=search_title,
+        search_authors=search_authors,
+        known_series=known_series,
+    )["confidence"]

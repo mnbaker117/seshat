@@ -1007,6 +1007,12 @@ export default function MobileSettingsPage() {
           on={!!s.verbose_logging}
           onToggle={() => upd("verbose_logging", !s.verbose_logging)}
         />
+        <ToggleRow
+          label="MAM debug match"
+          desc="Exposes /api/v1/mam/debug-match for diagnosing scoring."
+          on={!!s.mam_debug_match_enabled}
+          onToggle={() => upd("mam_debug_match_enabled", !s.mam_debug_match_enabled)}
+        />
       </MobileSection>
 
       {/* ─── Sticky save bar ────────────────────────────────── */}

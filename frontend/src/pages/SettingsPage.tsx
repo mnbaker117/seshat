@@ -879,6 +879,9 @@ function DesktopSettingsPage() {
           <SF label="Verbose Logging" desc="Enable DEBUG-level output.">
             <STog on={!!s.verbose_logging} onToggle={() => upd("verbose_logging", !s.verbose_logging)} label />
           </SF>
+          <SF label="MAM Debug Match" desc="Exposes /api/v1/mam/debug-match for inspecting MAM cascade scoring per book. Off by default; turn on only when investigating mis-classified matches.">
+            <STog on={!!s.mam_debug_match_enabled} onToggle={() => upd("mam_debug_match_enabled", !s.mam_debug_match_enabled)} label />
+          </SF>
           <SF label="Theme" desc="Use the theme toggle in the navbar to switch between Dark, Dim, and Light.">
             <span style={{ fontSize: 13, color: t.textDim }}>Managed via navbar toggle</span>
           </SF>

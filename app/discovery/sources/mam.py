@@ -40,7 +40,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app import state
-from app.metadata.scoring import score_match
+from app.metadata.scoring import score_match, score_match_with_breakdown
 
 logger = logging.getLogger("seshat.discovery.mam")
 
@@ -1205,6 +1205,198 @@ async def check_book(
         result["passes_tried"] = [best_possible["pass"]]
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Debug cascade — mirrors check_book but emits a structured trace
+# ---------------------------------------------------------------------------
+# Used by the (toggle-gated) /api/v1/mam/debug-match endpoint to surface
+# everything the production cascade considers when scoring a result:
+# raw response shape, per-result field names, both score variants
+# (vs. calibre title and vs. per-pass search title) with their full
+# breakdowns, and the would-have-been-promote/demote decision per result.
+#
+# Stays parallel to check_book on purpose — when production scoring
+# changes, this function should change with it. Don't share state with
+# check_book at the cost of clarity; the debug surface needs to reflect
+# real behavior, and a divergent debug view is worse than no debug view.
+
+async def debug_check_book(
+    token: str,
+    title: str,
+    authors: str,
+    series_name: str = "",
+    content_type: str = "ebook",
+    lang_ids: Optional[list[int]] = None,
+    delay: float = 0.5,
+) -> dict:
+    """Run the cascade for one book and return a full structured trace.
+
+    Trace shape:
+      {
+        "input": {...},
+        "passes": [
+          {
+            "pass_num": 1,
+            "search_title": "...",
+            "search_author": "..." | None,
+            "raw_response_keys": [...],
+            "raw_total_found": int | None,
+            "result_count_returned": int,
+            "first_result_full": {raw item dict},  # for schema discovery
+            "results": [
+              {
+                "torrent_id", "mam_title", "mam_authors",
+                "all_keys": [...],
+                "category", "filetype", "language", "lang_code",
+                "seeders", "my_snatched",
+                "numfiles_field", "files_field", "filecount_field",
+                "description_field_present", "description_sample",
+                "score_vs_calibre_title": {breakdown},
+                "score_vs_search_title": {breakdown},
+                "confidence_max", "decision",
+              }, ...
+            ]
+          }, ...
+        ],
+        "thresholds": {"min": ..., "promote": ...},
+      }
+    """
+    if not lang_ids:
+        lang_ids = [_ENGLISH_LANG_ID]
+
+    trace: dict = {
+        "input": {
+            "title": title,
+            "authors": authors,
+            "series": series_name,
+            "content_type": content_type,
+            "lang_ids": lang_ids,
+        },
+        "thresholds": {
+            "min": MATCH_MIN_SCORE,
+            "promote": MATCH_PROMOTE_SCORE,
+        },
+        "passes": [],
+    }
+
+    # Build the same pass list check_book uses, in order. We always run
+    # all five (no short-circuit on promote) because the debug view's
+    # whole point is to show every pass, even ones a real scan would
+    # have skipped after an early hit.
+    core = _extract_core_title(title)
+    sub_right = _extract_subtitle_part(title)
+    short = _strip_subtitle(title)
+    title_only = core or sub_right or short or title
+
+    passes_to_run: list[tuple[int, Optional[str], str]] = [(1, authors, title)]
+    if core:
+        passes_to_run.append((2, authors, core))
+    if sub_right and sub_right != core:
+        passes_to_run.append((3, authors, sub_right))
+    if short and short != title and short != core:
+        passes_to_run.append((4, authors, short))
+    passes_to_run.append((5, None, title_only))
+
+    for pass_num, pass_authors, search_title in passes_to_run:
+        pass_trace: dict = {
+            "pass_num": pass_num,
+            "search_title": search_title,
+            "search_author": pass_authors,
+            "raw_response_keys": [],
+            "raw_total_found": None,
+            "result_count_returned": 0,
+            "first_result_full": None,
+            "results": [],
+        }
+
+        try:
+            resp = await _mam_search(
+                token, pass_authors, search_title,
+                lang_ids=lang_ids, content_type=content_type,
+            )
+        except _AuthError as e:
+            pass_trace["error"] = f"auth_error: {e}"
+            trace["passes"].append(pass_trace)
+            break
+        except Exception as e:
+            pass_trace["error"] = f"exception: {e}"
+            trace["passes"].append(pass_trace)
+            continue
+
+        await asyncio.sleep(delay)
+
+        if not resp:
+            pass_trace["error"] = "empty_response"
+            trace["passes"].append(pass_trace)
+            continue
+
+        pass_trace["raw_response_keys"] = sorted(resp.keys())
+        pass_trace["raw_total_found"] = (
+            resp.get("found") or resp.get("total_found") or resp.get("total")
+        )
+        data = resp.get("data") or []
+        pass_trace["result_count_returned"] = len(data)
+        if data:
+            # Capture the FIRST raw item verbatim so the endpoint user can see
+            # MAM's actual schema (field names, value types, presence/absence
+            # of description/filelist/numfiles). Subsequent items only get
+            # their key list to keep the payload manageable.
+            pass_trace["first_result_full"] = data[0]
+
+        for idx, item in enumerate(data):
+            mam_title = str(item.get("title") or item.get("name") or "")
+            mam_authors = _parse_author_info(item.get("author_info"))
+
+            score_full_breakdown = score_match_with_breakdown(
+                record_title=mam_title, record_authors=mam_authors,
+                search_title=title, search_authors=authors,
+                known_series=series_name,
+            )
+            score_search_breakdown = score_match_with_breakdown(
+                record_title=mam_title, record_authors=mam_authors,
+                search_title=search_title, search_authors=authors,
+                known_series=series_name,
+            )
+            confidence = max(
+                score_full_breakdown["confidence"],
+                score_search_breakdown["confidence"],
+            )
+
+            if confidence < MATCH_MIN_SCORE:
+                decision = "skipped_below_min"
+            elif confidence >= MATCH_PROMOTE_SCORE:
+                decision = "would_promote_to_found"
+            else:
+                decision = "kept_as_possible"
+
+            pass_trace["results"].append({
+                "torrent_id": str(item.get("id", "")),
+                "mam_title": mam_title,
+                "mam_authors": mam_authors,
+                "all_keys": sorted(item.keys()) if idx > 0 else None,
+                "category": str(item.get("category") or ""),
+                "filetype": str(item.get("filetype") or item.get("filetypes") or ""),
+                "language": item.get("language"),
+                "lang_code": item.get("lang_code"),
+                "seeders": item.get("seeders"),
+                "my_snatched": bool(item.get("my_snatched")),
+                # Probe likely field names for bundle detection — Part B
+                # uses whichever of these is present.
+                "numfiles_field": item.get("numfiles"),
+                "files_field": item.get("files"),
+                "filecount_field": item.get("filecount"),
+                "description_field_present": "description" in item,
+                "description_sample": str(item.get("description") or "")[:300],
+                "score_vs_calibre_title": score_full_breakdown,
+                "score_vs_search_title": score_search_breakdown,
+                "confidence_max": round(confidence, 4),
+                "decision": decision,
+            })
+
+        trace["passes"].append(pass_trace)
+
+    return trace
 
 
 # ---------------------------------------------------------------------------

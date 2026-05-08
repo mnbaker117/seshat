@@ -221,6 +221,54 @@ async def test_qbit() -> ValidateResponse:
         return ValidateResponse(ok=False, message=f"Connection error: {e}")
 
 
+@router.get("/debug-match")
+async def debug_match(
+    title: str,
+    author: str,
+    series: str = "",
+    content_type: str = "ebook",
+) -> dict:
+    """Toggle-gated developer endpoint: replay the MAM cascade for one book
+    and return a structured trace (raw response shape + per-result scoring
+    breakdown + decision per result).
+
+    Off by default — enabled via Settings → Operational. Used to diagnose
+    "Possible" matches that are actually correct (and the inverse) and to
+    verify field names in MAM's response shape when refining scoring logic.
+    """
+    settings = load_settings()
+    if not settings.get("mam_debug_match_enabled"):
+        raise HTTPException(
+            403,
+            "MAM debug-match is disabled. Enable it under "
+            "Settings → Operational → MAM Debug Match.",
+        )
+    if not title or not author:
+        raise HTTPException(400, "Both 'title' and 'author' are required")
+    if content_type not in ("ebook", "audiobook"):
+        raise HTTPException(400, "content_type must be 'ebook' or 'audiobook'")
+
+    token = await mam_cookie.get_active_token()
+    if not token:
+        raise HTTPException(400, "No MAM cookie configured")
+
+    from app.discovery.sources.mam import debug_check_book
+
+    try:
+        trace = await debug_check_book(
+            token=token,
+            title=title,
+            authors=author,
+            series_name=series,
+            content_type=content_type,
+        )
+    except Exception as e:
+        _log.exception("debug_match cascade failed")
+        raise HTTPException(500, f"Debug match failed: {e}")
+
+    return trace
+
+
 @router.post("/test-notification", response_model=ValidateResponse)
 async def test_notification() -> ValidateResponse:
     """Send a test notification via ntfy to verify the topic works."""

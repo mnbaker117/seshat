@@ -37,6 +37,12 @@ ENV_WEBUI_PORT = int(os.getenv("WEBUI_PORT", "8789"))
 # Verbose logging toggle (DEBUG level vs INFO).
 ENV_VERBOSE_LOGGING = os.getenv("VERBOSE_LOGGING", "").lower() in ("true", "1", "yes")
 
+# MAM debug-match endpoint toggle. Off by default — gates a developer
+# inspection endpoint that returns the full per-pass / per-result
+# scoring breakdown for any (title, author) query against MAM. Useful
+# for diagnosing wrong-Possible matches and tuning thresholds.
+ENV_MAM_DEBUG_MATCH = os.getenv("MAM_DEBUG_MATCH", "").lower() in ("true", "1", "yes")
+
 # MAM session cookie — first-run seed only. After settings.json exists,
 # the UI is the only way to update it.
 ENV_MAM_SESSION_ID = os.getenv("MAM_SESSION_ID", "")
@@ -589,6 +595,7 @@ DEFAULT_SETTINGS = {
     # ── Operational ─────────────────────────────────────────
     "verbose_logging": False,
     "dry_run": False,  # mirror of SESHAT_DRY_RUN, runtime-toggleable
+    "mam_debug_match_enabled": False,
     "setup_complete": False,
 }
 
@@ -709,6 +716,8 @@ def _apply_env_overrides(settings: dict):
         settings["verbose_logging"] = True
     if ENV_DRY_RUN and not settings.get("dry_run"):
         settings["dry_run"] = True
+    if ENV_MAM_DEBUG_MATCH and not settings.get("mam_debug_match_enabled"):
+        settings["mam_debug_match_enabled"] = True
     # Discovery-domain env var seeds.
     if ENV_HARDCOVER_API_KEY and not settings.get("hardcover_api_key"):
         settings["hardcover_api_key"] = ENV_HARDCOVER_API_KEY
