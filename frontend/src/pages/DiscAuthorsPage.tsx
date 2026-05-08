@@ -304,6 +304,44 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
     setScanning(false);
   };
 
+  // Bulk Skip MAM — marks every book under the selected authors as
+  // mam_status='not_applicable' across ALL libraries so the rescan
+  // loop never visits them again. Used for free-on-the-web authors
+  // (Snekguy etc.) whose works almost never end up on MAM, where
+  // v2.3.6's widened rescan predicate would otherwise keep retrying
+  // each tick. content_type='all' so a single click covers both
+  // ebook + audiobook libraries (matches Mark's "scan everywhere"
+  // expectation for bulk verbs).
+  const skipMam = async () => {
+    if (
+      !confirm(
+        `Skip MAM for all books under ${sel.size} author(s)? They'll be marked Not Applicable across every library.`,
+      )
+    )
+      return;
+    setClearing(true);
+    try {
+      const picked = selectedAuthors();
+      const r = await api.post<{ books_skipped?: number; libraries_touched?: number }>(
+        "/discovery/authors/skip-mam",
+        {
+          author_ids: picked.map((a) => a.id),
+          author_names: picked.map((a) => a.name),
+          content_type: "all",
+        },
+      );
+      toast.success(
+        `Skipped MAM for ${r.books_skipped ?? 0} book(s) across ${r.libraries_touched ?? 0} libraries`,
+      );
+      setSel(new Set());
+      setSelMode(false);
+      reload();
+    } catch (e) {
+      toast.error((e as Error).message || "Failed");
+    }
+    setClearing(false);
+  };
+
   // Nav arg — when the row came from cross-library aggregation
   // (a.library_slug is set by run_across_libraries), send "slug:id"
   // so the detail page resolves in the right library. Without this,
@@ -607,18 +645,33 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
                   Scan Audio
                 </Btn>
                 {mamOn && (
-                  <Btn
-                    size="sm"
-                    onClick={scanMam}
-                    disabled={scanning || clearing || linking}
-                    style={{
-                      background: t.accent + "22",
-                      color: t.accent,
-                      border: `1px solid ${t.accent}44`,
-                    }}
-                  >
-                    Scan MAM
-                  </Btn>
+                  <>
+                    <Btn
+                      size="sm"
+                      onClick={scanMam}
+                      disabled={scanning || clearing || linking}
+                      style={{
+                        background: t.accent + "22",
+                        color: t.accent,
+                        border: `1px solid ${t.accent}44`,
+                      }}
+                    >
+                      Scan MAM
+                    </Btn>
+                    <Btn
+                      size="sm"
+                      onClick={skipMam}
+                      disabled={scanning || clearing || linking}
+                      title="Mark every book for these authors as Not Applicable so MAM scans skip them (all libraries)"
+                      style={{
+                        background: t.bg2,
+                        color: t.td,
+                        border: `1px solid ${t.borderL}`,
+                      }}
+                    >
+                      Skip MAM
+                    </Btn>
+                  </>
                 )}
                 {sel.size >= 2 && (
                   <>

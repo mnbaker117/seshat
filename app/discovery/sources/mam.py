@@ -1688,11 +1688,18 @@ async def get_mam_stats(db) -> dict:
     nowhere_row = await db.execute_fetchall(
         "SELECT COUNT(*) FROM books WHERE owned=0 AND mam_status='not_found' AND is_unreleased=0 AND hidden=0"
     )
+    # `total_scanned` excludes `not_applicable` because that status is
+    # set by the user via the Skip MAM button — those rows were never
+    # actually scanned. v2.3.7.
     scanned_row = await db.execute_fetchall(
-        "SELECT COUNT(*) FROM books WHERE mam_status IS NOT NULL AND hidden=0"
+        "SELECT COUNT(*) FROM books WHERE mam_status IS NOT NULL "
+        "AND mam_status != 'not_applicable' AND hidden=0"
     )
     unscanned_row = await db.execute_fetchall(
         f"SELECT COUNT(*) FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}"
+    )
+    skipped_row = await db.execute_fetchall(
+        "SELECT COUNT(*) FROM books WHERE mam_status='not_applicable' AND hidden=0"
     )
     return {
         "upload_candidates": upload_row[0][0] if upload_row else 0,
@@ -1700,4 +1707,5 @@ async def get_mam_stats(db) -> dict:
         "missing_everywhere": nowhere_row[0][0] if nowhere_row else 0,
         "total_scanned": scanned_row[0][0] if scanned_row else 0,
         "total_unscanned": unscanned_row[0][0] if unscanned_row else 0,
+        "total_skipped": skipped_row[0][0] if skipped_row else 0,
     }

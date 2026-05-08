@@ -300,6 +300,28 @@ CREATE TABLE IF NOT EXISTS economy_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_economy_audit_occurred ON economy_audit (occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_economy_audit_action ON economy_audit (action, occurred_at DESC);
+
+-- v2.3.7 — acquisition link-back: link a downloaded book in a per-library
+-- discovery DB back to the grab that produced it. Without this, a fresh
+-- ABS-synced (or Calibre-synced) row arrives with mam_status=NULL even
+-- though the grab table holds the exact mam_torrent_id. The next MAM
+-- scan would then run a fuzzy `check_book` search whose match might
+-- grade as 'not_found' or 'possible' — silently misclassifying books we
+-- KNOW we got from MAM.
+--
+-- One row per linked grab. UNIQUE on (library_slug, book_id) blocks two
+-- grabs from claiming the same row; PRIMARY KEY on grab_id blocks the
+-- same grab from claiming two rows. Either side of the link being
+-- pre-occupied means the auto-link skips and the book stays NULL,
+-- letting MAM scans handle it the legacy way.
+CREATE TABLE IF NOT EXISTS book_grab_links (
+    grab_id      INTEGER PRIMARY KEY REFERENCES grabs(id) ON DELETE CASCADE,
+    library_slug TEXT NOT NULL,
+    book_id      INTEGER NOT NULL,
+    linked_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(library_slug, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_book_grab_links_lookup ON book_grab_links (library_slug, book_id);
 """
 
 
@@ -360,6 +382,17 @@ MIGRATIONS: list[str] = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_economy_audit_occurred ON economy_audit (occurred_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_economy_audit_action ON economy_audit (action, occurred_at DESC)",
+    # v2.3.7 — book_grab_links: links a downloaded grab to the per-library
+    # discovery row it produced. Sync hooks read from this table to skip
+    # already-linked grabs and write to it after a successful auto-link.
+    """CREATE TABLE IF NOT EXISTS book_grab_links (
+        grab_id      INTEGER PRIMARY KEY REFERENCES grabs(id) ON DELETE CASCADE,
+        library_slug TEXT NOT NULL,
+        book_id      INTEGER NOT NULL,
+        linked_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(library_slug, book_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_book_grab_links_lookup ON book_grab_links (library_slug, book_id)",
 ]
 
 

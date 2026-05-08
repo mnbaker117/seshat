@@ -7,6 +7,144 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.7] — 2026-05-08
+
+Three coordinated changes that came out of UAT after v2.3.6.1: a new
+"Skip MAM" status for books that should never be scanned, full
+multi-library coverage on the remaining MAM scan paths, and an
+acquisition link-back that records the originating MAM URL on books
+that came in through the IRC pipeline.
+
+### Discovery — `mam_status='not_applicable'` (Skip MAM)
+
+A new fifth MAM status value, set explicitly by the user (no scanner
+ever produces it). Books in this state are excluded from every MAM
+scan path — the v2.3.6 `_NEEDS_SCAN_*` predicates already match
+`IS NULL OR IN ('possible','not_found')`, so `not_applicable` is
+auto-skipped just like `found` is. Use case: free-on-the-web authors
+(Snekguy etc.) whose works almost never end up on MAM, where v2.3.6's
+widened rescan loop would otherwise keep retrying every tick on
+known-impossible matches.
+
+The BookSidebar's MAM decision row now adapts to the current status:
+
+| status | Approve | Remove | Skip |
+|---|---|---|---|
+| NULL/unscanned | — | — | ✓ |
+| possible | ✓ | ✓ | ✓ |
+| found | — | ✓ | ✓ |
+| not_found | — | — | ✓ |
+| not_applicable | — | ✓ | — |
+
+Skip writes `mam_status='not_applicable'` and clears the URL via a
+new allowlisted branch in `update_book` (`{"mam_status":
+"not_applicable"}` is the only direct status write the endpoint
+accepts; every other transition still flows through `mam_url`).
+Remove on a `not_applicable` row clears back to `not_found` so the
+book becomes rescannable on the next tick. The Authors page
+multi-select gains a "Skip MAM" bulk verb that hits a new
+`POST /api/discovery/authors/skip-mam` endpoint with
+`content_type='all'` so a single click covers every library —
+Snekguy's 60+ books across both ebook and audiobook libraries flip
+in one action.
+
+`get_mam_stats` adds a `total_skipped` counter and excludes
+`not_applicable` from `total_scanned` (the user set those, not the
+scanner). The `mam_status` filter dropdowns on the Library /
+Missing / Upcoming pages gain an "N/A" option, and the BookSidebar
+status badge renders a neutral "N/A" pill for skipped rows.
+
+### Discovery — full multi-library coverage on MAM scan paths
+
+Pre-v2.3.7 only the manual `/api/mam/scan` endpoint and the
+scheduled scheduler tick swept all libraries; the remaining four
+paths quietly ran against the active library only. Multi-library
+deployments (Mark's Calibre + ABS setup) had to flip active between
+ticks to get parity. UAT 2026-05-08: a "Scan MAM" on a cross-
+library author selection silently missed half the matching books.
+
+Fixed in v2.3.7:
+
+- `POST /api/discovery/authors/scan-mam` (bulk authors) — now
+  accepts `content_type` and `author_names` matching the
+  `/authors/scan-sources` + `/authors/clear-scan-data` contract.
+  Iterates every matching library, resolves author names locally
+  per-library to dodge the cross-library ID-collision class
+  (`feedback_seshat_multi_library_slug.md`), routes per-library MAM
+  category by each lib's own `content_type`. Snapshot per library
+  taken upfront so concurrent author scans don't inflate the queue.
+- `POST /api/mam/full-scan` — iterates every discovered library
+  sequentially. Each library has its own `mam_scan_log` row
+  (per-library DB) so snapshotting + resume work per-library;
+  `_full_scan_loop` runs the existing batched scan-with-pause flow
+  once per library before moving on. Pre-v2.3.7 a full scan only
+  touched the active library — Calibre/ABS users had to run two
+  full scans manually to get parity.
+- `POST /api/discovery/books/scan-mam` — now accepts `?slug=` query
+  param and prefers the requested library's `content_type` over the
+  active library when set. The BookSidebar Re-scan button now
+  passes `slug` so a sidebar opened from a cross-library view
+  routes correctly (matches the v2.3.4.4 multi-library safety fix
+  for `update_book`).
+- `POST /api/mam/scan-book/{id}` (legacy) — same `?slug=` + per-lib
+  content_type routing as above. The BookSidebar uses
+  `/books/scan-mam` not this endpoint, but third-party integrations
+  may still call it directly.
+
+### Discovery — acquisition link-back (audiobook + ebook)
+
+Audiobooks that came in through the IRC pipeline (tentative or
+auto-approve) consistently ended up with `mam_status='not_found'`
+on Mark's UAT — even though we acquired them from MAM with the
+exact `mam_torrent_id` recorded in the `grabs` table. Root cause:
+the discovery ABS/Calibre sync had no awareness of the global
+grabs table, so it created a fresh book row with `mam_status=NULL`,
+and the next MAM scan tick ran a fuzzy `check_book` title+author
+search whose match commonly graded `not_found` or low-confidence
+`possible` for IRC-acquired audiobooks (the cleaned ABS title
+diverges from the raw MAM torrent name often enough for
+`check_book` to mis-grade many of them).
+
+v2.3.7 adds:
+
+- A new `book_grab_links(grab_id, library_slug, book_id)` table in
+  the global app DB that records which grab was attributed to which
+  per-library book row. Migration appended to `MIGRATIONS`.
+- A new helper module `app/discovery/acquisition_linkback.py` with
+  `link_new_book(library_db, slug, book_id, title, author_name,
+  is_audiobook=...)`. Conservative match: 60%+ overlap of >=3-char
+  title tokens with the grab's `torrent_name`, AND author surname
+  appearing in either `torrent_name` or `author_blob`. Tied top
+  scores → log + bail rather than guess. 30-day lookback window.
+  Audiobook books only consider audiobook-category grabs, ebooks
+  only consider non-audiobook grabs.
+- ABS sync (`audiobookshelf_sync.py`) calls `link_new_book` after
+  each new-book INSERT. Calibre sync (`calibre_sync.py`) does the
+  same for ebook symmetry.
+- Skips on existing `mam_status` (don't stomp prior scans / user
+  edits) and on already-linked grabs (UNIQUE on grab_id).
+
+Books that don't match any recent grab fall back to the legacy MAM
+scan path — the link-back is an opportunistic write, never a
+prerequisite for `mam_status` to land.
+
+### Tests
+
+- 8 new tests in `tests/discovery/test_skip_mam.py` covering the
+  PUT allowlist, filter helper, bulk endpoint, predicate exclusion,
+  and stats counter.
+- 9 new tests in `tests/discovery/test_acquisition_linkback.py`
+  covering confident match, double-claim guard, author + title
+  rejection, ambiguity bail, existing-status preservation,
+  content-type filtering, and the 30-day lookback window.
+- Existing `test_mam_multilibrary_scan.py` "no books need scanning"
+  case carried forward from v2.3.6 (uses `mam_status='found'` since
+  that's now the only terminal status).
+
+Suite: 1591 passing.
+
+---
+
 ## [2.3.6.1] — 2026-05-08
 
 Hotfix on top of v2.3.6.

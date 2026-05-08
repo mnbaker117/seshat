@@ -340,7 +340,32 @@ async def sync_audiobookshelf(library: dict) -> dict:
                         book["audio_formats"],
                     ),
                 )
-                await _write_abs_snapshot(db, cur.lastrowid, book)
+                new_book_id = cur.lastrowid
+                await _write_abs_snapshot(db, new_book_id, book)
+                # v2.3.7 acquisition link-back. If this book came from
+                # a recent IRC grab (tentative or auto-approved), link
+                # mam_url/mam_status='found'/mam_torrent_id directly
+                # from the grab so the next MAM scan doesn't fuzzy-
+                # search MAM and risk mis-grading the row as
+                # not_found / possible. Best-effort — exceptions
+                # logged + swallowed so a link-back fault never blocks
+                # the sync from completing.
+                try:
+                    from app.discovery.acquisition_linkback import link_new_book
+                    primary_author = (
+                        book["authors"][0] if book.get("authors") else ""
+                    )
+                    await link_new_book(
+                        db, library["slug"], new_book_id,
+                        book["title"], primary_author,
+                        is_audiobook=True,
+                    )
+                except Exception as link_exc:
+                    logger.warning(
+                        "ABS sync: acquisition link-back crashed for "
+                        f"book_id={new_book_id} ({book['title'][:60]!r}): "
+                        f"{link_exc}",
+                    )
                 books_new += 1
                 progress["books_new"] += 1
 

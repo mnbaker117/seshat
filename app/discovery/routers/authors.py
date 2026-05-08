@@ -877,22 +877,147 @@ async def scan_authors_sources(data: dict = Body(...)):
             "libraries": len(target_libs), "authors": len(names)}
 
 
+async def _skip_mam_for_author_ids_in_library(
+    db, author_ids: list[int],
+) -> int:
+    """UPDATE every book under the given author_ids to mam_status=
+    'not_applicable', clearing the URL/torrent_id/formats so a stale
+    prior match doesn't linger on a row the user just declared
+    irrelevant. Returns affected row count. Caller owns commit."""
+    placeholders = ",".join(["?" for _ in author_ids])
+    cur = await db.execute(
+        f"UPDATE books SET mam_url=NULL, mam_status='not_applicable', "
+        f"mam_formats=NULL, mam_torrent_id=NULL, mam_has_multiple=0, "
+        f"mam_my_snatched=0 WHERE author_id IN ({placeholders})",
+        author_ids,
+    )
+    return cur.rowcount or 0
+
+
+@router.post("/authors/skip-mam")
+async def skip_authors_mam(data: dict = Body(...)):
+    """Bulk Skip MAM — mark every book belonging to the given authors
+    as `mam_status='not_applicable'` so the rescan loop never visits
+    them again. Driven by the Authors page multi-select dropdown.
+
+    Same cross-library + author_names contract as
+    `/authors/clear-scan-data` (see that handler for the
+    cross-library ID-collision rationale). content_type=None reads
+    the active library; 'ebook'/'audiobook'/'all' iterate libraries
+    of that type, resolving author names per-library to sidestep ID
+    collisions.
+
+    Snekguy-style use case: an author whose works are free on the
+    public web and almost never end up on MAM. Pre-skip wipes them
+    from the rescan queue so the v2.3.6 widened predicate doesn't
+    keep retrying never-findable rows every tick.
+    """
+    author_ids = data.get("author_ids", [])
+    author_names = data.get("author_names")
+    content_type = data.get("content_type")
+    if not author_ids and not author_names:
+        return {"error": "No authors specified"}
+
+    if content_type is None:
+        target_libs = None
+    else:
+        target_libs = libraries_for(content_type)
+        if not target_libs:
+            return {"status": "ok", "authors_skipped": 0,
+                    "books_skipped": 0, "libraries_touched": 0,
+                    "message": f"No {content_type} libraries found."}
+
+    total_skipped = 0
+    libs_touched = 0
+    if target_libs is None:
+        db = await get_db()
+        try:
+            ids = author_ids
+            if not ids and author_names:
+                ph = ",".join(["?" for _ in author_names])
+                name_rows = await db.execute_fetchall(
+                    f"SELECT id FROM authors WHERE name IN ({ph})",
+                    list(author_names),
+                )
+                ids = [r[0] for r in name_rows]
+            if ids:
+                total_skipped += await _skip_mam_for_author_ids_in_library(db, ids)
+                await db.commit()
+                libs_touched = 1
+        finally:
+            await db.close()
+    else:
+        for lib in target_libs:
+            slug = lib.get("slug")
+            if not slug:
+                continue
+            db = await get_db(slug)
+            try:
+                if author_names:
+                    ph = ",".join(["?" for _ in author_names])
+                    name_rows = await db.execute_fetchall(
+                        f"SELECT id FROM authors WHERE name IN ({ph})",
+                        list(author_names),
+                    )
+                    lib_ids = [r[0] for r in name_rows]
+                    if not lib_ids:
+                        continue
+                else:
+                    lib_ids = author_ids
+                deleted = await _skip_mam_for_author_ids_in_library(db, lib_ids)
+                await db.commit()
+                total_skipped += deleted
+                libs_touched += 1
+            finally:
+                await db.close()
+
+    n_authors = len(author_names) if author_names else len(author_ids)
+    logger.info(
+        f"Skip MAM: marked {total_skipped} books not_applicable across "
+        f"{libs_touched} libraries for {n_authors} authors "
+        f"(content_type={content_type or 'active'})"
+    )
+    return {
+        "status": "ok",
+        "authors_skipped": n_authors,
+        "books_skipped": total_skipped,
+        "libraries_touched": libs_touched,
+    }
+
+
 @router.post("/authors/scan-mam")
 async def scan_authors_mam(data: dict = Body(...)):
     """Run a MAM scan for every un-scanned book belonging to the given authors.
 
-    Runs as a background task with progress tracked in state._mam_scan_progress
-    so the Dashboard scan widget shows progress in real time.
+    v2.3.7 — multi-library aware. Accepts `content_type` (None | "ebook"
+    | "audiobook" | "all") and `author_names` matching the
+    `/authors/clear-scan-data` + `/authors/scan-sources` contract.
+    Iterates each matching library, resolves author_names locally to
+    sidestep cross-library ID collisions (Roger Black id=17 in Calibre
+    vs Touko Amekawa id=17 in ABS), and routes per-library MAM
+    category (ebook/audiobook) by the lib's own content_type.
+
+    Pre-v2.3.7 this only touched the active library, which silently
+    left the unselected library's matching rows unscanned — Mark's
+    Snekguy bulk-skip use case exposed this when a "Scan MAM" on a
+    cross-library author list missed half the books.
+
+    Runs as a background task with progress tracked in
+    state._mam_scan_progress so the Dashboard scan widget shows
+    progress in real time.
     """
     from app.discovery.sources.mam import (
         _NEEDS_SCAN_BASIC_ALIASED,
         check_book as mam_check_book,
         _resolve_mam_languages,
     )
+    from app.discovery.cross_library import libraries_for
     from app import state
 
     author_ids = data.get("author_ids", [])
-    if not author_ids:
+    author_names = data.get("author_names")
+    content_type = data.get("content_type")
+    if not author_ids and not author_names:
         return {"error": "No authors specified"}
 
     s = load_settings()
@@ -904,85 +1029,165 @@ async def scan_authors_mam(data: dict = Body(...)):
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
 
-    db = await get_db()
-    try:
-        placeholders = ",".join(["?" for _ in author_ids])
-        book_rows = await db.execute_fetchall(
-            f"SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id "
-            f"WHERE b.author_id IN ({placeholders}) AND {_NEEDS_SCAN_BASIC_ALIASED} "
-            f"ORDER BY a.sort_name, b.title",
-            author_ids,
-        )
-    finally:
-        await db.close()
+    # Build target library list. content_type=None preserves the
+    # pre-v2.3.7 active-library-only behavior for callers that haven't
+    # been updated; otherwise iterate per content_type.
+    if content_type is None:
+        target_libs = None
+    else:
+        target_libs = libraries_for(content_type)
+        if not target_libs:
+            return {
+                "status": "complete",
+                "message": f"No {content_type} libraries found.",
+                "scanned": 0, "found": 0, "possible": 0, "not_found": 0,
+            }
 
-    if not book_rows:
-        return {"status": "complete", "message": "No un-scanned books for these authors",
-                "scanned": 0, "found": 0, "possible": 0, "not_found": 0}
-
-    total = len(book_rows)
     delay = s.get("rate_mam", 2)
-    # Scan content_type tracks the currently-active library — authors
-    # pages don't accept a slug override yet, so we use the caller's
-    # selected library. Determines MAM main_cat + format-priority
-    # selection for the batch.
-    from app.discovery.routers.mam import _active_content_type
-    ct = _active_content_type()
-    format_priority = s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority")
     token = await _get_mam_token()
     lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
+    ebook_fp = s.get("mam_format_priority")
+    audio_fp = s.get("audiobook_format_priority")
 
-    # Track progress via state so Dashboard widget renders
+    # Per-library snapshot of scannable books — taken upfront so a
+    # concurrent author scan adding new books mid-run doesn't inflate
+    # this scan's queue (matches the manual /scan endpoint's pattern).
+    per_lib: list[tuple[dict, list[tuple[int, str, str]]]] = []
+    libs_iter = target_libs if target_libs is not None else [None]
+    for lib in libs_iter:
+        slug = lib.get("slug") if lib else None
+        try:
+            lib_db = await get_db(slug) if slug else await get_db()
+        except Exception as e:
+            logger.warning(f"authors/scan-mam: cannot open lib {slug}: {e}")
+            continue
+        try:
+            # Resolve author identity per-library. With author_names we
+            # look up local IDs to dodge the cross-library collision
+            # class (see /authors/scan-sources). Without names, fall
+            # back to the supplied IDs (legacy single-library callers).
+            if author_names:
+                ph = ",".join(["?" for _ in author_names])
+                name_rows = await lib_db.execute_fetchall(
+                    f"SELECT id FROM authors WHERE name IN ({ph})",
+                    list(author_names),
+                )
+                lib_aids = [r[0] for r in name_rows]
+            else:
+                lib_aids = author_ids
+            if not lib_aids:
+                continue
+            placeholders = ",".join(["?" for _ in lib_aids])
+            rows = await lib_db.execute_fetchall(
+                f"SELECT b.id, b.title, a.name FROM books b "
+                f"JOIN authors a ON b.author_id=a.id "
+                f"WHERE b.author_id IN ({placeholders}) "
+                f"AND {_NEEDS_SCAN_BASIC_ALIASED} "
+                f"ORDER BY a.sort_name, b.title",
+                lib_aids,
+            )
+            books = [(r[0], r[1], r[2]) for r in rows]
+            if books:
+                per_lib.append((lib or {"slug": None, "content_type": "ebook"}, books))
+        finally:
+            await lib_db.close()
+
+    total = sum(len(books) for _, books in per_lib)
+    if total == 0:
+        return {
+            "status": "complete",
+            "message": "No un-scanned books for these authors",
+            "scanned": 0, "found": 0, "possible": 0, "not_found": 0,
+        }
+
     state._mam_scan_progress.update({
         "running": True, "scanned": 0, "total": total,
         "found": 0, "possible": 0, "not_found": 0, "errors": 0,
         "status": "scanning", "type": "multi_author",
-        "current_book": "",
+        "current_book": "", "current_library": "",
     })
 
     async def _do():
-        db2 = await get_db()
         try:
-            for row in book_rows:
+            for lib, books in per_lib:
                 if not state._mam_scan_progress.get("running"):
                     state._mam_scan_progress.update({"status": "cancelled"})
                     break
-                bid, btitle, aname = row[0], row[1], row[2]
-                state._mam_scan_progress["current_book"] = btitle[:60]
+                slug = lib.get("slug")
+                lib_name = lib.get("display_name") or lib.get("name") or slug or "active"
+                ct = lib.get("content_type") or "ebook"
+                format_priority = audio_fp if ct == "audiobook" else ebook_fp
+                state._mam_scan_progress["current_library"] = lib_name
                 try:
-                    check = await mam_check_book(token, btitle, aname, format_priority, delay, lang_ids=lang_ids, content_type=ct)
+                    db2 = await get_db(slug) if slug else await get_db()
                 except Exception as e:
-                    logger.error(f"Bulk author MAM scan error on book {bid} ({btitle[:40]}): {e}")
-                    state._mam_scan_progress["errors"] = state._mam_scan_progress.get("errors", 0) + 1
+                    logger.error(f"authors/scan-mam: cannot open lib {slug} for write: {e}")
+                    state._mam_scan_progress["errors"] = (
+                        state._mam_scan_progress.get("errors", 0) + len(books)
+                    )
                     continue
-                await db2.execute("""
-                    UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                           mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
-                    WHERE id=?
-                """, (
-                    check["mam_url"], check["status"], check["mam_formats"],
-                    check["mam_torrent_id"],
-                    1 if check["mam_has_multiple"] else 0,
-                    1 if check.get("mam_my_snatched") else 0,
-                    bid,
-                ))
-                state._mam_scan_progress["scanned"] = state._mam_scan_progress.get("scanned", 0) + 1
-                if check["status"] == "found":
-                    state._mam_scan_progress["found"] = state._mam_scan_progress.get("found", 0) + 1
-                elif check["status"] == "possible":
-                    state._mam_scan_progress["possible"] = state._mam_scan_progress.get("possible", 0) + 1
-                elif check["status"] == "not_found":
-                    state._mam_scan_progress["not_found"] = state._mam_scan_progress.get("not_found", 0) + 1
-            await db2.commit()
-            state._mam_scan_progress.update({"running": False, "status": "complete", "current_book": ""})
+                try:
+                    for bid, btitle, aname in books:
+                        if not state._mam_scan_progress.get("running"):
+                            state._mam_scan_progress.update({"status": "cancelled"})
+                            break
+                        state._mam_scan_progress["current_book"] = btitle[:60]
+                        try:
+                            check = await mam_check_book(
+                                token, btitle, aname, format_priority,
+                                delay, lang_ids=lang_ids, content_type=ct,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Bulk author MAM scan error on book {bid} "
+                                f"({btitle[:40]}) in {lib_name}: {e}"
+                            )
+                            state._mam_scan_progress["errors"] = (
+                                state._mam_scan_progress.get("errors", 0) + 1
+                            )
+                            continue
+                        await db2.execute(
+                            """
+                            UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                                   mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+                            WHERE id=?
+                            """,
+                            (
+                                check["mam_url"], check["status"], check["mam_formats"],
+                                check["mam_torrent_id"],
+                                1 if check["mam_has_multiple"] else 0,
+                                1 if check.get("mam_my_snatched") else 0,
+                                bid,
+                            ),
+                        )
+                        state._mam_scan_progress["scanned"] = (
+                            state._mam_scan_progress.get("scanned", 0) + 1
+                        )
+                        st = check["status"]
+                        if st in ("found", "possible", "not_found"):
+                            state._mam_scan_progress[st] = (
+                                state._mam_scan_progress.get(st, 0) + 1
+                            )
+                    await db2.commit()
+                finally:
+                    await db2.close()
+            state._mam_scan_progress.update({
+                "running": False, "status": "complete",
+                "current_book": "", "current_library": "",
+            })
         except Exception as e:
-            logger.error(f"Bulk author MAM scan error: {e}")
-            state._mam_scan_progress.update({"running": False, "status": f"error: {e}", "current_book": ""})
-        finally:
-            await db2.close()
+            logger.error(f"Bulk author MAM scan error: {e}", exc_info=True)
+            state._mam_scan_progress.update({
+                "running": False, "status": f"error: {e}",
+                "current_book": "", "current_library": "",
+            })
 
     state._mam_scan_task = asyncio.create_task(_do())
-    return {"status": "started", "total": total}
+    return {
+        "status": "started",
+        "total": total,
+        "libraries": [lib.get("slug") for lib, _ in per_lib if lib.get("slug")],
+    }
 
 
 @router.post("/sources/reset")

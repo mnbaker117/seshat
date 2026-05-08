@@ -425,6 +425,13 @@ async def mam_test_scan():
 async def mam_full_scan_start():
     """Start a full MAM library scan (400 books/batch, 5-min pause between).
 
+    v2.3.7 — multi-library aware. Iterates every discovered library
+    sequentially; each library has its own `mam_scan_log` row so
+    snapshotting + resume work per-library. Pre-v2.3.7 only the
+    active library was scanned, leaving the other library's MAM data
+    silently stale. Calibre/ABS deployments needed two manual flips
+    of the active library to cover both content types.
+
     Long-running and persistent: state lives in `mam_scan_log` (including
     the snapshotted book ID list) so the scan survives a process restart
     and can resume from where it left off. Like the manual scan, only
@@ -432,108 +439,138 @@ async def mam_full_scan_start():
     `_wait_for_other_writers` rationale in /api/mam/scan above.
     """
 
-    db = await get_db()
-    try:
-        start_result = await mam_start_full_scan(db)
-        if "error" in start_result:
-            return start_result
-    finally:
-        await db.close()
+    # Snapshot which libraries we'll scan + start a per-library
+    # scan_log entry for each. Each call to mam_start_full_scan
+    # writes its own (book_ids_snapshot) tied to that library's DB.
+    libs_to_scan: list[dict] = list(state._discovered_libraries)
+    if not libs_to_scan:
+        return {"error": "No libraries discovered"}
+
+    started: list[tuple[dict, dict]] = []  # (lib, start_result)
+    grand_total = 0
+    for lib in libs_to_scan:
+        slug = lib.get("slug")
+        try:
+            db = await get_db(slug) if slug else await get_db()
+        except Exception as e:
+            logger.warning(f"full-scan: cannot open lib {slug}: {e}")
+            continue
+        try:
+            sr = await mam_start_full_scan(db)
+        finally:
+            await db.close()
+        if "error" in sr:
+            # "scan already running" on one library shouldn't abort
+            # the whole multi-library start — log + skip that lib.
+            logger.info(f"full-scan: skipping {slug}: {sr['error']}")
+            continue
+        started.append((lib, sr))
+        grand_total += sr.get("total_books", 0)
+
+    if not started:
+        return {"error": "No libraries had scannable books"}
 
     async def _full_scan_loop():
-        state._mam_scan_progress = {"running": True, "scanned": 0,
-                              "total": start_result.get("total_books", 0),
-                              "found": 0, "possible": 0, "not_found": 0,
-                              "errors": 0, "current_book": "",
-                              "status": "scanning", "type": "full_scan"}
+        state._mam_scan_progress = {
+            "running": True, "scanned": 0,
+            "total": grand_total,
+            "found": 0, "possible": 0, "not_found": 0,
+            "errors": 0, "current_book": "", "current_library": "",
+            "status": "scanning", "type": "full_scan",
+        }
         try:
-            while True:
-                db = await get_db()
-                try:
-                    cs = load_settings()
-                    cs_token = await _get_mam_token()
-                    # Per-batch baselines so the incremental on_progress
-                    # stats (which are batch-local in run_full_scan_batch)
-                    # get added onto the running totals carried over
-                    # from earlier batches. Without this, every batch
-                    # would reset found/possible/not_found to zero.
-                    base_scanned = state._mam_scan_progress["scanned"]
-                    base_found = state._mam_scan_progress["found"]
-                    base_possible = state._mam_scan_progress["possible"]
-                    base_not_found = state._mam_scan_progress["not_found"]
-                    base_errors = state._mam_scan_progress["errors"]
+            for lib, start_result in started:
+                slug = lib.get("slug")
+                lib_name = lib.get("display_name") or lib.get("name") or slug or "active"
+                lib_ct = lib.get("content_type") or "ebook"
+                state._mam_scan_progress["current_library"] = lib_name
+                while True:
+                    try:
+                        db = await get_db(slug) if slug else await get_db()
+                    except Exception as e:
+                        logger.error(
+                            f"full-scan: cannot reopen {lib_name} mid-loop: {e}"
+                        )
+                        break
+                    try:
+                        cs = load_settings()
+                        cs_token = await _get_mam_token()
+                        base_scanned = state._mam_scan_progress["scanned"]
+                        base_found = state._mam_scan_progress["found"]
+                        base_possible = state._mam_scan_progress["possible"]
+                        base_not_found = state._mam_scan_progress["not_found"]
+                        base_errors = state._mam_scan_progress["errors"]
 
-                    def _on_book(title: str) -> None:
-                        # Fired BEFORE each network call so the widget
-                        # shows what the scanner is waiting on.
-                        state._mam_scan_progress["current_book"] = title or ""
+                        def _on_book(title: str) -> None:
+                            state._mam_scan_progress["current_book"] = title or ""
 
-                    def _on_progress(stats: dict) -> None:
-                        # Fired AFTER each book's DB write with the
-                        # batch-local tallies. Add onto per-batch
-                        # baselines for running totals.
+                        def _on_progress(stats: dict) -> None:
+                            state._mam_scan_progress.update({
+                                "scanned":   base_scanned + stats["scanned"],
+                                "found":     base_found + stats["found"],
+                                "possible":  base_possible + stats["possible"],
+                                "not_found": base_not_found + stats["not_found"],
+                                "errors":    base_errors + stats["errors"],
+                                "current_book": stats.get("current_book", ""),
+                            })
+
+                        result = await mam_run_full_scan_batch(
+                            db, session_id=cs_token,
+                            skip_ip_update=True,
+                            delay=cs.get("rate_mam", 2),
+                            format_priority=cs.get(
+                                "audiobook_format_priority"
+                                if lib_ct == "audiobook"
+                                else "mam_format_priority"
+                            ),
+                            lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
+                            on_book=_on_book,
+                            content_type=lib_ct,
+                            on_progress=_on_progress,
+                        )
+                        fs = await mam_get_full_scan_status(db)
                         state._mam_scan_progress.update({
-                            "scanned":   base_scanned + stats["scanned"],
-                            "found":     base_found + stats["found"],
-                            "possible":  base_possible + stats["possible"],
-                            "not_found": base_not_found + stats["not_found"],
-                            "errors":    base_errors + stats["errors"],
-                            "current_book": stats.get("current_book", ""),
+                            "scanned": (
+                                fs.get("scanned", base_scanned + result.get("scanned", 0))
+                            ),
+                            "status": (
+                                "scanning" if result["status"] == "batch_complete"
+                                else result["status"]
+                            ),
                         })
+                    finally:
+                        await db.close()
+                    if result["status"] in ("scan_complete", "error", "no_scan"):
+                        # This library is done — move to the next.
+                        break
+                    elif result["status"] == "batch_complete":
+                        state._mam_scan_progress["status"] = "paused"
+                        logger.info(
+                            f"Full MAM scan ({lib_name}): batch done, waiting 5 min"
+                        )
+                        await asyncio.sleep(300)
+                        state._mam_scan_progress["status"] = "scanning"
 
-                    _ct_full = _active_content_type()
-                    result = await mam_run_full_scan_batch(
-                        db, session_id=cs_token,
-                        skip_ip_update=True,
-                        delay=cs.get("rate_mam", 2),
-                        format_priority=cs.get("audiobook_format_priority" if _ct_full == "audiobook" else "mam_format_priority"),
-                        lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
-                        on_book=_on_book,
-                        content_type=_ct_full,
-                        on_progress=_on_progress,
-                    )
-                    fs = await mam_get_full_scan_status(db)
-                    # Snap scanned/total to the DB-authoritative values
-                    # at batch-end. The incremental updates above kept
-                    # the widget fresh during the batch; this reconciles
-                    # any drift (e.g., book rows concurrently hidden).
-                    state._mam_scan_progress.update({
-                        "scanned": fs.get("scanned", base_scanned + result.get("scanned", 0)),
-                        "total": fs.get("total_books", state._mam_scan_progress["total"]),
-                        "status": "scanning" if result["status"] == "batch_complete" else result["status"],
-                    })
-                finally:
-                    await db.close()
-                if result["status"] in ("scan_complete", "error", "no_scan"):
-                    state._mam_scan_progress.update({"running": False, "status": result["status"]})
-                    if result["status"] == "scan_complete":
-                        await _notify_mam_done()
-                    break
-                elif result["status"] == "batch_complete":
-                    # Fixed 5-minute pause between batches. The cadence
-                    # (400 books per batch every 5 minutes) is intentionally
-                    # not user-configurable — too aggressive and you risk
-                    # MAM rate-limiting; too slow and a full library scan
-                    # takes literal weeks.
-                    state._mam_scan_progress["status"] = "paused"
-                    logger.info("Full MAM scan: batch done, waiting 5 min")
-                    await asyncio.sleep(300)
-                    state._mam_scan_progress["status"] = "scanning"
+            state._mam_scan_progress.update({
+                "running": False, "status": "scan_complete",
+                "current_library": "", "current_book": "",
+            })
+            await _notify_mam_done()
         except asyncio.CancelledError:
-            # User clicked Stop. Task cancellation raises CancelledError
-            # from whichever `await` we're currently sitting on —
-            # typically the inter-batch sleep, but could also be inside
-            # run_full_scan_batch's per-request pacing. Either way the
-            # running flag must flip to False or the unified widget
-            # stays stuck on "scanning" forever and the next scan
-            # attempt errors with "A MAM scan is already running".
-            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
+            state._mam_scan_progress.update({
+                "running": False, "status": "cancelled",
+                "current_library": "", "current_book": "",
+            })
             logger.info("Full MAM scan cancelled by user")
             raise
 
     state._mam_full_scan_task = asyncio.create_task(_full_scan_loop())
-    return {"status": "started", "scan_id": start_result["id"],
-            "total_books": start_result["total_books"]}
+    return {
+        "status": "started",
+        "scan_ids": [sr["id"] for _, sr in started],
+        "total_books": grand_total,
+        "libraries": [lib.get("slug") for lib, _ in started if lib.get("slug")],
+    }
 
 
 @router.get("/full-scan/status")
@@ -660,11 +697,20 @@ async def mam_books_endpoint(section: str = "upload", search: str = "",
 
 
 @router.post("/scan-book/{book_id}")
-async def mam_scan_single_book(book_id: int):
+async def mam_scan_single_book(book_id: int, slug: str | None = Query(None)):
     """Re-scan a single book against MAM, ignoring its existing mam_status.
 
-    Used by the "Re-scan MAM" button in BookSidebar so the user can manually
-    refresh a stale or wrong match without waiting for a full or scheduled scan.
+    Legacy single-book endpoint. The BookSidebar's Re-scan button uses
+    `/discovery/books/scan-mam` with a one-element book_ids array
+    (which honors slug too, v2.3.7); this endpoint is kept for any
+    integration that still calls it directly.
+
+    `slug` query param routes the read+write to a specific library.
+    Without slug the active library is used — same cross-library
+    id-collision risk as `update_book` (v2.3.4.4 UAT canary). The
+    library's content_type is used for MAM category routing so an
+    audiobook rescan from a non-active context doesn't search the
+    ebook MAM main_cat.
     """
     s = load_settings()
     token = await _get_mam_token()
@@ -673,7 +719,7 @@ async def mam_scan_single_book(book_id: int):
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
 
-    db = await get_db()
+    db = await get_db(slug)
     try:
         rows = await db.execute_fetchall(
             "SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id WHERE b.id=?",
@@ -683,7 +729,16 @@ async def mam_scan_single_book(book_id: int):
             return {"error": f"Book {book_id} not found"}
         _, title, author = rows[0]
 
-        ct = _active_content_type()
+        # Prefer requested library's content_type when slug is set.
+        if slug:
+            lib_ct = next(
+                (l.get("content_type") for l in state._discovered_libraries
+                 if l.get("slug") == slug),
+                None,
+            )
+            ct = lib_ct or "ebook"
+        else:
+            ct = _active_content_type()
         check = await mam_check_book(
             token, title, author,
             format_priority=s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority"),

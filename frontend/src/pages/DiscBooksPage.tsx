@@ -500,6 +500,7 @@ function DesktopBooksPage({
                 <option value="found">MAM: Found</option>
                 <option value="possible">MAM: Possible</option>
                 <option value="not_found">MAM: Not Found</option>
+                <option value="not_applicable">MAM: N/A</option>
                 <option value="unscanned">MAM: Unscanned</option>
               </select>
             ) : null}

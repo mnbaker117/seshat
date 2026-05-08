@@ -106,6 +106,8 @@ def _build_books_where(search, author_id, series_id, owned, book_type, mam_statu
         c.append("b.mam_status='possible'")
     elif mam_status == "not_found":
         c.append("b.mam_status='not_found'")
+    elif mam_status == "not_applicable":
+        c.append("b.mam_status='not_applicable'")
     elif mam_status == "unscanned":
         c.append("b.mam_status IS NULL")
     return (" AND ".join(c) if c else "1=1"), p
@@ -308,6 +310,7 @@ async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sor
             if mam_status == "found": c.append("b.mam_status='found'")
             elif mam_status == "possible": c.append("b.mam_status='possible'")
             elif mam_status == "not_found": c.append("b.mam_status='not_found'")
+            elif mam_status == "not_applicable": c.append("b.mam_status='not_applicable'")
             elif mam_status == "unscanned": c.append("b.mam_status IS NULL")
             return " AND ".join(c), p
 
@@ -345,6 +348,7 @@ async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sor
         if mam_status == "found": c.append("b.mam_status='found'")
         elif mam_status == "possible": c.append("b.mam_status='possible'")
         elif mam_status == "not_found": c.append("b.mam_status='not_found'")
+        elif mam_status == "not_applicable": c.append("b.mam_status='not_applicable'")
         elif mam_status == "unscanned": c.append("b.mam_status IS NULL")
         w = " AND ".join(c)
         cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
@@ -601,6 +605,15 @@ async def update_book(bid: int, data: dict = Body(...), slug: str | None = Query
                 # the URL is identical on both sides of the click.
                 fields.append("mam_status=?")
                 vals.append("found")
+        # v2.3.7 — direct mam_status writes for the Skip MAM button.
+        # Allowlisted to 'not_applicable' only; every other status
+        # transition still flows through the mam_url block above so
+        # the URL/status pair stays consistent. NULL the URL when
+        # skipping so a stale 'possible' / 'not_found' search URL
+        # doesn't linger on a row the user just declared irrelevant.
+        if "mam_status" in data and data["mam_status"] == "not_applicable":
+            fields.extend(["mam_url=?", "mam_status=?", "mam_torrent_id=?"])
+            vals.extend([None, "not_applicable", None])
         if "is_unreleased" in data:
             fields.append("is_unreleased=?"); vals.append(1 if data["is_unreleased"] else 0)
         # Handle series assignment — find or create series by name
@@ -934,13 +947,20 @@ async def scan_books_sources(data: dict = Body(...)):
 
 
 @router.post("/books/scan-mam")
-async def scan_books_mam(data: dict = Body(...)):
+async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None)):
     """Run a MAM scan against the given list of book IDs.
 
     Used by the multi-select bar on book listing pages and by the
     individual Re-scan MAM button in BookSidebar (which sends a list of one).
     Re-scans even books that already have a mam_status — the user clicked
     the button to refresh stale results.
+
+    `slug` query param routes the write to a specific library (v2.3.7).
+    Without it the active library is used; from a cross-library view
+    that means the book IDs may resolve to a different library's row
+    with the same numeric id (Mark's UAT canary 2026-05-07: same-id
+    cross-library data corruption pattern). Frontends operating on
+    cross-library selections must pass slug.
     """
     from app.config import load_settings
     from app.discovery.sources.mam import check_book as mam_check_book, _resolve_mam_languages
@@ -959,7 +979,7 @@ async def scan_books_mam(data: dict = Body(...)):
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
 
-    db = await get_db()
+    db = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
         rows = await (await db.execute(
@@ -971,10 +991,21 @@ async def scan_books_mam(data: dict = Body(...)):
             return {"error": "No matching books found"}
 
         delay = s.get("rate_mam", 2)
-        # Active library's content_type routes the whole bulk scan
-        # through either the ebook or audiobook MAM category.
-        from app.discovery.routers.mam import _active_content_type
-        ct = _active_content_type()
+        # content_type routes the bulk scan through the ebook or
+        # audiobook MAM category. Prefer the requested library's
+        # content_type over the active when slug is set, so a sidebar
+        # rescan on an audiobook from a cross-library view doesn't
+        # search MAM's ebook category.
+        if slug:
+            lib_ct = next(
+                (l.get("content_type") for l in state._discovered_libraries
+                 if l.get("slug") == slug),
+                None,
+            )
+            ct = lib_ct or "ebook"
+        else:
+            from app.discovery.routers.mam import _active_content_type
+            ct = _active_content_type()
         format_priority = s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority")
         token = await _get_mam_token()
         lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))

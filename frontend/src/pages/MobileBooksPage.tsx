@@ -56,6 +56,7 @@ const MAM_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: "found", label: "✓ Found" },
   { value: "possible", label: "? Possible" },
   { value: "not_found", label: "✗ Not on MAM" },
+  { value: "not_applicable", label: "⊘ N/A" },
 ];
 
 export default function MobileBooksPage({

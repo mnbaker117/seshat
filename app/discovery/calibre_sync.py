@@ -673,6 +673,28 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                     await _write_calibre_snapshot(
                         db, new_book_id, book, cal_series_name
                     )
+                    # v2.3.7 acquisition link-back. Symmetric with ABS
+                    # sync — if this Calibre book corresponds to a
+                    # recent ebook IRC grab, write mam_url + 'found'
+                    # directly so the next MAM scan doesn't fuzzy-
+                    # search and risk mis-grading the row.
+                    try:
+                        from app.discovery.acquisition_linkback import link_new_book
+                        primary_author = (
+                            book["authors"][0].get("name")
+                            if book.get("authors") else ""
+                        )
+                        await link_new_book(
+                            db, slug, new_book_id,
+                            book["title"], primary_author or "",
+                            is_audiobook=False,
+                        )
+                    except Exception as link_exc:
+                        logger.warning(
+                            "Calibre sync: acquisition link-back crashed "
+                            f"for book_id={new_book_id} "
+                            f"({book['title'][:60]!r}): {link_exc}"
+                        )
                     books_new += 1
                     progress["books_new"] += 1
                     logger.debug(f"  Calibre: NEW '{book['title']}' by {book['authors'][0]['name']} (tags={book['tags']}, lang={book['language']})")

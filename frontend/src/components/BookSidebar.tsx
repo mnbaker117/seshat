@@ -256,12 +256,15 @@ export function BookSidebar({
     setSugBusy(null);
   };
 
-  // Approve a "possible" match as Found, or Remove the MAM link
-  // entirely (clears URL and flips status to "not_found"). Uses the
-  // existing PUT /discovery/books/{id} endpoint — sending mam_url=""
-  // clears all three mam fields server-side (see update_book in
-  // app/discovery/routers/books.py).
-  const decideMam = async (action: "approve" | "remove") => {
+  // Approve a "possible" match as Found, Remove the MAM link
+  // entirely (clears URL → status flips to "not_found"), or Skip
+  // the book entirely (status → "not_applicable" so MAM scans never
+  // touch it again). All three flow through PUT /discovery/books/{id}.
+  // Approve sends the same URL back (server flips status — see the
+  // 'possible' branch in update_book). Remove sends empty URL.
+  // Skip sends mam_status='not_applicable' which is allowlisted in
+  // update_book to also clear the URL.
+  const decideMam = async (action: "approve" | "remove" | "skip") => {
     if (mamDeciding) return;
     if (action === "remove") {
       if (!confirm("Remove this book's MAM link? It will be marked Not Found.")) return;
@@ -271,9 +274,17 @@ export function BookSidebar({
       const payload =
         action === "approve"
           ? { mam_url: book.mam_url || "" }
+          : action === "skip"
+          ? { mam_status: "not_applicable" }
           : { mam_url: "" };
       await api.put(`/discovery/books/${book.id}${slugQs}`, payload);
-      toast.success(action === "approve" ? "Approved as Found" : "Removed");
+      toast.success(
+        action === "approve"
+          ? "Approved as Found"
+          : action === "skip"
+          ? "Marked Not Applicable"
+          : "Removed"
+      );
       // Close immediately — the sidebar's book prop won't refresh in
       // place, and awaiting onEdit() before unlocking the UI made the
       // click feel sluggish. Fire onEdit in the background so the
@@ -294,9 +305,10 @@ export function BookSidebar({
     if (mamScanning) return;
     setMamScanning(true);
     try {
-      const r = await api.post<MamScanResponse>("/discovery/books/scan-mam", {
-        book_ids: [book.id],
-      });
+      const r = await api.post<MamScanResponse>(
+        `/discovery/books/scan-mam${slugQs}`,
+        { book_ids: [book.id] },
+      );
       if (r.error) {
         alert(`MAM scan failed: ${r.error}`);
       } else {
@@ -1280,7 +1292,25 @@ export function BookSidebar({
                   <div
                     style={{ display: "flex", alignItems: "center", gap: 6 }}
                   >
-                    {book.mam_status === "not_found" ? (
+                    {book.mam_status === "not_applicable" ? (
+                      <span
+                        title="MAM scans skip this book (Not Applicable)"
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          padding: "3px 10px",
+                          borderRadius: 5,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          background: t.bg2,
+                          color: t.td,
+                          border: `1px solid ${t.borderL}`,
+                        }}
+                      >
+                        N/A
+                      </span>
+                    ) : book.mam_status === "not_found" ? (
                       <a
                         href={book.mam_url || "#"}
                         target="_blank"
@@ -1684,52 +1714,88 @@ export function BookSidebar({
         )}
       </div>
 
-      {/* Possible-MAM decision row — only when scan returned a
-          candidate that's waiting on user approval. Approve flips the
-          existing URL's status to Found; Remove clears the URL
-          entirely and marks Not Found. Sits just above the standard
-          action row so it's visible without scrolling through the
-          metadata rows. */}
-      {!editing && book.mam_status === "possible" && book.mam_url ? (
-        <div
-          className="sb-actions"
-          style={{
-            display: "flex",
-            gap: 8,
-            marginTop: "auto",
-            paddingTop: 12,
-            borderTop: `1px solid ${t.borderL}`,
-            flexWrap: "wrap",
-          }}
-        >
-          <Btn
-            size="sm"
-            onClick={() => decideMam("approve")}
-            disabled={mamDeciding}
-            title="Confirm this match as Found without editing the URL"
+      {/* MAM-status decision row — visible buttons depend on the
+          current mam_status (v2.3.7 matrix):
+            possible       → Approve | Remove | Skip
+            found          →           Remove | Skip
+            not_found      →                    Skip
+            null/unscanned →                    Skip
+            not_applicable →           Remove
+          Approve flips a 'possible' URL to Found. Remove clears the
+          URL → 'not_found' (rescannable next tick). Skip sets
+          'not_applicable' so the rescan loop stops visiting it. */}
+      {(() => {
+        if (editing) return null;
+        const s = book.mam_status;
+        const showApprove = s === "possible";
+        const showRemove =
+          s === "possible" || s === "found" || s === "not_applicable";
+        const showSkip = s !== "not_applicable";
+        if (!showApprove && !showRemove && !showSkip) return null;
+        return (
+          <div
+            className="sb-actions"
             style={{
-              background: t.grn + "22",
-              color: t.grnt,
-              border: `1px solid ${t.grn}44`,
+              display: "flex",
+              gap: 8,
+              marginTop: "auto",
+              paddingTop: 12,
+              borderTop: `1px solid ${t.borderL}`,
+              flexWrap: "wrap",
             }}
           >
-            {mamDeciding ? <Spin /> : null} Approve MAM
-          </Btn>
-          <Btn
-            size="sm"
-            onClick={() => decideMam("remove")}
-            disabled={mamDeciding}
-            title="Discard this match and mark the book as Not Found on MAM"
-            style={{
-              background: t.red + "22",
-              color: t.redt,
-              border: `1px solid ${t.red}44`,
-            }}
-          >
-            {mamDeciding ? <Spin /> : null} Remove MAM
-          </Btn>
-        </div>
-      ) : null}
+            {showApprove ? (
+              <Btn
+                size="sm"
+                onClick={() => decideMam("approve")}
+                disabled={mamDeciding}
+                title="Confirm this match as Found without editing the URL"
+                style={{
+                  background: t.grn + "22",
+                  color: t.grnt,
+                  border: `1px solid ${t.grn}44`,
+                }}
+              >
+                {mamDeciding ? <Spin /> : null} Approve MAM
+              </Btn>
+            ) : null}
+            {showRemove ? (
+              <Btn
+                size="sm"
+                onClick={() => decideMam("remove")}
+                disabled={mamDeciding}
+                title={
+                  s === "not_applicable"
+                    ? "Clear the Not Applicable mark and let MAM scan this book again"
+                    : "Discard this match and mark the book as Not Found on MAM"
+                }
+                style={{
+                  background: t.red + "22",
+                  color: t.redt,
+                  border: `1px solid ${t.red}44`,
+                }}
+              >
+                {mamDeciding ? <Spin /> : null} Remove MAM
+              </Btn>
+            ) : null}
+            {showSkip ? (
+              <Btn
+                size="sm"
+                onClick={() => decideMam("skip")}
+                disabled={mamDeciding}
+                title="Mark this book as Not Applicable so MAM scans skip it (e.g. free-to-read, never on MAM)"
+                style={{
+                  background: t.bg2,
+                  color: t.td,
+                  border: `1px solid ${t.borderL}`,
+                }}
+              >
+                {mamDeciding ? <Spin /> : null} Skip MAM
+              </Btn>
+            ) : null}
+          </div>
+        );
+      })()}
 
       {/* Action row varies by book state:
           - hidden: Unhide-only

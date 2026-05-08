@@ -162,7 +162,7 @@ export interface Book {
   google_books_id?: string | null;
   // MAM
   mam_url?: string | null;
-  mam_status?: "found" | "possible" | "not_found" | null;
+  mam_status?: "found" | "possible" | "not_found" | "not_applicable" | null;
   mam_formats?: string | null;
   mam_torrent_id?: string | null;
   mam_has_multiple?: 0 | 1;
