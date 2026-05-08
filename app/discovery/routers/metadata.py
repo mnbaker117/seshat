@@ -481,6 +481,20 @@ async def list_pending_edits(
         """)).fetchall()
         return [dict(r) for r in rows]
 
+    # Actionable field set: union of every field that pull/push can
+    # actually act on across both sources (Calibre + ABS), plus the
+    # synthetic series_name. Fields outside this set are Seshat-only
+    # (e.g. `expected_date`, `cover_url` — tracked by PUT diff but with
+    # no upstream counterpart). They legitimately stay in
+    # `user_edited_fields` after a bulk pull/push, but they shouldn't
+    # show up in the Pending Manual Edits view because no action there
+    # can clear them.
+    actionable = (
+        {b for b, c, _, _ in COMPARE_FIELDS if c is not None}
+        | {b for b, _, a, _ in COMPARE_FIELDS if a is not None}
+        | {"series_name"}
+    )
+
     raw = await run_across_libraries(None, _q)
     out: list[dict] = []
     for r in raw:
@@ -490,6 +504,9 @@ async def list_pending_edits(
                 fields = []
         except (TypeError, ValueError):
             fields = []
+        # Filter to actionable fields. A book with only Seshat-only
+        # edits (e.g. just `expected_date`) drops out entirely.
+        fields = [f for f in fields if f in actionable]
         if not fields:
             continue
         out.append({

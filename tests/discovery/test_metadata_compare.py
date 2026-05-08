@@ -295,6 +295,36 @@ class TestPull:
         assert body["total"] == 0
         assert body["rows"] == []
 
+    async def test_pending_edits_filters_seshat_only_fields(self, client, monkeypatch):
+        # `expected_date` and `cover_url` are tracked by PUT /books/{bid}
+        # but have no Calibre/ABS counterpart in COMPARE_FIELDS. They
+        # legitimately stay in user_edited_fields after a bulk pull (no
+        # action can clear them) but they shouldn't surface in the
+        # Pending Manual Edits view since the per-row push/pull buttons
+        # can't act on them.
+        from app import state
+        await _seed_book(
+            book_id=1, title="Has stranded UEF",
+            user_edited=["expected_date", "cover_url"],
+        )
+        await _seed_book(
+            book_id=2, title="Has actionable + stranded",
+            user_edited=["description", "expected_date"],
+        )
+        monkeypatch.setattr(state, "_discovered_libraries", [
+            {"slug": "test", "name": "Test", "content_type": "ebook"},
+        ])
+        r = await client.get("/api/discovery/pending-edits")
+        body = r.json()
+        # Book 1 (only Seshat-only fields) drops out entirely.
+        assert body["total"] == 1
+        # Book 2 surfaces, but only `description` shown — `expected_date`
+        # is filtered out so the chip list reflects what bulk
+        # push/pull can actually act on.
+        row = body["rows"][0]
+        assert row["book_id"] == 2
+        assert row["fields"] == ["description"]
+
     async def test_pull_all_user_edited_iterates(self, client):
         # Bulk variant: only the intersection of UEF and the source's
         # writable fields should be pulled.

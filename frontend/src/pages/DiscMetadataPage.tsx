@@ -712,19 +712,18 @@ function PendingEditsPanel() {
       );
       const n = r.applied?.length ?? 0;
       const sourceLabel = source === "calibre" ? "Calibre" : "ABS";
+      const direction = verb === "push" ? "to" : "from";
       if (n === 0) {
-        toast.info(`No fields applicable for ${verb} to ${sourceLabel}.`);
+        toast.info(`No fields applicable for ${verb} ${direction} ${sourceLabel}.`);
       } else {
         toast.success(
-          `${verb === "push" ? "Pushed" : "Pulled"} ${n} field${n === 1 ? "" : "s"} ${
-            verb === "push" ? "to" : "from"
-          } ${sourceLabel}`,
+          `${verb === "push" ? "Pushed" : "Pulled"} ${n} field${n === 1 ? "" : "s"} ${direction} ${sourceLabel}`,
         );
       }
       load();
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
-      toast.error(`${verb} to ${source}: ${msg}`);
+      toast.error(`${verb} ${verb === "push" ? "to" : "from"} ${source}: ${msg}`);
     } finally {
       setBusy("");
     }
