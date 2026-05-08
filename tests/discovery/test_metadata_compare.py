@@ -262,6 +262,39 @@ class TestPull:
         assert row["description"] == "From Calibre"
         assert json.loads(row["user_edited_fields"]) == []
 
+    async def test_pending_edits_lists_books_with_uef(self, client, monkeypatch):
+        from app import state
+        await _seed_book(book_id=1, title="Edited Book",
+                         user_edited=["description", "title"])
+        await _seed_book(book_id=2, title="Untouched", user_edited=[])
+        await _seed_calibre_snapshot(book_id=1, description="C")
+        # Cross-library helper iterates state._discovered_libraries —
+        # stub a single-library setup that points to the test DB.
+        monkeypatch.setattr(state, "_discovered_libraries", [
+            {"slug": "test", "name": "Test Library", "content_type": "ebook"},
+        ])
+        r = await client.get("/api/discovery/pending-edits")
+        body = r.json()
+        assert body["total"] == 1
+        row = body["rows"][0]
+        assert row["book_id"] == 1
+        assert row["title"] == "Edited Book"
+        assert sorted(row["fields"]) == ["description", "title"]
+        assert row["has_calibre_snapshot"] is True
+        assert row["has_abs_snapshot"] is False
+        assert row["library_slug"] == "test"
+
+    async def test_pending_edits_empty_when_no_uef(self, client, monkeypatch):
+        from app import state
+        await _seed_book(book_id=1, title="x", user_edited=[])
+        monkeypatch.setattr(state, "_discovered_libraries", [
+            {"slug": "test", "name": "Test", "content_type": "ebook"},
+        ])
+        r = await client.get("/api/discovery/pending-edits")
+        body = r.json()
+        assert body["total"] == 0
+        assert body["rows"] == []
+
     async def test_pull_all_user_edited_iterates(self, client):
         # Bulk variant: only the intersection of UEF and the source's
         # writable fields should be pulled.

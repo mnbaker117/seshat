@@ -70,13 +70,38 @@ edits" verb only makes coherent sense under pull-clears: "I'm done
 editing these; align with upstream and stop flagging future
 changes."
 
+### Discovery — "Pending manual edits" tab in the Metadata Manager
+
+UAT gap: the existing Metadata Manager only surfaces *incoming*
+proposals (Calibre/ABS sync diffs, source-scan diffs, series
+moves). User edits made in the sidebar landed in
+`user_edited_fields` and were only visible via the per-book
+sidebar badge or Compare modal — there was no centralized "what
+have I edited and not yet pushed?" view.
+
+New 5th tab **Pending manual edits** lists every book with a
+non-empty `user_edited_fields` array, cross-library. Per row:
+book + author + library + edited-field chips + per-row actions:
+**Compare…** opens the existing Compare modal for granular
+control, plus shortcut **→ Push to Calibre / ABS** and **← Pull
+from Calibre / ABS** buttons that bulk-act over the book's
+`user_edited_fields`. Push/Pull buttons are only rendered for
+sources that actually have a snapshot for that book.
+
+New endpoint `GET /api/discovery/pending-edits` synthesizes the
+view from books + snapshot tables via the existing
+`run_across_libraries` helper (so the list naturally spans
+multi-library setups). Stable alphabetical-by-title ordering;
+client-paginated.
+
 ### Tests + suite total
 
 - 31 new tests in `test_push_back.py` (dispatch, UEF clearing,
   bulk-verb intersection, translation helpers).
-- 2 updated tests in `test_metadata_compare.py` for pull-clears
-  semantics + bulk pull intersection.
-- Suite total: **1563 passing** (was 1522 on v2.3.4.5).
+- 4 updated/added tests in `test_metadata_compare.py` for
+  pull-clears semantics + bulk pull intersection + pending-edits
+  endpoint.
+- Suite total: **1565 passing** (was 1522 on v2.3.4.5).
 
 ### Pre-tag arc-cap checklist
 

@@ -442,6 +442,82 @@ async def book_push(bid: int, payload: dict = Body(...), slug: str | None = Quer
         await db.close()
 
 
+# ── Pending manual edits view (v2.3.5) ──────────────────────────────
+
+
+@router.get("/pending-edits")
+async def list_pending_edits(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List every book with non-empty `user_edited_fields`, across all
+    libraries. Surfaces "I edited this and haven't pushed yet" state
+    that doesn't fit the review-queue model.
+
+    Each row carries the book + author + library slug/name, the
+    parsed `fields` array, and Calibre/ABS snapshot sync timestamps
+    (so the UI can decide which Push/Pull actions are available
+    without round-tripping `/compare` per row).
+
+    The frontend uses this to render a "Pending manual edits" tab in
+    the Metadata Manager — the user can drive bulk push/pull from
+    here, or open the Compare modal for per-field control.
+    """
+    from app.discovery.cross_library import run_across_libraries
+
+    async def _q(db) -> list[dict]:
+        rows = await (await db.execute("""
+            SELECT b.id AS book_id, b.title, b.user_edited_fields,
+                   b.author_id, a.name AS author_name,
+                   b.calibre_id, b.audiobookshelf_id,
+                   cs.synced_at AS calibre_synced_at,
+                   abs_s.synced_at AS abs_synced_at
+            FROM books b
+            JOIN authors a ON a.id = b.author_id
+            LEFT JOIN books_calibre_snapshot cs ON cs.book_id = b.id
+            LEFT JOIN books_abs_snapshot abs_s ON abs_s.book_id = b.id
+            WHERE b.user_edited_fields IS NOT NULL
+              AND b.user_edited_fields NOT IN ('', '[]')
+        """)).fetchall()
+        return [dict(r) for r in rows]
+
+    raw = await run_across_libraries(None, _q)
+    out: list[dict] = []
+    for r in raw:
+        try:
+            fields = json.loads(r["user_edited_fields"] or "[]")
+            if not isinstance(fields, list):
+                fields = []
+        except (TypeError, ValueError):
+            fields = []
+        if not fields:
+            continue
+        out.append({
+            "book_id": r["book_id"],
+            "title": r["title"],
+            "author_name": r.get("author_name"),
+            "library_slug": r.get("library_slug"),
+            "library_name": r.get("library_name"),
+            "fields": fields,
+            "has_calibre_snapshot": r.get("calibre_synced_at") is not None,
+            "has_abs_snapshot": r.get("abs_synced_at") is not None,
+            "calibre_synced_at": r.get("calibre_synced_at"),
+            "abs_synced_at": r.get("abs_synced_at"),
+            "calibre_id": r.get("calibre_id"),
+            "audiobookshelf_id": r.get("audiobookshelf_id"),
+        })
+    # Stable ordering: alphabetical by title within the merged list so
+    # repeated polls don't shuffle. Pagination is client-friendly slice.
+    out.sort(key=lambda x: ((x.get("title") or "").lower(), x["book_id"]))
+    total = len(out)
+    return {
+        "rows": out[offset:offset + limit],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 # ── Metadata Manager — review queue endpoints ────────────────────────
 
 

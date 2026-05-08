@@ -1,16 +1,21 @@
-// v2.3.4 Metadata Manager page.
+// v2.3.5 Metadata Manager page.
 //
-// Four tabs of pending review work:
-//   1. Calibre diffs       — review queue rows where source='calibre'.
-//   2. ABS diffs           — source='abs'.
-//   3. Source-scan diffs   — source IN (goodreads, hardcover, kobo, ibdb, ...).
-//   4. Series moves        — pending rows from the legacy
-//                            book_series_suggestions table, surfaced here so
-//                            the old DiscSuggestionsPage can retire.
+// Five tabs:
+//   1. Calibre diffs        — review queue rows where source='calibre'.
+//   2. ABS diffs            — source='abs'.
+//   3. Source-scan diffs    — source IN (goodreads, hardcover, kobo, ibdb, ...).
+//   4. Series moves         — pending rows from the legacy
+//                             book_series_suggestions table, surfaced here so
+//                             the old DiscSuggestionsPage can retire.
+//   5. Pending manual edits — books with non-empty user_edited_fields
+//                             (v2.3.5). The "what edits do I have pending
+//                             push-back?" surface that doesn't fit the
+//                             incoming-review-queue model.
 //
-// Tabs 1-3 share the new metadata_review_queue endpoints. Tab 4 keeps
-// hitting the existing /discovery/series-suggestions endpoints —
-// retired routes were the goal, not retired tables.
+// Tabs 1-3 share the metadata_review_queue endpoints. Tab 4 keeps
+// hitting the existing /discovery/series-suggestions endpoints. Tab 5
+// hits /discovery/pending-edits which synthesizes a cross-library view
+// from the books table.
 //
 // Status filter: pending-only by default; a checkbox surfaces
 // applied/ignored history (currently a no-op for tabs 1-3 since the
@@ -19,13 +24,20 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useTheme } from "../theme";
-import { api, ApiError } from "../api";
+import { api, ApiError, slugQuery } from "../api";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
+import { CompareModal } from "../components/CompareModal";
+import { toast } from "../lib/toast";
 import { usePersist } from "../hooks/usePersist";
 
-type TabId = "calibre" | "abs" | "source-scan" | "series-moves";
+type TabId =
+  | "calibre"
+  | "abs"
+  | "source-scan"
+  | "series-moves"
+  | "pending-edits";
 
 const TABS: { id: TabId; label: string; sources: string[] | null }[] = [
   { id: "calibre", label: "Calibre", sources: ["calibre"] },
@@ -35,6 +47,7 @@ const TABS: { id: TabId; label: string; sources: string[] | null }[] = [
     sources: ["goodreads", "hardcover", "kobo", "ibdb", "google_books", "amazon", "audible"],
   },
   { id: "series-moves", label: "Series moves", sources: null },
+  { id: "pending-edits", label: "Pending manual edits", sources: null },
 ];
 
 interface QueueRow {
@@ -99,7 +112,9 @@ export default function DiscMetadataPage() {
           scan diffs surface when an enrichment source proposes a value that
           conflicts with what's already stored. Series moves surfaces source-
           consensus suggestions for books that look like they belong to a
-          series.
+          series. Pending manual edits lists books you've edited locally
+          but haven't yet pushed back to Calibre / ABS — push them upstream
+          or pull the original value back to abandon the edit.
         </p>
       </div>
 
@@ -163,6 +178,8 @@ export default function DiscMetadataPage() {
 
       {tab === "series-moves" ? (
         <SeriesMovesPanel showHistory={showHistory} />
+      ) : tab === "pending-edits" ? (
+        <PendingEditsPanel />
       ) : (
         <QueuePanel
           tabId={tab}
@@ -635,6 +652,268 @@ function SeriesMovesPanel({ showHistory }: { showHistory: boolean }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+
+// ── Pending manual edits tab (v2.3.5) ───────────────────────────────
+
+
+interface PendingEditRow {
+  book_id: number;
+  title: string;
+  author_name: string | null;
+  library_slug: string | null;
+  library_name: string | null;
+  fields: string[];
+  has_calibre_snapshot: boolean;
+  has_abs_snapshot: boolean;
+  calibre_synced_at: number | null;
+  abs_synced_at: number | null;
+  calibre_id: number | null;
+  audiobookshelf_id: string | null;
+}
+
+interface PendingEditsResponse {
+  rows: PendingEditRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+function PendingEditsPanel() {
+  const t = useTheme();
+  const [data, setData] = useState<PendingEditsResponse | null>(null);
+  const [busy, setBusy] = useState<string>(""); // `${book_id}|${verb}|${source}`
+  const [compareFor, setCompareFor] = useState<PendingEditRow | null>(null);
+
+  const load = () => {
+    setData(null);
+    api
+      .get<PendingEditsResponse>("/discovery/pending-edits?limit=200")
+      .then(setData)
+      .catch(() => setData({ rows: [], total: 0, limit: 200, offset: 0 }));
+  };
+
+  useEffect(load, []);
+
+  const bulkAction = async (
+    row: PendingEditRow,
+    verb: "push" | "pull",
+    source: "calibre" | "abs",
+  ) => {
+    const key = `${row.book_id}|${verb}|${source}`;
+    setBusy(key);
+    try {
+      const r = await api.post<{ applied: string[] }>(
+        `/discovery/books/${row.book_id}/${verb}${slugQuery(row.library_slug ?? undefined)}`,
+        { source, all_user_edited: true },
+      );
+      const n = r.applied?.length ?? 0;
+      const sourceLabel = source === "calibre" ? "Calibre" : "ABS";
+      if (n === 0) {
+        toast.info(`No fields applicable for ${verb} to ${sourceLabel}.`);
+      } else {
+        toast.success(
+          `${verb === "push" ? "Pushed" : "Pulled"} ${n} field${n === 1 ? "" : "s"} ${
+            verb === "push" ? "to" : "from"
+          } ${sourceLabel}`,
+        );
+      }
+      load();
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      toast.error(`${verb} to ${source}: ${msg}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  if (data === null) return <Load />;
+
+  if (data.rows.length === 0) {
+    return (
+      <div
+        style={{
+          background: t.bg2,
+          border: `1px solid ${t.border}`,
+          borderRadius: 12,
+          padding: 40,
+          textAlign: "center",
+          color: t.tg,
+        }}
+      >
+        <div style={{ fontSize: 32, marginBottom: 8 }}>—</div>
+        <div style={{ fontSize: 14 }}>
+          No pending manual edits. Edits made in the book sidebar
+          appear here until you push them upstream or pull the
+          original value back.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontSize: 12, color: t.tg }}>
+          {data.total} book{data.total === 1 ? "" : "s"} with pending
+          edits across all libraries.
+        </div>
+        {data.rows.map((row) => (
+          <PendingEditCard
+            key={`${row.library_slug}:${row.book_id}`}
+            row={row}
+            onCompare={() => setCompareFor(row)}
+            onAction={(verb, source) => bulkAction(row, verb, source)}
+            busy={busy}
+          />
+        ))}
+      </div>
+      {compareFor ? (
+        <CompareModal
+          bookId={compareFor.book_id}
+          bookTitle={compareFor.title}
+          librarySlug={compareFor.library_slug ?? undefined}
+          onClose={() => setCompareFor(null)}
+          onChanged={load}
+        />
+      ) : null}
+    </>
+  );
+}
+
+
+function PendingEditCard({
+  row,
+  onCompare,
+  onAction,
+  busy,
+}: {
+  row: PendingEditRow;
+  onCompare: () => void;
+  onAction: (verb: "push" | "pull", source: "calibre" | "abs") => void;
+  busy: string;
+}) {
+  const t = useTheme();
+  const isBusy = (verb: string, source: string) =>
+    busy === `${row.book_id}|${verb}|${source}`;
+  const anyBusy = busy.startsWith(`${row.book_id}|`);
+
+  return (
+    <div
+      style={{
+        background: t.bg2,
+        border: `1px solid ${t.border}`,
+        borderRadius: 10,
+        padding: 14,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: t.text }}>
+            {row.title}
+          </div>
+          <div style={{ fontSize: 12, color: t.tf }}>
+            by {row.author_name || "—"}
+            {row.library_name ? (
+              <span style={{ color: t.tg }}> · {row.library_name}</span>
+            ) : null}
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: t.tg }}>
+          {row.fields.length} edited field
+          {row.fields.length === 1 ? "" : "s"}
+        </div>
+      </div>
+
+      {/* Field chips */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {row.fields.map((f) => (
+          <span
+            key={f}
+            style={{
+              fontSize: 11,
+              padding: "3px 8px",
+              borderRadius: 999,
+              background: `${t.accent}15`,
+              border: `1px solid ${t.accent}55`,
+              color: t.text2,
+              fontFamily: "monospace",
+            }}
+          >
+            {f}
+          </span>
+        ))}
+      </div>
+
+      {/* Actions */}
+      <div
+        style={{
+          display: "flex",
+          gap: 6,
+          flexWrap: "wrap",
+          paddingTop: 8,
+          borderTop: `1px solid ${t.borderL}`,
+        }}
+      >
+        <Btn variant="ghost" size="sm" onClick={onCompare} disabled={anyBusy}>
+          Compare…
+        </Btn>
+        <div style={{ flex: 1 }} />
+        {row.has_calibre_snapshot ? (
+          <>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => onAction("push", "calibre")}
+              disabled={anyBusy}
+            >
+              {isBusy("push", "calibre") ? <Spin /> : null} → Push to Calibre
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => onAction("pull", "calibre")}
+              disabled={anyBusy}
+            >
+              {isBusy("pull", "calibre") ? <Spin /> : null} ← Pull from Calibre
+            </Btn>
+          </>
+        ) : null}
+        {row.has_abs_snapshot ? (
+          <>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => onAction("push", "abs")}
+              disabled={anyBusy}
+            >
+              {isBusy("push", "abs") ? <Spin /> : null} → Push to ABS
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => onAction("pull", "abs")}
+              disabled={anyBusy}
+            >
+              {isBusy("pull", "abs") ? <Spin /> : null} ← Pull from ABS
+            </Btn>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }
