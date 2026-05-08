@@ -44,6 +44,28 @@ _NOISE_PATTERNS = [
 
 _STOPWORDS = frozenset({"the", "a", "an", "of", "and", "in", "on", "for", "to", "by"})
 
+# Pulls a volume index out of titles like "Foo: Book 5" / "Foo Vol. 3" /
+# "Foo, Volume 12". Used by the empty-residue path in score_match: when
+# the series-strip leaves nothing meaningful, we fall back to comparing
+# volumes directly so we don't promote Book 2 as a match for Book 5.
+_VOLUME_RX = re.compile(
+    r"\b(?:book|volume|vol|tome|part|episode)\b\.?\s*#?(\d+)(?:\.\d+)?\b",
+    re.I,
+)
+
+
+def _extract_volume(title: str) -> int | None:
+    """Return the integer volume index from a title, or None if absent.
+
+    Examples: "Foo: Book 5" → 5, "Foo, Vol. 12" → 12, "Foo" → None.
+    Title-range markers like "1-4" deliberately don't match (no keyword
+    prefix) — those signal bundles, which Part B handles separately.
+    """
+    if not title:
+        return None
+    m = _VOLUME_RX.search(title)
+    return int(m.group(1)) if m else None
+
 
 def _title_tokens(title: str) -> set[str]:
     """Normalize a title into a set of comparison tokens."""
@@ -178,6 +200,12 @@ def score_match_with_breakdown(
     effective_record = record_title
     series_stripped = False
     series_boost = 0.0
+    # When the series-strip + clean leaves no meaningful tokens we fall
+    # back to scoring the original record_title (the book IS just the
+    # series name, possibly with a volume marker). The fallback path
+    # cross-checks volumes to avoid promoting Book 2 as a match for
+    # Book 5 in a self-titled series.
+    fallback_to_full_title = False
 
     if known_series and record_title:
         series_lower = known_series.lower().strip()
@@ -185,11 +213,47 @@ def score_match_with_breakdown(
         if series_lower in record_lower:
             series_boost = 0.10
             series_stripped = True
-            effective_record = re.sub(
+            stripped = re.sub(
                 re.escape(known_series), "", record_title, flags=re.IGNORECASE
             ).strip()
-            effective_record = re.sub(r"[\s:—–-]+$", "", effective_record).strip()
-            effective_record = re.sub(r"^[\s:—–-]+", "", effective_record).strip()
+            stripped = re.sub(r"[\s:—–-]+$", "", stripped).strip()
+            stripped = re.sub(r"^[\s:—–-]+", "", stripped).strip()
+
+            # Probe what's left after the noise pass that title_similarity
+            # would apply: if all remaining tokens are numeric (or there
+            # are none), the strip removed everything that distinguishes
+            # this record from a sibling volume in the same series. In
+            # that case scoring "Book 5" vs "Bikini Days: Unconventional
+            # Romance" would give 0.0 ts and the result lands at 0.40 —
+            # the bug Mark hit. Fall back to comparing the original full
+            # titles so the strong series-name match registers.
+            residue_tokens = _title_tokens(_clean_title(stripped))
+            non_numeric = {t for t in residue_tokens if not t.isdigit()}
+            if non_numeric:
+                effective_record = stripped
+            else:
+                # Volume-mismatch guard: if both titles specify a volume
+                # AND those volumes differ, this is a different book in
+                # the same series — definitively wrong, return zero.
+                rec_vol = _extract_volume(record_title)
+                srch_vol = _extract_volume(search_title)
+                if rec_vol is not None and srch_vol is not None and rec_vol != srch_vol:
+                    return {
+                        "record_title": record_title,
+                        "effective_record_title": stripped,
+                        "search_title": search_title,
+                        "series_stripped": True,
+                        "title_similarity": 0.0,
+                        "author_overlap": round(
+                            author_overlap(record_authors, search_authors), 4
+                        ),
+                        "series_boost": 0.0,
+                        "raw_score": 0.0,
+                        "confidence": 0.0,
+                        "volume_mismatch": True,
+                    }
+                effective_record = record_title
+                fallback_to_full_title = True
 
     ts = title_similarity(effective_record, search_title)
     au = author_overlap(record_authors, search_authors)
@@ -201,6 +265,7 @@ def score_match_with_breakdown(
         "effective_record_title": effective_record,
         "search_title": search_title,
         "series_stripped": series_stripped,
+        "fallback_to_full_title": fallback_to_full_title,
         "title_similarity": round(ts, 4),
         "author_overlap": round(au, 4),
         "series_boost": round(series_boost, 4),
