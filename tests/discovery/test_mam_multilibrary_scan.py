@@ -181,9 +181,10 @@ async def test_scan_endpoint_iterates_all_libraries(
 async def test_scan_endpoint_returns_complete_when_no_books(
     two_libraries, isolated_settings, monkeypatch,
 ):
-    """If every library has zero `mam_status IS NULL` books, the
-    endpoint should short-circuit with a `complete` response and not
-    spawn a background task."""
+    """If every library has zero books needing a scan, the endpoint
+    should short-circuit with a `complete` response and not spawn a
+    background task. `found` is the only terminal status — `possible`
+    and `not_found` are rescannable, so we mark every book `found`."""
     from app.discovery.routers import mam as mam_router
     from app.discovery import database as disco_db
     from app import state as app_state
@@ -195,7 +196,7 @@ async def test_scan_endpoint_returns_complete_when_no_books(
     for slug in ("ebooks", "audio"):
         db = await disco_db.get_db(slug=slug)
         try:
-            await db.execute("UPDATE books SET mam_status='not_found'")
+            await db.execute("UPDATE books SET mam_status='found'")
             await db.commit()
         finally:
             await db.close()

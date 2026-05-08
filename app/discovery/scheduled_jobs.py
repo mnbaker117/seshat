@@ -47,6 +47,7 @@ from app.discovery.notify import (
     notify_scan_complete,
 )
 from app.discovery.sources.mam import (
+    _NEEDS_SCAN_BASIC_BARE,
     _resolve_mam_languages,
     scan_books_batch as mam_scan_batch,
     validate_connection as mam_validate,
@@ -283,9 +284,26 @@ async def mam_scheduler_loop() -> None:
             slug = lib["slug"]
             ldb = await get_db(slug=slug)
             try:
+                # Auto-release: a book stamped is_unreleased=1 with an
+                # expected_date that has now arrived stops looking like
+                # "Upcoming" and starts looking like a normal Missing book
+                # eligible for MAM scanning. Without this flip, books would
+                # sit in the Upcoming bucket forever (or until a source scan
+                # rewrote the row), invisible to the MAM scanner. Runs in
+                # the same per-library loop as the count below so freshly
+                # released books are picked up the same tick they age in.
+                # `localtime` so a book whose expected_date is "today" in
+                # Mark's timezone flips at local-midnight rather than
+                # waiting up to 24h for UTC to catch up.
+                await ldb.execute(
+                    "UPDATE books SET is_unreleased=0 "
+                    "WHERE is_unreleased=1 "
+                    "AND expected_date IS NOT NULL "
+                    "AND substr(expected_date, 1, 10) <= date('now', 'localtime')"
+                )
+                await ldb.commit()
                 rem_row = await (await ldb.execute(
-                    "SELECT COUNT(*) FROM books WHERE mam_status IS NULL "
-                    "AND is_unreleased=0 AND hidden=0"
+                    f"SELECT COUNT(*) FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}"
                 )).fetchone()
                 count = rem_row[0] if rem_row else 0
             finally:

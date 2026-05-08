@@ -67,18 +67,39 @@ def _cat_for(content_type: str) -> str:
     return AUDIOBOOK_CATEGORY if content_type == "audiobook" else EBOOK_CATEGORY
 
 # ─── SQL predicates for "books needing MAM scan" ─────────────
-# Two flavors: BASIC checks only mam_status, STRICT also requires mam_url.
-# In practice they always agree because the UPDATE that writes scan results
-# sets both columns together — but the strict flavor is used by full scans
-# to be defensive against any future code path that might write one column
-# without the other. Each flavor has a _BARE and an _ALIASED form for
-# queries that JOIN authors and need a `b.` prefix to disambiguate.
+# A book "needs scan" if it was never scanned (mam_status IS NULL) OR if
+# its prior result was inconclusive ('possible' or 'not_found') — those
+# get retried on every scan because catalog churn on MAM means a search
+# that came up empty last week may hit today.
+#
+# Two flavors: BASIC checks only mam_status, STRICT also requires that
+# never-scanned rows have mam_url IS NULL (defensive against any future
+# code path that writes one column without the other). Rescannable rows
+# (possible/not_found) bypass the mam_url guard because 'possible' rows
+# legitimately have a mam_url set.
+#
+# Each flavor has a _BARE and an _ALIASED form for queries that JOIN
+# authors and need a `b.` prefix to disambiguate.
 
-_NEEDS_SCAN_BASIC_BARE = "mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
-_NEEDS_SCAN_BASIC_ALIASED = "b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
+_NEEDS_SCAN_BASIC_BARE = (
+    "(mam_status IS NULL OR mam_status IN ('possible','not_found')) "
+    "AND is_unreleased = 0 AND hidden = 0"
+)
+_NEEDS_SCAN_BASIC_ALIASED = (
+    "(b.mam_status IS NULL OR b.mam_status IN ('possible','not_found')) "
+    "AND b.is_unreleased = 0 AND b.hidden = 0"
+)
 
-_NEEDS_SCAN_STRICT_BARE = "mam_url IS NULL AND mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
-_NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
+_NEEDS_SCAN_STRICT_BARE = (
+    "((mam_url IS NULL AND mam_status IS NULL) "
+    "OR mam_status IN ('possible','not_found')) "
+    "AND is_unreleased = 0 AND hidden = 0"
+)
+_NEEDS_SCAN_STRICT_ALIASED = (
+    "((b.mam_url IS NULL AND b.mam_status IS NULL) "
+    "OR b.mam_status IN ('possible','not_found')) "
+    "AND b.is_unreleased = 0 AND b.hidden = 0"
+)
 
 # Match quality thresholds (0-1 scale, uses scoring.score_match)
 # The combined score blends 70% title similarity + 30% author overlap,
@@ -1211,7 +1232,9 @@ async def scan_books_batch(
 
     Two scan-set modes:
       - `book_ids` provided  → scan exactly that ID set (snapshot mode).
-      - `book_ids=None`      → query whatever currently has mam_status IS NULL.
+      - `book_ids=None`      → query whatever currently matches the
+                                `_NEEDS_SCAN_BASIC_*` predicate (never-scanned
+                                rows plus rescannable possible/not_found rows).
 
     Snapshot mode is what orchestrators use when concurrent author scans
     may be adding new books mid-run: any books added during THIS scan

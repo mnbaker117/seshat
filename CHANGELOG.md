@@ -7,6 +7,52 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.6] — 2026-05-07
+
+Discovery hygiene release — two small behavioral changes that close
+loops where books would silently sit unscannable. Both flow through
+the same per-library tick in `mam_scheduler_loop`, so they ship
+together.
+
+### Discovery — auto-release Upcoming books on expected_date arrival
+
+When a source scan tags a book `is_unreleased=1` with a future
+`expected_date`, that book lives in the Upcoming bucket and is
+explicitly excluded from MAM scanning. Previously it stayed there
+until a fresh source scan happened to rewrite the row — for books
+whose source reference fell off (Goodreads delisting, Hardcover
+edition reshuffle), that could be never. Now, every MAM scheduler
+tick, books whose `expected_date` is today or earlier (server local
+time) get `is_unreleased` cleared, transitioning them from Upcoming
+to plain Missing in the same tick they age in. They become
+MAM-scannable on the very next eligibility query.
+
+The clear is a single cheap UPDATE in
+`app/discovery/scheduled_jobs.py`'s per-library loop, scoped to
+`is_unreleased=1 AND expected_date IS NOT NULL`. No new scheduler
+plumbing — runs at `mam_scan_interval_minutes` cadence (default 6h).
+
+### Discovery — MAM scan rescans `possible` and `not_found` rows
+
+The "books needing MAM scan" predicate widens from
+`mam_status IS NULL` to also include `mam_status IN ('possible',
+'not_found')`. Catalog churn on MAM means a search that came up
+empty or inconclusive last week may hit cleanly today, and there's
+no upside to letting those rows sit terminal. `found` is now the
+only truly terminal status — every other state retries.
+
+Predicate definitions live in `app/discovery/sources/mam.py` (the
+four `_NEEDS_SCAN_*` constants), and four sites that previously
+duplicated the WHERE clause inline (`routers/mam.py` × 2,
+`routers/authors.py`, `scheduled_jobs.py`) now use those constants
+so the predicate has one canonical home.
+
+The widening applies to both ebooks and audiobooks (single
+unified `books` table) and to every scan path: scheduled tick,
+manual `/scan`, single-author scan, full library scan.
+
+---
+
 ## [2.3.5] — 2026-05-07
 
 Push-back release — caps the v2.3 dual-source-of-truth arc. From

@@ -32,6 +32,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.config import load_settings, save_settings
 from app.discovery.database import get_db
 from app.discovery.sources.mam import (
+    _NEEDS_SCAN_BASIC_BARE,
     validate_connection as mam_validate,
     scan_books_batch as mam_scan_batch,
     start_full_scan as mam_start_full_scan,
@@ -172,7 +173,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
         ldb = await get_db(slug=lib["slug"])
         try:
             id_rows = await ldb.execute_fetchall(
-                "SELECT id FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0 "
+                f"SELECT id FROM books WHERE {_NEEDS_SCAN_BASIC_BARE} "
                 "ORDER BY owned DESC, id ASC"
             )
             ids = [r[0] for r in id_rows]
@@ -759,8 +760,8 @@ async def mam_scan_single_author(author_id: int, slug: str | None = None):
         author_name = rows[0][0]
 
         book_rows = await db.execute_fetchall(
-            "SELECT id, title FROM books WHERE author_id=? AND mam_status IS NULL "
-            "AND is_unreleased=0 AND hidden=0 ORDER BY title",
+            f"SELECT id, title FROM books WHERE author_id=? AND {_NEEDS_SCAN_BASIC_BARE} "
+            "ORDER BY title",
             (author_id,),
         )
     finally:

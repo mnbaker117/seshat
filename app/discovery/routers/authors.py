@@ -884,7 +884,11 @@ async def scan_authors_mam(data: dict = Body(...)):
     Runs as a background task with progress tracked in state._mam_scan_progress
     so the Dashboard scan widget shows progress in real time.
     """
-    from app.discovery.sources.mam import check_book as mam_check_book, _resolve_mam_languages
+    from app.discovery.sources.mam import (
+        _NEEDS_SCAN_BASIC_ALIASED,
+        check_book as mam_check_book,
+        _resolve_mam_languages,
+    )
     from app import state
 
     author_ids = data.get("author_ids", [])
@@ -905,8 +909,8 @@ async def scan_authors_mam(data: dict = Body(...)):
         placeholders = ",".join(["?" for _ in author_ids])
         book_rows = await db.execute_fetchall(
             f"SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id "
-            f"WHERE b.author_id IN ({placeholders}) AND b.mam_status IS NULL "
-            f"AND b.is_unreleased=0 AND b.hidden=0 ORDER BY a.sort_name, b.title",
+            f"WHERE b.author_id IN ({placeholders}) AND {_NEEDS_SCAN_BASIC_ALIASED} "
+            f"ORDER BY a.sort_name, b.title",
             author_ids,
         )
     finally:
