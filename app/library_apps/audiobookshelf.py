@@ -346,3 +346,47 @@ class AudiobookshelfClient:
                 return 200 <= resp.status_code < 300
             except httpx.HTTPError:
                 return False
+
+    async def get_item(self, item_id: str) -> dict:
+        """GET /api/items/{id} — fetch one library item with metadata.
+
+        Used by push-back so we can read the canonical post-PATCH
+        media metadata back to refresh `books_abs_snapshot` without
+        guessing what ABS normalized our payload to.
+        """
+        import httpx
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/items/{item_id}",
+                headers=self._headers(),
+                params={"expanded": "1"},
+            )
+            resp.raise_for_status()
+            return resp.json() or {}
+
+    async def patch_item_media(
+        self, item_id: str, payload: dict,
+    ) -> dict:
+        """PATCH /api/items/{id}/media — update media metadata.
+
+        ABS expects the payload shape `{"metadata": {...}}` where the
+        inner dict contains only the fields you want to change.
+        Other fields are preserved. Returns the response JSON
+        (typically the updated media object) so callers can re-read
+        without a follow-up GET.
+
+        Raises httpx.HTTPStatusError on non-2xx; caller is expected
+        to translate that into a user-facing error.
+        """
+        import httpx
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.patch(
+                f"{self.base_url}/api/items/{item_id}/media",
+                headers={
+                    **self._headers(),
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json() or {}

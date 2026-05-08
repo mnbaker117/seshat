@@ -279,6 +279,14 @@ DEFAULT_SETTINGS = {
     # folder and auto-imports any book files dropped here. Safest
     # Calibre integration — no direct metadata.db writes.
     "cwa_ingest_path": "",
+    # CWA push-back (v2.3.5) — when slim users want metadata edits to
+    # land in their CWA-managed Calibre library. Seshat drives CWA's
+    # `/admin/book/<id>` form POST handler (the one its own SPA uses).
+    # Auth = login form → session cookie → CSRF token scraped from
+    # rendered HTML. Password lives in the encrypted secrets store
+    # under `cwa_password`, not here.
+    "cwa_base_url": "",
+    "cwa_username": "",
 
     # ── Audiobookshelf integration ──────────────────────────
     # Base URL of the ABS instance Seshat talks to (e.g.

@@ -46,6 +46,7 @@ SECRET_KEYS: dict[str, str] = {
     "qbit_password": "qBittorrent password",
     "hardcover_api_key": "Hardcover API Bearer token",
     "abs_api_key": "Audiobookshelf API Bearer token",
+    "cwa_password": "Calibre-Web-Automated user password (push-back)",
 }
 
 

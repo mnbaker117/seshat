@@ -588,11 +588,101 @@ storage UI + source-scan write rule + hidden-book correctness:
 Total: original v2.3.4 scope + 3 hidden-book deliverables. Estimate
 extends to ~2 weeks given the bundled scope.
 
-**v2.3.5** — push-back (~1 week + research):
-- ABS push-back via PATCH API.
-- Calibre push-back via calibredb (full image).
-- CWA push-back research; ship if feasible, otherwise document
-  as slim-image limitation.
+**v2.3.5** — push-back (caps the v2.3 arc):
+- ABS push-back via PATCH `/api/items/{id}/media`.
+- Calibre push-back via `calibredb set_metadata` (full image only).
+- CWA push-back via the upstream Calibre-Web `/admin/book/<id>` form
+  POST (slim image; researched 2026-05-07 — see "CWA push-back
+  feasibility" below).
+- Bulk push/pull verbs ("Push all my edits to Calibre/ABS" / "Pull
+  all upstream values for my edited fields").
+- Pull endpoint flips to **pull-clears** semantics for symmetry with
+  push-clears (see "user_edited_fields semantics" below).
+
+**user_edited_fields semantics on push/pull (locked 2026-05-07).**
+Both verbs *clear* the named field from `user_edited_fields` on
+success. Mental model: "after push or pull, both DBs agree → that
+value IS the truth, no edit divergence to flag." Future upstream
+changes to a now-cleared field auto-flow on next sync (no review
+queue). The user re-enters the "watched" state by editing the field
+again in the sidebar — `PUT /books/{bid}` always re-adds to
+`user_edited_fields` on diff-vs-stored, regardless of prior state.
+
+This is a **behavior change** to v2.3.4's `/pull` endpoint, which
+previously *added* to `user_edited_fields`. Migration: just flip
+the merge to a remove. Documented in the v2.3.4 → v2.3.5 changelog
+section of the README.
+
+**CWA push-back feasibility (researched 2026-05-07).**
+Verdict: **Option β (form POST)** ships. Option α (dedicated REST
+API) does not exist as a separate surface in CWA — the only API-
+shaped endpoints CWA inherits from Calibre-Web are KOReader sync
+and OPDS. Option γ (direct metadata.db write) stays rejected.
+
+Wire shape Seshat targets:
+
+```
+POST {CWA_BASE}/login
+  form: username=...&password=...
+  → captures `session` cookie
+
+GET {CWA_BASE}/admin/book/<calibre_id>
+  → scrapes `csrf_token` from <input name="csrf_token">
+
+POST {CWA_BASE}/admin/book/<calibre_id>
+  Cookie: session=...
+  X-CSRFToken: <token>
+  multipart/form-data:
+    book_title, authors, comments (description as HTML),
+    series, series_index, tags, publisher, languages,
+    pubdate (YYYY-MM-DD; empty string is no-op, not clear),
+    rating (0-10), cover_url, identifier-type-N/identifier-val-N,
+    checkA=on/off (auto-author-sort), checkT=on/off (auto-title-sort)
+```
+
+Auth: cached session cookie + CSRF token in-memory for the request
+lifetime; refresh on 401/400-CSRF failure. Token is HTML-scraped
+(no header-served alternative). New encrypted-store secret
+`cwa_password` + plaintext-settings `cwa_base_url` and
+`cwa_username`. If unset on a slim image and Mark attempts a
+Calibre push, the unified push endpoint returns 409 "configure
+CWA in Settings → Sinks."
+
+Field-coverage gotchas to honor:
+- `pubdate` empty string is a no-op, not a clear. To clear, send
+  a sentinel ABS API quirk doesn't have. Skip clearing pubdate
+  on push for now (push only when value is truthy).
+- Cover push: prefer `cover_url` field (CWA fetches via
+  `helper.save_cover_from_url`) over multipart upload. Seshat
+  has no per-host cover URL accessible from CWA's POV anyway —
+  the cover is on disk in Calibre already; cover push requires
+  more thought and is **deferred to v2.4.x** (out of v2.3.5
+  scope). Implementation: skip cover_path in the push field map
+  for CWA + calibredb both. Pull-from-Calibre is unaffected.
+- Comments are HTML (Markup.unescape). Send descriptions as-is.
+- Authors / tags are comma-separated strings, not arrays.
+- `checkA=false` and `checkT=false` to prevent CWA from
+  auto-rewriting author_sort and title_sort on push (we don't
+  want CWA's heuristics to override Seshat's edits).
+
+Risks:
+1. CSRF token bootstrap is HTML-scrape-fragile. Mitigation: pin a
+   known-good CWA version range in docs; smoke-test on bumps.
+2. Internal endpoint stability — upstream Calibre-Web has
+   rearranged these routes before. Same mitigation.
+3. Per-push sidecar accumulates in
+   `/app/calibre-web-automated/metadata_change_logs/`. Informational,
+   not a blocker — flag in the README.
+
+**Bulk verbs**:
+- `POST /books/{bid}/push` body shape extended:
+  `{"source": "calibre"|"abs", "fields": [...]}` is per-field;
+  `{"source": ..., "all_user_edited": true}` is the bulk variant.
+  Server iterates `user_edited_fields`, pushes each, clears each
+  on success. Returns `{applied: [...], failed: [...]}`.
+- `POST /books/{bid}/pull` mirrors the same `all_user_edited`
+  flag. Iterates `user_edited_fields`, pulls each from snapshot,
+  clears each on success.
 
 **Pre-tag release checklist for v2.3.5 (caps the v2.3 arc):**
 - [ ] Re-run the full backend test suite locally — should be green
@@ -645,5 +735,9 @@ incrementally.
 | 2026-05-07 | UNIQUE(name, author_id) collision on shared→per-author flip | If a series flipping from shared to per-author would collide with an existing per-author row of the same name, `_recompute_series_author` catches the IntegrityError, leaves authority as NULL, and logs a warning. The membership change still lands. User can manually resolve via rename or delete. Pragmatic over auto-merging (which would be destructive without consent). |
 | 2026-05-07 | Cover-pick ordering for series rows | Per-series cover_book_id picks: books with any cover signal (cover_path / cover_url / audiobookshelf_id) first, then series_index ASC NULLS-LAST (via COALESCE 9999), then pub_date ASC, then id ASC. Correlated subquery — fine at our scale (hundreds of series). Hidden books excluded so the list doesn't surface a cover the user explicitly pruned. |
 | 2026-05-07 | Book-title search via subquery, not row-level WHERE | A row-level `b.title LIKE ?` would shrink the GROUP BY's `book_count` to only matching books (e.g. searching "Reach" on a 5-book Halo would report book_count=1). Implemented as `s.id IN (SELECT series_id FROM books WHERE title LIKE ?)` so per-series aggregations stay correct. Regression-tested. |
+| 2026-05-07 | v2.3.5 push-back: `user_edited_fields` cleared on push AND pull | After either verb, both DBs agree on that field — there's no "edit divergence" to flag, so the entry is removed from `user_edited_fields`. Future upstream changes auto-flow on next sync. User re-enters watched state by editing the field again (PUT diff-tracks against stored row). Symmetric pull-clears is a behavior change from v2.3.4's pull-adds — flagged in the v2.3.4 → v2.3.5 changelog. |
+| 2026-05-07 | v2.3.5 CWA push: form POST, not REST API | CWA does not ship a REST metadata API. The viable surface is the upstream Calibre-Web `/admin/book/<id>` form POST handler. Auth = login form → session cookie → CSRF token scraped from a rendered page → multipart POST. Encrypted-store secret `cwa_password` + plaintext `cwa_base_url` / `cwa_username`. CSRF token is HTML-scraped (no header alternative) — fragile across CWA version bumps; mitigation is a pinned-version smoke test. |
+| 2026-05-07 | Cover push deferred to v2.4.x | CWA's `cover_url` field expects a fetchable URL; calibredb's `--field cover:/path` expects a local file. Plumbing a Seshat-served cover URL or routing to a temp file is more design work than v2.3.5 should carry. v2.3.5 push field map omits `cover_path`. Pull-cover-from-Calibre/ABS unaffected (pull is a local snapshot copy). |
+| 2026-05-07 | v2.3.5 bulk verbs ("push all my edits", "pull all my edits") | `POST /books/{bid}/push` and `POST /books/{bid}/pull` accept either `{fields: [...]}` (per-field) or `{all_user_edited: true}` (bulk over the current `user_edited_fields` array). Returns `{applied: [...], failed: [...]}` so partial-success is observable. UI surfaces as two extra buttons in the Compare modal header. |
 
 Update this table as decisions evolve during implementation.

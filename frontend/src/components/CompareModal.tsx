@@ -1,14 +1,16 @@
-// v2.3.4 Compare panel — per-field side-by-side Seshat / Calibre /
-// ABS metadata view, with per-field "← pull from X" buttons.
+// v2.3.5 Compare panel — per-field side-by-side Seshat / Calibre /
+// ABS metadata view, with per-field "← pull from X" and "→ push to X"
+// buttons + bulk push/pull-all-user-edited verbs in the header.
 //
 // Fetches from `GET /api/discovery/books/{bid}/compare`. Pulls write
 // the chosen snapshot value(s) into Seshat-live via
-// `POST /api/discovery/books/{bid}/pull` and add the field to
-// `user_edited_fields` so the next sync's auto-flow doesn't roll
-// the change back.
+// `POST /api/discovery/books/{bid}/pull`. Pushes write Seshat-live
+// values upstream via `POST /api/discovery/books/{bid}/push`. Both
+// verbs CLEAR the named fields from `user_edited_fields` on success
+// (v2.3.5: both DBs now agree → no edit divergence to flag).
 //
 // Diff cells are visually highlighted; user-edited fields get a
-// small badge so the user knows the auto-flow is already gated.
+// small badge so the user knows there's pending divergence.
 
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme";
@@ -44,6 +46,8 @@ interface CompareModalProps {
   onChanged: () => void; // parent refresh hook (sidebar re-fetches the book)
 }
 
+type Source = "calibre" | "abs";
+
 export function CompareModal({
   bookId,
   bookTitle,
@@ -54,7 +58,7 @@ export function CompareModal({
   const t = useTheme();
   const slugQs = slugQuery(librarySlug);
   const [data, setData] = useState<CompareResponse | null>(null);
-  const [busy, setBusy] = useState<string>(""); // `${field}|${source}`
+  const [busy, setBusy] = useState<string>(""); // `${field}|${source}|${verb}`
   const [err, setErr] = useState("");
 
   const refresh = () => {
@@ -75,8 +79,10 @@ export function CompareModal({
 
   useEffect(refresh, [bookId]);
 
-  const pull = async (field: string, source: "calibre" | "abs") => {
-    const key = `${field}|${source}`;
+  const sourceLabel = (s: Source) => (s === "calibre" ? "Calibre" : "ABS");
+
+  const pull = async (field: string, source: Source) => {
+    const key = `${field}|${source}|pull`;
     setBusy(key);
     setErr("");
     try {
@@ -84,14 +90,65 @@ export function CompareModal({
         source,
         fields: [field],
       });
-      toast.success(
-        `Pulled ${field} from ${source === "calibre" ? "Calibre" : "ABS"}`,
-      );
+      toast.success(`Pulled ${field} from ${sourceLabel(source)}`);
       onChanged();
       refresh();
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
       setErr(`Pull failed: ${msg}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const push = async (field: string, source: Source) => {
+    const key = `${field}|${source}|push`;
+    setBusy(key);
+    setErr("");
+    try {
+      const r = await api.post<{ applied: string[]; failed: unknown[] }>(
+        `/discovery/books/${bookId}/push${slugQs}`,
+        { source, fields: [field] },
+      );
+      if (r.applied?.includes(field)) {
+        toast.success(`Pushed ${field} to ${sourceLabel(source)}`);
+      } else {
+        toast.error(`Push to ${sourceLabel(source)} did not apply ${field}`);
+      }
+      onChanged();
+      refresh();
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      setErr(`Push failed: ${msg}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const bulk = async (verb: "push" | "pull", source: Source) => {
+    const key = `bulk|${source}|${verb}`;
+    setBusy(key);
+    setErr("");
+    try {
+      const r = await api.post<{ applied: string[] }>(
+        `/discovery/books/${bookId}/${verb}${slugQs}`,
+        { source, all_user_edited: true },
+      );
+      const n = r.applied?.length ?? 0;
+      if (n === 0) {
+        toast.info(`No matching user-edited fields to ${verb}.`);
+      } else {
+        toast.success(
+          `${verb === "push" ? "Pushed" : "Pulled"} ${n} field${n === 1 ? "" : "s"} ${
+            verb === "push" ? "to" : "from"
+          } ${sourceLabel(source)}`,
+        );
+      }
+      onChanged();
+      refresh();
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      setErr(`Bulk ${verb} failed: ${msg}`);
     } finally {
       setBusy("");
     }
@@ -158,6 +215,61 @@ export function CompareModal({
             {fmtSyncedAt(data?.abs_synced_at ?? null)}
           </div>
         </div>
+
+        {/* Bulk actions — push or pull every user-edited field at once. */}
+        {data && data.user_edited_fields.length > 0 ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              alignItems: "center",
+              fontSize: 12,
+              color: t.td,
+              padding: "8px 10px",
+              background: `${t.accent}10`,
+              border: `1px solid ${t.accent}33`,
+              borderRadius: 6,
+            }}
+          >
+            <span style={{ marginRight: 6 }}>
+              {data.user_edited_fields.length} edited field
+              {data.user_edited_fields.length === 1 ? "" : "s"}:
+            </span>
+            <Btn
+              variant="ghost"
+              size="xs"
+              onClick={() => bulk("push", "calibre")}
+              disabled={!!busy}
+            >
+              {busy === "bulk|calibre|push" ? <Spin /> : null} → Push all to Calibre
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="xs"
+              onClick={() => bulk("push", "abs")}
+              disabled={!!busy || !data.abs_synced_at}
+            >
+              {busy === "bulk|abs|push" ? <Spin /> : null} → Push all to ABS
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="xs"
+              onClick={() => bulk("pull", "calibre")}
+              disabled={!!busy || !data.calibre_synced_at}
+            >
+              {busy === "bulk|calibre|pull" ? <Spin /> : null} ← Pull all from Calibre
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="xs"
+              onClick={() => bulk("pull", "abs")}
+              disabled={!!busy || !data.abs_synced_at}
+            >
+              {busy === "bulk|abs|pull" ? <Spin /> : null} ← Pull all from ABS
+            </Btn>
+          </div>
+        ) : null}
 
         {err ? (
           <div
@@ -226,12 +338,42 @@ export function CompareModal({
                   </td>
                   <td style={{ ...td(t), color: t.text2, maxWidth: 280 }}>
                     <div style={cellStyle(f.seshat)}>{fmt(f.seshat)}</div>
+                    {/* Per-field push buttons — render when Seshat
+                        differs from a snapshot AND that snapshot
+                        actually exists. The user can push the local
+                        value upstream; the cell stays editable
+                        afterward because a fresh sidebar edit will
+                        re-flag user_edited. */}
+                    {f.calibre_diff && data?.calibre_synced_at ? (
+                      <Btn
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => push(f.field, "calibre")}
+                        disabled={busy === `${f.field}|calibre|push`}
+                        style={{ marginTop: 6 }}
+                      >
+                        {busy === `${f.field}|calibre|push` ? <Spin /> : null}{" "}
+                        → push to Calibre
+                      </Btn>
+                    ) : null}
+                    {f.abs_diff && data?.abs_synced_at ? (
+                      <Btn
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => push(f.field, "abs")}
+                        disabled={busy === `${f.field}|abs|push`}
+                        style={{ marginTop: 6 }}
+                      >
+                        {busy === `${f.field}|abs|push` ? <Spin /> : null}{" "}
+                        → push to ABS
+                      </Btn>
+                    ) : null}
                   </td>
                   <CompareCell
                     value={f.calibre}
                     diff={f.calibre_diff}
                     onPull={() => pull(f.field, "calibre")}
-                    busy={busy === `${f.field}|calibre`}
+                    busy={busy === `${f.field}|calibre|pull`}
                     fmt={fmt}
                     cellStyle={cellStyle}
                     t={t}
@@ -241,7 +383,7 @@ export function CompareModal({
                     value={f.abs}
                     diff={f.abs_diff}
                     onPull={() => pull(f.field, "abs")}
-                    busy={busy === `${f.field}|abs`}
+                    busy={busy === `${f.field}|abs|pull`}
                     fmt={fmt}
                     cellStyle={cellStyle}
                     t={t}

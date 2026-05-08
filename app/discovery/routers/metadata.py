@@ -190,33 +190,37 @@ async def book_compare(bid: int, slug: str | None = Query(None)):
 async def book_pull(bid: int, payload: dict = Body(...), slug: str | None = Query(None)):
     """Pull one or more snapshot fields into Seshat-live.
 
-    Request body:
-      {"source": "calibre" | "abs",
-       "fields": ["description", "pub_date", ...]}
+    Request body (one of):
+      {"source": "calibre"|"abs", "fields": ["description", ...]}
+      {"source": "calibre"|"abs", "all_user_edited": true}
+
+    The bulk variant iterates the book's current `user_edited_fields`
+    (filtered to fields the source actually provides) and pulls each.
 
     Each named field is copied from the snapshot to the corresponding
     books column. Field names use the BOOKS column name (which is
     what the Compare endpoint exposes), not the snapshot column —
-    the mapping happens here. Pulled fields are added to
-    `books.user_edited_fields` so the next Calibre/ABS sync's
-    auto-flow doesn't immediately roll the value back. (The user
-    explicitly chose this value; treat as a manual edit for
-    auto-flow purposes.)
+    the mapping happens here.
 
-    400 if source is invalid, 404 if the snapshot doesn't exist.
+    **v2.3.5 — pull-clears semantics.** Pulled fields are *removed*
+    from `books.user_edited_fields` because both DBs now agree on the
+    value. The user's edit divergence is resolved; future upstream
+    changes auto-flow on next sync (no review queue). The user
+    re-enters watched state by editing the field again in the
+    sidebar (PUT /books/{bid} re-adds to user_edited_fields on
+    diff-vs-stored).
+
+    400 if source is invalid or the body is malformed; 404 if the
+    snapshot doesn't exist.
     """
     source = payload.get("source")
-    fields = payload.get("fields") or []
     if source not in ("calibre", "abs"):
         raise HTTPException(400, "source must be 'calibre' or 'abs'")
-    if not isinstance(fields, list) or not fields:
-        raise HTTPException(400, "fields must be a non-empty list")
 
     snapshot_table = (
         "books_calibre_snapshot" if source == "calibre"
         else "books_abs_snapshot"
     )
-    # Field map for this source — books_col → snapshot_col.
     if source == "calibre":
         col_map = {b: c for b, c, _, _ in COMPARE_FIELDS if c is not None}
     else:
@@ -224,14 +228,12 @@ async def book_pull(bid: int, payload: dict = Body(...), slug: str | None = Quer
 
     db = await get_db(slug)
     try:
-        # 404 the book early. Read author_id too for series resolution.
         b_row = await (await db.execute(
             "SELECT id, author_id, user_edited_fields FROM books WHERE id = ?",
             (bid,),
         )).fetchone()
         if not b_row:
             raise HTTPException(404, f"book {bid} not found")
-        # Snapshot must exist.
         snap_row = await (await db.execute(
             f"SELECT * FROM {snapshot_table} WHERE book_id = ?", (bid,),
         )).fetchone()
@@ -241,25 +243,25 @@ async def book_pull(bid: int, payload: dict = Body(...), slug: str | None = Quer
             )
         snap = dict(snap_row)
 
+        existing_uef = _parse_user_edited(b_row["user_edited_fields"])
+        fields = _resolve_fields(payload, existing_uef, col_map)
+        if not fields:
+            return {
+                "book_id": bid, "source": source,
+                "applied": [], "user_edited_fields": existing_uef,
+            }
+
         sets = []
         vals: list = []
         applied: list[str] = []
         for f in fields:
-            # v2.3.4.4: special-case series_name — books column is
-            # series_id (FK), snapshot has series_name (text). Resolve
-            # the snapshot name to a series row (find-or-create
-            # author-scoped) and write series_id.
             if f == "series_name":
                 snap_name = (snap.get("series_name") or "").strip()
                 if not snap_name:
-                    # Snapshot has no series — clear the link.
                     sets.append("series_id=?")
                     vals.append(None)
                     applied.append(f)
                     continue
-                # Find or create author-scoped series row. Mirrors the
-                # lookup used by `update_book` and the calibre_sync
-                # pass — author_id matches the book's primary author.
                 aid = b_row["author_id"]
                 srow = await (await db.execute(
                     "SELECT id FROM series WHERE LOWER(name) = LOWER(?) "
@@ -286,12 +288,13 @@ async def book_pull(bid: int, payload: dict = Body(...), slug: str | None = Quer
             vals.append(snap.get(snap_col))
             applied.append(f)
 
-        # Merge applied fields into user_edited_fields (set-union).
-        existing_uef = _parse_user_edited(b_row["user_edited_fields"])
-        merged_uef = sorted(set(existing_uef) | set(applied))
-        if set(merged_uef) != set(existing_uef):
+        # v2.3.5 pull-clears: remove applied fields from
+        # user_edited_fields. Both DBs now agree → no edit divergence
+        # to flag. Future upstream changes auto-flow.
+        cleared_uef = sorted(set(existing_uef) - set(applied))
+        if set(cleared_uef) != set(existing_uef):
             sets.append("user_edited_fields=?")
-            vals.append(json.dumps(merged_uef))
+            vals.append(json.dumps(cleared_uef))
 
         vals.append(bid)
         await db.execute(
@@ -303,7 +306,137 @@ async def book_pull(bid: int, payload: dict = Body(...), slug: str | None = Quer
             "book_id": bid,
             "source": source,
             "applied": applied,
-            "user_edited_fields": merged_uef,
+            "user_edited_fields": cleared_uef,
+        }
+    finally:
+        await db.close()
+
+
+def _resolve_fields(
+    payload: dict, existing_uef: list[str],
+    col_map: dict[str, str],
+) -> list[str]:
+    """Common payload normalizer for pull/push endpoints.
+
+    `{fields: [...]}` returns the explicit list (validated non-empty).
+    `{all_user_edited: true}` returns the intersection of
+    `existing_uef` with fields the source can write/read — series_name
+    is allowed for both directions even though it's not in col_map.
+    Returns [] when nothing applies (e.g. bulk + empty UEF).
+    """
+    bulk = bool(payload.get("all_user_edited"))
+    if bulk:
+        allowed = set(col_map.keys()) | {"series_name"}
+        return sorted(set(existing_uef) & allowed)
+    fields = payload.get("fields") or []
+    if not isinstance(fields, list) or not fields:
+        raise HTTPException(
+            400, "body must include 'fields' (non-empty list) "
+            "or 'all_user_edited: true'",
+        )
+    return list(fields)
+
+
+@router.post("/books/{bid}/push")
+async def book_push(bid: int, payload: dict = Body(...), slug: str | None = Query(None)):
+    """Push one or more Seshat-live fields upstream to Calibre or ABS.
+
+    Request body (one of):
+      {"source": "calibre"|"abs", "fields": ["title", ...]}
+      {"source": "calibre"|"abs", "all_user_edited": true}
+
+    The bulk variant iterates the book's current `user_edited_fields`
+    and pushes each one. Both forms clear the successful fields from
+    `user_edited_fields` on success — both DBs now agree, so there's
+    no edit divergence to keep flagging.
+
+    Routing:
+      - source='abs'     → push_abs (PATCH /api/items/{id}/media)
+      - source='calibre' → push_calibre_full if calibredb is on PATH;
+                           else push_cwa if CWA is configured;
+                           else 409 with a "configure CWA" prompt.
+
+    409 — push target not configured / not present in this image.
+    400 — malformed payload (missing source, etc.).
+    404 — book not found.
+    502 — upstream rejected the push (calibredb non-zero, ABS 4xx,
+          CWA login failure, etc.).
+    """
+    from app.discovery.push_back import (
+        PushFailed, PushUnavailable,
+        push_abs, push_calibre_full, push_cwa,
+    )
+
+    source = payload.get("source")
+    if source not in ("calibre", "abs"):
+        raise HTTPException(400, "source must be 'calibre' or 'abs'")
+
+    # Push field map mirrors pull's col_map per source. series_name is
+    # explicitly allowed for both pull and push.
+    if source == "calibre":
+        col_map = {b: c for b, c, _, _ in COMPARE_FIELDS if c is not None}
+    else:
+        col_map = {b: a for b, _, a, _ in COMPARE_FIELDS if a is not None}
+
+    db = await get_db(slug)
+    try:
+        # Read enough columns for either source to build a payload.
+        # `series_name` resolved via JOIN so the helper can format
+        # ABS's series array / Calibre's --field series:NAME.
+        b_row = await (await db.execute("""
+            SELECT b.*, s.name AS series_name
+            FROM books b LEFT JOIN series s ON b.series_id = s.id
+            WHERE b.id = ?
+        """, (bid,))).fetchone()
+        if not b_row:
+            raise HTTPException(404, f"book {bid} not found")
+        book_dict = dict(b_row)
+
+        existing_uef = _parse_user_edited(book_dict.get("user_edited_fields"))
+        fields = _resolve_fields(payload, existing_uef, col_map)
+        if not fields:
+            return {
+                "book_id": bid, "source": source,
+                "applied": [], "failed": [],
+                "user_edited_fields": existing_uef,
+            }
+
+        # Dispatch.
+        try:
+            if source == "abs":
+                result = await push_abs(db, book_dict, fields)
+            else:
+                # Calibre — try calibredb first, fall back to CWA.
+                try:
+                    result = await push_calibre_full(db, book_dict, fields)
+                except PushUnavailable:
+                    result = await push_cwa(db, book_dict, fields)
+        except PushUnavailable as e:
+            raise HTTPException(409, str(e))
+        except PushFailed as e:
+            raise HTTPException(502, str(e))
+
+        applied = list(result.get("applied") or [])
+        failed = list(result.get("failed") or [])
+
+        # Clear applied fields from user_edited_fields. Same rationale
+        # as pull-clears: post-push the upstream value matches Seshat-
+        # live, so there's no edit divergence to flag. The user re-
+        # enters watched state by editing the field again.
+        cleared_uef = sorted(set(existing_uef) - set(applied))
+        if set(cleared_uef) != set(existing_uef):
+            await db.execute(
+                "UPDATE books SET user_edited_fields=? WHERE id=?",
+                (json.dumps(cleared_uef), bid),
+            )
+            await db.commit()
+
+        return {
+            "book_id": bid,
+            "source": source,
+            "applied": applied,
+            "failed": failed,
+            "user_edited_fields": cleared_uef,
         }
     finally:
         await db.close()

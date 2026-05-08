@@ -7,6 +7,87 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.3.5] — 2026-05-07
+
+Push-back release — caps the v2.3 dual-source-of-truth arc. From
+v2.4.0 onward, Seshat switches to strict SemVer per
+`docs/v23_metadata_design.md`.
+
+### Discovery — push edits from Seshat back to Calibre / ABS
+
+The Compare panel gains per-field "→ push to Calibre / ABS" buttons
+that mirror the existing pull arrows: where pull copies the
+upstream value into Seshat, push sends Seshat's edit upstream. Two
+new bulk verbs in the modal header — "Push all my edits" and "Pull
+all my edits" — operate on the book's current `user_edited_fields`
+array.
+
+Three push paths, each routed by source + image variant:
+
+- **ABS** → `PATCH /api/items/{id}/media`. Always available when
+  the book has an `audiobookshelf_id`. Maps Seshat columns to ABS's
+  `metadata.*` shape (narrators ← CSV split, series ← `[{name,
+  sequence}]`, abridged ← bool, etc.). Snapshot refreshed from a
+  follow-up `GET /api/items/{id}` so the post-push view reflects
+  ABS's normalized values, not what we sent.
+- **Calibre, full image** → `calibredb set_metadata <id> --field
+  title:"…" --field comments:"…"`. One subprocess invocation per
+  push, all fields batched. Snapshot refreshed by re-reading
+  Calibre's `metadata.db` for that book id.
+- **Calibre, slim image (CWA)** → drives Calibre-Web-Automated's
+  `/admin/book/<calibre_id>` form POST handler (the same one CWA's
+  SPA uses). Auth flow: `POST /login` → capture session cookie →
+  `GET /admin/book/<id>` → scrape CSRF token from the rendered
+  form → multipart POST with `X-CSRFToken` header. CSRF cached for
+  the request lifetime, refreshed on stale-session.
+
+The unified dispatcher in `app/discovery/routers/metadata.py:
+book_push` tries Calibre via `calibredb` first; falls back to CWA
+when `calibredb` isn't on PATH; returns 409 with a "configure CWA in
+Settings → Sinks" prompt when neither path is available.
+
+### Settings — CWA push-back configuration
+
+New in **Library → Sinks**: `cwa_base_url` (e.g. `http://cwa:8083`)
+and `cwa_username`. The matching password lives in the encrypted
+secrets store under `cwa_password` (alongside the existing
+`abs_api_key` / `hardcover_api_key` / etc.). Slim users wanting
+Calibre push-back must configure all three before push will work.
+
+### Metadata — `user_edited_fields` semantics: push-clears AND pull-clears
+
+Both verbs now **clear** the named field from `user_edited_fields`
+on success. Mental model: after a push or pull, both DBs agree on
+that value — there's no edit divergence left to flag, so the
+"watched" tag is dropped. Future upstream changes auto-flow on next
+sync (no review queue). The user re-enters the watched state by
+editing the field again in the sidebar (`PUT /books/{bid}` always
+diff-tracks vs. stored and adds to `user_edited_fields`).
+
+This is a **behavior change** to v2.3.4's `/pull` endpoint, which
+previously *added* to `user_edited_fields`. The bulk "Pull all my
+edits" verb only makes coherent sense under pull-clears: "I'm done
+editing these; align with upstream and stop flagging future
+changes."
+
+### Tests + suite total
+
+- 31 new tests in `test_push_back.py` (dispatch, UEF clearing,
+  bulk-verb intersection, translation helpers).
+- 2 updated tests in `test_metadata_compare.py` for pull-clears
+  semantics + bulk pull intersection.
+- Suite total: **1563 passing** (was 1522 on v2.3.4.5).
+
+### Pre-tag arc-cap checklist
+
+This is the last release in the v2.3 arc. Per
+`docs/v23_metadata_design.md` the checklist for capping the arc
+runs alongside this release: full backend test suite green
+(1563 passing), CodeQL audit, Dependabot audit, browser smoke test
+on the live container.
+
+---
+
 ## [2.3.4.5] — 2026-05-07
 
 CI-only release. No code changes from v2.3.4.4 — this exists to

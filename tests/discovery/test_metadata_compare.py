@@ -232,15 +232,58 @@ class TestPull:
         assert r.status_code == 200
         assert (await _book_row(1))["description"] == "From Calibre"
 
-    async def test_pull_marks_field_as_user_edited(self, client):
-        await _seed_book(description="Old")
+    async def test_pull_clears_field_from_user_edited(self, client):
+        # v2.3.5: pull is symmetric with push — both clear UEF on
+        # success because both DBs now agree on the value, so there's
+        # no edit divergence left to flag. Future Calibre changes to
+        # this field will auto-flow on next sync.
+        await _seed_book(description="Old", user_edited=["description", "title"])
         await _seed_calibre_snapshot(description="From Calibre")
         await client.post(
             "/api/discovery/books/1/pull",
             json={"source": "calibre", "fields": ["description"]},
         )
         row = await _book_row(1)
-        assert "description" in json.loads(row["user_edited_fields"])
+        uef = json.loads(row["user_edited_fields"])
+        assert "description" not in uef       # cleared by pull
+        assert "title" in uef                  # untouched
+
+    async def test_pull_no_op_when_field_not_in_user_edited(self, client):
+        # Pulling a field that wasn't user-edited still works (the user
+        # is just choosing to align with upstream) — it just doesn't
+        # change UEF.
+        await _seed_book(description="Old", user_edited=[])
+        await _seed_calibre_snapshot(description="From Calibre")
+        await client.post(
+            "/api/discovery/books/1/pull",
+            json={"source": "calibre", "fields": ["description"]},
+        )
+        row = await _book_row(1)
+        assert row["description"] == "From Calibre"
+        assert json.loads(row["user_edited_fields"]) == []
+
+    async def test_pull_all_user_edited_iterates(self, client):
+        # Bulk variant: only the intersection of UEF and the source's
+        # writable fields should be pulled.
+        await _seed_book(
+            title="Old t", description="Old d",
+            user_edited=["title", "description", "narrator"],
+        )
+        await _seed_calibre_snapshot(title="C t", description="C d")
+        r = await client.post(
+            "/api/discovery/books/1/pull",
+            json={"source": "calibre", "all_user_edited": True},
+        )
+        assert r.status_code == 200
+        row = await _book_row(1)
+        assert row["title"] == "C t"
+        assert row["description"] == "C d"
+        # narrator stayed in UEF (Calibre snapshot has no narrator
+        # column, so the bulk filter didn't pick it).
+        uef = json.loads(row["user_edited_fields"])
+        assert "narrator" in uef
+        assert "title" not in uef
+        assert "description" not in uef
 
     async def test_pulls_multiple_fields(self, client):
         await _seed_book(description="Old", isbn=None)

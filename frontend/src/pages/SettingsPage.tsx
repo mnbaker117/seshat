@@ -518,6 +518,7 @@ function DesktopSettingsPage() {
   const qbitCreds = creds.filter(c => c.key === "qbit_password");
   const apiCreds = creds.filter(c => c.key === "hardcover_api_key");
   const absCreds = creds.filter(c => c.key === "abs_api_key");
+  const cwaCreds = creds.filter(c => c.key === "cwa_password");
 
   // Group sections for sidebar
   const groups = ["Pipeline", "Discovery", "Shared"];
@@ -867,7 +868,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "library" && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} />}
+        {section === "library" && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} cwaCreds={cwaCreds} onCredSaved={loadCreds} />}
 
         {section === "audiobookshelf" && <AudiobookshelfSection s={s} upd={upd} ist={ist} nist={nist} creds={absCreds} onCredSaved={loadCreds} />}
 
@@ -903,7 +904,7 @@ function DesktopSettingsPage() {
 
 // ── Library Management Section ────────────────────────────────
 
-function LibrarySection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unknown) => void; ist: any; nist: any }) {
+function LibrarySection({ s, upd, ist, nist, cwaCreds, onCredSaved }: { s: S; upd: (k: string, v: unknown) => void; ist: any; nist: any; cwaCreds: CredItem[]; onCredSaved: () => void }) {
   const t = useTheme();
   const [libs, setLibs] = useState<any[]>([]);
   const [rescanning, setRescanning] = useState(false);
@@ -983,6 +984,28 @@ function LibrarySection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
     <SF label="Calibre Content Server URL" desc="Calibre's built-in Content Server API endpoint for direct library access. Different from Calibre-Web above.">
       <input value={(s.calibre_url as string) || ""} onChange={e => upd("calibre_url", e.target.value)} placeholder="http://host:port" style={{ ...ist, width: 260 }} />
     </SF>
+
+    {/* v2.3.5 CWA push-back. Slim users (no calibredb) need this to
+        push Seshat metadata edits back to Calibre. Backend drives
+        CWA's existing /admin/book/<id> form POST handler — needs a
+        login + the password lives in the encrypted secret store. */}
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${t.borderL}` }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: t.text2, marginBottom: 6 }}>
+        Calibre push-back via CWA (slim image only)
+      </div>
+      <div style={{ fontSize: 12, color: t.textDim, marginBottom: 10 }}>
+        When the slim image is in use, Seshat pushes metadata edits to
+        Calibre by driving CWA's admin form. Leave blank if you run
+        the full image — push-back uses calibredb directly there.
+      </div>
+      <SF label="CWA Base URL" desc="Same instance as Calibre-Web URL above; this is where Seshat POSTs the metadata edits.">
+        <input value={(s.cwa_base_url as string) || ""} onChange={e => upd("cwa_base_url", e.target.value)} placeholder="http://cwa:8083" style={{ ...ist, width: 260 }} />
+      </SF>
+      <SF label="CWA Username" desc="A CWA user account with edit permissions. A dedicated 'seshat' account is recommended for clear audit-log attribution.">
+        <input value={(s.cwa_username as string) || ""} onChange={e => upd("cwa_username", e.target.value)} placeholder="seshat" style={{ ...ist, width: 260 }} />
+      </SF>
+      {cwaCreds.map(c => <CredField key={c.key} item={c} onSaved={onCredSaved} desc="Password for the CWA user above. Stored encrypted." />)}
+    </div>
   </>;
 }
 
