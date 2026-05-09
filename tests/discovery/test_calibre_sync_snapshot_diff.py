@@ -381,3 +381,153 @@ class TestNoOpOnUnchanged:
 
         # Queue is empty — nothing changed, nothing to review.
         assert await _queue_rows() == []
+
+
+class TestAutoUnhideOnMerge:
+    """When a Calibre sync merges a new owned book with an existing
+    hidden source-discovered row, the hidden flag is auto-cleared.
+
+    Mark's UAT 2026-05-09: he hid five Fantasy World Farm books that
+    he wasn't interested in. His author allowlist later grabbed them
+    via the pipeline and they landed in Calibre. Sync merged owned=1
+    onto the existing rows but left hidden=1, so the UI count showed
+    5 fewer books than Calibre. Auto-unhide on merge resolves this:
+    once a book is OWNED (you have it), it should be visible.
+
+    Scoped narrowly to the merge path — books already owned in
+    Calibre that the user explicitly hid (duplicate edition, wrong
+    language, etc.) keep their hide.
+    """
+
+    async def test_merge_unhides_source_discovered_row(
+        self, discovery_db, monkeypatch,
+    ):
+        from app.discovery import calibre_sync
+        from app.discovery.database import get_db
+
+        # Seed: a hidden, unowned source-discovered row.
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (name, sort_name, normalized_name, calibre_id) "
+                "VALUES ('Eric Vall', 'Vall, Eric', 'eric vall', 100)"
+            )
+            await db.execute(
+                "INSERT INTO books (title, author_id, source, owned, hidden) "
+                "VALUES ('Fantasy World Farm 2', 1, 'goodreads', 0, 1)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Calibre now reports the same book — should merge + unhide.
+        monkeypatch.setattr(
+            calibre_sync, "_read_calibre_db",
+            lambda *a, **kw: {"books": [
+                _book(3877, "Fantasy World Farm 2", "Eric Vall",
+                      author_id=100),
+            ]},
+        )
+        await calibre_sync.sync_calibre("x", "y")
+
+        # Existing row converted to Calibre + unhidden + owned.
+        db = await get_db()
+        try:
+            row = await (await db.execute(
+                "SELECT id, source, owned, hidden, calibre_id FROM books "
+                "WHERE title = 'Fantasy World Farm 2'"
+            )).fetchone()
+        finally:
+            await db.close()
+        assert row is not None
+        assert row["source"] == "calibre"
+        assert row["owned"] == 1
+        assert row["hidden"] == 0  # ← the new behavior
+        assert row["calibre_id"] == 3877
+
+    async def test_existing_calibre_row_keeps_user_hide(
+        self, discovery_db, monkeypatch,
+    ):
+        # Counter-test: a book that's ALREADY a Calibre row in Seshat
+        # and the user has hidden it (e.g., duplicate edition the user
+        # is keeping for completeness). A re-sync hits the
+        # `existing UPDATE` branch, NOT the merge branch — hidden
+        # must NOT be cleared.
+        from app.discovery import calibre_sync
+        from app.discovery.database import get_db
+
+        # First sync: book lands as a fresh Calibre row.
+        monkeypatch.setattr(
+            calibre_sync, "_read_calibre_db",
+            lambda *a, **kw: {"books": [
+                _book(1, "Some Book", "Author A", author_id=100),
+            ]},
+        )
+        await calibre_sync.sync_calibre("x", "y")
+
+        # User explicitly hides it.
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE books SET hidden=1 WHERE calibre_id = 1"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Re-sync — same book, no metadata change. Should hit the
+        # existing-Calibre-update branch, NOT the merge branch.
+        await calibre_sync.sync_calibre("x", "y")
+
+        db = await get_db()
+        try:
+            row = await (await db.execute(
+                "SELECT hidden FROM books WHERE calibre_id = 1"
+            )).fetchone()
+        finally:
+            await db.close()
+        # User's explicit hide preserved.
+        assert row["hidden"] == 1
+
+    async def test_merge_leaves_hidden_alone_when_already_visible(
+        self, discovery_db, monkeypatch,
+    ):
+        # Edge: source row is hidden=0 to begin with. The auto-unhide
+        # is idempotent — hidden stays 0, no surprise side effects.
+        from app.discovery import calibre_sync
+        from app.discovery.database import get_db
+
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO authors (name, sort_name, normalized_name, calibre_id) "
+                "VALUES ('Eric Vall', 'Vall, Eric', 'eric vall', 100)"
+            )
+            await db.execute(
+                "INSERT INTO books (title, author_id, source, owned, hidden) "
+                "VALUES ('Visible Source Book', 1, 'goodreads', 0, 0)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        monkeypatch.setattr(
+            calibre_sync, "_read_calibre_db",
+            lambda *a, **kw: {"books": [
+                _book(99, "Visible Source Book", "Eric Vall",
+                      author_id=100),
+            ]},
+        )
+        await calibre_sync.sync_calibre("x", "y")
+
+        db = await get_db()
+        try:
+            row = await (await db.execute(
+                "SELECT hidden, owned, source FROM books "
+                "WHERE title = 'Visible Source Book'"
+            )).fetchone()
+        finally:
+            await db.close()
+        assert row["hidden"] == 0
+        assert row["owned"] == 1
+        assert row["source"] == "calibre"

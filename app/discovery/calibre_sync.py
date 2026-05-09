@@ -626,8 +626,10 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                 # "The X" vs "X"). Only merge if EXACTLY one candidate —
                 # ambiguity falls back to INSERT so we never merge a book
                 # into the wrong row.
+                # Pull `hidden` alongside id so we can log when an
+                # auto-unhide fires (see UPDATE below).
                 merge_candidates = await (await db.execute("""
-                    SELECT id FROM books
+                    SELECT id, hidden FROM books
                     WHERE author_id = ? AND calibre_id IS NULL AND source != 'calibre'
                     AND (
                         LOWER(TRIM(title)) = LOWER(TRIM(?))
@@ -638,6 +640,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
 
                 if len(merge_candidates) == 1:
                     target_id = merge_candidates[0]["id"]
+                    was_hidden = bool(merge_candidates[0]["hidden"])
                     # v2.3 merge path: convert the Missing/source-discovered
                     # row into a Calibre row by setting structural fields
                     # (owned=1, calibre_id, source='calibre', series_id),
@@ -645,9 +648,26 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                     # diff helper. Pre-existing source-scan values that
                     # the user manually edited are preserved via the
                     # user_edited_fields gate.
+                    #
+                    # Auto-unhide on merge (added 2026-05-09): "hidden"
+                    # on a source-discovered row means "I'm not interested
+                    # in getting this book." Once the book actually lands
+                    # in Calibre (user's pipeline grabbed it, or they
+                    # imported it manually), the relevant question is
+                    # "do I want to see this in my library view" — and
+                    # the answer is overwhelmingly yes. Mark hit this
+                    # 2026-05-09 with five Fantasy World Farm books that
+                    # got auto-grabbed via his author allowlist after
+                    # he'd hidden the unowned source rows; UI count
+                    # showed 5 books missing because they merged owned
+                    # but stayed hidden. Scoped narrowly to the merge
+                    # path — the existing-Calibre-row UPDATE branch
+                    # leaves hidden alone, so a user who explicitly
+                    # hides a book they own (duplicate edition, wrong
+                    # language, etc.) keeps that hide.
                     await db.execute("""
                         UPDATE books SET author_id=?, series_id=?,
-                        owned=1, calibre_id=?, source='calibre'
+                        owned=1, calibre_id=?, source='calibre', hidden=0
                         WHERE id=?
                     """, (our_author_id, our_series_id,
                           book["book_id"], target_id))
@@ -656,9 +676,11 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                         db, target_id, book, cal_series_name
                     )
                     progress["books_updated"] += 1
+                    unhide_note = ", unhidden" if was_hidden else ""
                     logger.info(
                         f"  Calibre: merged Missing row id={target_id} with "
-                        f"new Calibre book_id={book['book_id']} ('{book['title']}')"
+                        f"new Calibre book_id={book['book_id']} "
+                        f"('{book['title']}'{unhide_note})"
                     )
                 else:
                     # New Calibre book — INSERT the books row with
