@@ -1725,11 +1725,23 @@ async def debug_check_book(
                         debug_filelist_cache[tid] = []
                     else:
                         bundle_check["fetch_http_status"] = resp.status_code
-                        bundle_check["fetch_response_first_500_chars"] = (
-                            (resp.text or "")[:500]
+                        body = resp.text or ""
+                        # Capture more body so we can tell whether the
+                        # fileListTable is present (and our parser regex
+                        # is the issue) vs. MAM serving a totally
+                        # different page (logout, error, landing).
+                        bundle_check["fetch_response_first_500_chars"] = body[:500]
+                        bundle_check["fetch_response_total_len"] = len(body)
+                        bundle_check["fetch_response_contains_filelist_table"] = (
+                            "fileListTable" in body
                         )
-                        if resp.status_code == 200 and resp.text:
-                            debug_filelist_cache[tid] = _parse_filelist_html(resp.text)
+                        bundle_check["fetch_response_contains_torrent_title"] = (
+                            "Torrent title" in body
+                        )
+                        bundle_check["fetch_response_chars_500_to_3000"] = body[500:3000]
+                        bundle_check["fetch_response_last_500_chars"] = body[-500:] if len(body) > 500 else ""
+                        if resp.status_code == 200 and body:
+                            debug_filelist_cache[tid] = _parse_filelist_html(body)
                         else:
                             debug_filelist_cache[tid] = []
                 else:
