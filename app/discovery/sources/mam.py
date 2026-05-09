@@ -1554,6 +1554,11 @@ async def debug_check_book(
         passes_to_run.append((4, authors, short))
     passes_to_run.append((5, None, title_only))
 
+    # Cache filelist fetches across passes so a bundle that appears as
+    # the best candidate in multiple passes only costs one HTTP. Mirrors
+    # the production caching in check_book.
+    debug_filelist_cache: dict[str, list[str]] = {}
+
     for pass_num, pass_authors, search_title in passes_to_run:
         pass_trace: dict = {
             "pass_num": pass_num,
@@ -1619,8 +1624,81 @@ async def debug_check_book(
                 score_search_breakdown["confidence"],
             )
 
+            ts_max = max(
+                score_full_breakdown["title_similarity"],
+                score_search_breakdown["title_similarity"],
+            )
+            is_bundle = _is_bundle(item)
+            author_matched = _author_match(authors, item)
+
+            # Mirror the production B2.1 verification gate: bundle +
+            # author overlap + ts below the bundle floor → fetch filelist
+            # and check if the search title appears as a filename.
+            bundle_check: dict = {
+                "is_bundle": is_bundle,
+                "author_matched": author_matched,
+                "verification_attempted": False,
+                "filelist_size": 0,
+                "filelist_match": False,
+                "fetch_url": None,
+                "fetch_http_status": None,
+                "fetch_response_first_500_chars": None,
+            }
+            if (
+                is_bundle
+                and author_matched
+                and ts_max < _BUNDLE_PROMOTE_TS_FLOOR
+                and confidence >= MATCH_MIN_SCORE
+            ):
+                bundle_check["verification_attempted"] = True
+                tid = str(item.get("id", ""))
+                if tid not in debug_filelist_cache:
+                    # Inline-fetch with diagnostic capture so the debug
+                    # endpoint can show exactly what MAM returned —
+                    # status code + first-500-chars of body — when
+                    # production filelist verification mysteriously
+                    # fails. Doesn't go through _fetch_filelist because
+                    # we want the raw response visible in the trace.
+                    fetch_url = f"{MAM_FILELIST_URL}?torrentid={tid}"
+                    bundle_check["fetch_url"] = fetch_url
+                    try:
+                        resp = await _do_get(fetch_url, token)
+                        bundle_check["fetch_http_status"] = resp.status_code
+                        bundle_check["fetch_response_first_500_chars"] = (
+                            (resp.text or "")[:500]
+                        )
+                        if resp.status_code == 200 and resp.text:
+                            debug_filelist_cache[tid] = _parse_filelist_html(resp.text)
+                        else:
+                            debug_filelist_cache[tid] = []
+                    except Exception as e:
+                        bundle_check["fetch_http_status"] = f"exception: {e}"
+                        debug_filelist_cache[tid] = []
+                else:
+                    bundle_check["fetch_url"] = "(cached from earlier pass)"
+                filenames = debug_filelist_cache.get(tid, [])
+                bundle_check["filelist_size"] = len(filenames)
+                bundle_check["filelist_filenames_sample"] = filenames[:5]
+                if filenames and _filelist_contains_title(
+                    filenames, title, search_title
+                ):
+                    bundle_check["filelist_match"] = True
+
+            # Decision now reflects what production would actually do
+            # under B2.1's verification logic, not just the conf-vs-
+            # threshold check that earlier debug versions reported.
             if confidence < MATCH_MIN_SCORE:
                 decision = "skipped_below_min"
+            elif bundle_check["filelist_match"]:
+                decision = "would_promote_via_filelist_verification"
+            elif (
+                is_bundle
+                and ts_max < _BUNDLE_PROMOTE_TS_FLOOR
+                and confidence >= MATCH_PROMOTE_SCORE
+            ):
+                # Conf would normally promote, but bundle cap blocks it
+                # (and verification didn't rescue it).
+                decision = "bundle_capped_kept_as_possible"
             elif confidence >= MATCH_PROMOTE_SCORE:
                 decision = "would_promote_to_found"
             else:
@@ -1647,6 +1725,8 @@ async def debug_check_book(
                 "score_vs_calibre_title": score_full_breakdown,
                 "score_vs_search_title": score_search_breakdown,
                 "confidence_max": round(confidence, 4),
+                "title_similarity_max": round(ts_max, 4),
+                "bundle_check": bundle_check,
                 "decision": decision,
             })
 
