@@ -576,6 +576,27 @@ _rotation_callback: Optional[Callable] = None
 _last_rotation_save: float = 0.0
 _MAM_ID_RX = re.compile(r"mam_id=([^;\s]+)")
 
+# Parallel state for the mbsc browser-session cookie. mbsc auths the
+# HTML browse endpoints (filelist.php, /t/<id>) that the long-lived
+# mam_id can't reach — see project_seshat_mam_url_confidence memory
+# for the auth-tier diagnosis. Optional: when not configured, filelist
+# verification short-circuits and bundles stay at Possible (B1's cap +
+# badge still apply). Rotation mirrors the mam_id pattern: MAM rotates
+# the value on each browser response, we capture from Set-Cookie and
+# debounce-persist to the encrypted store.
+_current_mbsc_token: Optional[str] = None
+_mbsc_rotation_callback: Optional[Callable] = None
+_last_mbsc_rotation_save: float = 0.0
+_MBSC_RX = re.compile(r"mbsc=([^;\s]+)")
+
+# Set when a filelist response comes back as MAM's login page —
+# definitive sign that the configured mbsc is rejected (expired, IP
+# mismatch, or never valid). Cleared whenever a fresh mbsc value is
+# applied (by paste-into-Settings or by a successful rotation).
+# Surfaced through GET /api/v1/mam/mbsc-status as a UI hint so Mark
+# knows to capture a fresh cookie from the browser.
+_mbsc_stale: bool = False
+
 
 def set_current_token(token: str) -> None:
     """Seed the in-memory token from settings at startup."""
@@ -599,42 +620,147 @@ def set_rotation_callback(callback: Callable) -> None:
     _rotation_callback = callback
 
 
-def _extract_mam_id(response: httpx.Response) -> Optional[str]:
-    """Extract mam_id from a MAM response's Set-Cookie header."""
-    # Primary: httpx cookie jar (handles standard Set-Cookie parsing)
-    jar_val = response.cookies.get("mam_id")
+def set_current_mbsc_token(token: str) -> None:
+    """Seed the in-memory mbsc browser-session token from the secret store.
+
+    Call with empty string to indicate "not configured" — every code
+    path that needs mbsc treats empty as "skip the operation" rather
+    than producing a malformed request.
+    """
+    global _current_mbsc_token
+    _current_mbsc_token = token or None
+
+
+def get_current_mbsc_token() -> Optional[str]:
+    """Return the most recently rotated mbsc value, or None if unset."""
+    return _current_mbsc_token
+
+
+def set_mbsc_rotation_callback(callback: Optional[Callable]) -> None:
+    """Register a callback fired when mbsc rotates.
+
+    Same contract as `set_rotation_callback` for mam_id — receives the
+    new token string and persists it. Pass None to clear (used by the
+    lifespan on shutdown).
+    """
+    global _mbsc_rotation_callback
+    _mbsc_rotation_callback = callback
+
+
+def mbsc_is_stale() -> bool:
+    """True if the most recent filelist fetch was rejected as a login page.
+
+    Drives the "Possibly expired" pill in the Settings UI. Cleared by
+    `mark_mbsc_fresh()` whenever a deliberate paste arrives or a
+    rotation succeeds.
+    """
+    return _mbsc_stale
+
+
+def mark_mbsc_fresh() -> None:
+    """Clear the stale flag.
+
+    Called when a new mbsc value is applied — either via the Settings
+    PATCH/credentials POST (Mark just pasted a fresh one) or via the
+    rotation handler (MAM accepted our request and gave us a new
+    value, so we know our cookie wasn't rejected).
+    """
+    global _mbsc_stale
+    _mbsc_stale = False
+
+
+def _mark_mbsc_stale() -> None:
+    """Set the stale flag.
+
+    Called from `_fetch_filelist_response` when the response body
+    matches MAM's login-page shape. Module-private since the only
+    legit caller is the fetcher itself.
+    """
+    global _mbsc_stale
+    if not _mbsc_stale:
+        logger.warning(
+            "MAM filelist fetch returned the login page — mbsc cookie "
+            "appears to be expired or rejected; surface a fresh value "
+            "via Settings → MAM"
+        )
+    _mbsc_stale = True
+
+
+def _extract_cookie_value(
+    response: httpx.Response, name: str, regex: re.Pattern[str]
+) -> Optional[str]:
+    """Extract a cookie value from a MAM response by name.
+
+    Prefers httpx's parsed cookie jar; falls back to a regex against
+    raw Set-Cookie headers for the case where httpx's jar normalization
+    drops attributes MAM cares about.
+    """
+    jar_val = response.cookies.get(name)
     if jar_val:
         return jar_val
-    # Fallback: regex against raw Set-Cookie headers (handles edge cases
-    # where httpx doesn't parse the cookie due to missing attributes)
     for val in response.headers.get_list("set-cookie"):
-        m = _MAM_ID_RX.search(val)
+        m = regex.search(val)
         if m:
             return m.group(1)
     return None
 
 
+def _extract_mam_id(response: httpx.Response) -> Optional[str]:
+    """Extract mam_id from a MAM response's Set-Cookie header."""
+    return _extract_cookie_value(response, "mam_id", _MAM_ID_RX)
+
+
+def _extract_mbsc(response: httpx.Response) -> Optional[str]:
+    """Extract mbsc from a MAM response's Set-Cookie header."""
+    return _extract_cookie_value(response, "mbsc", _MBSC_RX)
+
+
 async def _handle_response_cookie(response: httpx.Response) -> None:
-    """Check response for a rotated mam_id and update state if changed."""
+    """Check response for rotated mam_id / mbsc values and update state.
+
+    Both cookies are extracted independently — MAM may rotate either,
+    both, or neither on a given response. mam_id rotates on every JSON
+    API call; mbsc rotates on browser HTML calls (filelist.php). Each
+    has its own debounced persistence callback so a flurry of rotations
+    inside the persist window collapse to a single store write.
+    """
     global _current_token, _last_rotation_save
-    new_token = _extract_mam_id(response)
-    if not new_token or new_token == _current_token:
-        return
-    _current_token = new_token
-    # Don't log token bytes (even a prefix) — an 8-char prefix is enough
-    # entropy to correlate sessions across log files / log aggregators,
-    # and anyone with `docker logs` access is a wider audience than the
-    # people authorized to see the MAM session token. The fact-of-rotation
-    # is the only diagnostic that matters here.
-    logger.debug("MAM cookie rotated")
-    # Debounced persistence: only save if 60+ seconds since last save
+    global _current_mbsc_token, _last_mbsc_rotation_save
     now = time.time()
-    if _rotation_callback and (now - _last_rotation_save) >= 60:
-        _last_rotation_save = now
-        try:
-            await _rotation_callback(new_token)
-        except Exception as e:
-            logger.warning(f"Cookie rotation callback failed: {e}")
+
+    # mam_id rotation
+    new_token = _extract_mam_id(response)
+    if new_token and new_token != _current_token:
+        _current_token = new_token
+        # Don't log token bytes (even a prefix) — an 8-char prefix is
+        # enough entropy to correlate sessions across log files / log
+        # aggregators, and anyone with `docker logs` access is a wider
+        # audience than the people authorized to see the MAM session
+        # token. The fact-of-rotation is the only diagnostic that
+        # matters here.
+        logger.debug("MAM cookie rotated")
+        # Debounced persistence: only save if 60+ seconds since last save
+        if _rotation_callback and (now - _last_rotation_save) >= 60:
+            _last_rotation_save = now
+            try:
+                await _rotation_callback(new_token)
+            except Exception as e:
+                logger.warning(f"Cookie rotation callback failed: {e}")
+
+    # mbsc rotation. Same debounce window, separate budget. A successful
+    # rotation also implicitly clears the stale flag — MAM accepted the
+    # cookie enough to mint a new one.
+    new_mbsc = _extract_mbsc(response)
+    if new_mbsc and new_mbsc != _current_mbsc_token:
+        _current_mbsc_token = new_mbsc
+        mark_mbsc_fresh()
+        logger.debug("MAM mbsc cookie rotated")
+        if _mbsc_rotation_callback and (now - _last_mbsc_rotation_save) >= 60:
+            _last_mbsc_rotation_save = now
+            try:
+                await _mbsc_rotation_callback(new_mbsc)
+            except Exception as e:
+                logger.warning(f"mbsc rotation callback failed: {e}")
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -978,7 +1104,7 @@ def _filelist_contains_title(filenames: list[str], *titles: str) -> bool:
     return False
 
 
-def _filelist_headers(token: str, torrent_id: str) -> dict:
+def _filelist_headers(token: str, mbsc_token: str, torrent_id: str) -> dict:
     """Headers for /tor/filelist.php that make MAM return the bare table.
 
     Without these headers MAM responds with the full site-chrome HTML
@@ -998,11 +1124,23 @@ def _filelist_headers(token: str, torrent_id: str) -> dict:
       - Referer pointing at the torrent's own page
       - Accept "text/html, */*; q=0.01" (jQuery default)
 
-    The mam_id cookie still authenticates; only the UI rendering mode
-    flips. No other MAM endpoint in Seshat needs these headers, so
-    keep them scoped to filelist requests rather than promoting them
-    to _build_headers — the search API specifically needs curl/8.0.
+    Cookie carries BOTH `mam_id` (long-lived API session) and `mbsc`
+    (rotating browser session) because Mark's actual browser sends
+    both — Firefox's cookie jar attaches every cookie matching the
+    domain, and MAM's auth tier for /tor/filelist.php specifically
+    needs mbsc (mam_id alone returns the login page; see the
+    project_seshat_mam_url_confidence memory). Empty-token segments
+    are skipped to avoid emitting `Cookie: mam_id=; mbsc=...` when
+    one half isn't configured. No other MAM endpoint in Seshat needs
+    these headers, so keep them scoped to filelist requests rather
+    than promoting them to _build_headers — the search API
+    specifically needs curl/8.0 and only mam_id.
     """
+    cookie_parts: list[str] = []
+    if token:
+        cookie_parts.append(f"mam_id={token}")
+    if mbsc_token:
+        cookie_parts.append(f"mbsc={mbsc_token}")
     return {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) "
@@ -1014,8 +1152,19 @@ def _filelist_headers(token: str, torrent_id: str) -> dict:
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
-        "Cookie": f"mam_id={token}",
+        "Cookie": "; ".join(cookie_parts),
     }
+
+
+# Login-page markers MAM serves when the cookie set we sent isn't
+# accepted for the requested HTML endpoint. Either one is definitive
+# (data-uclass="0" = anonymous user; the title block is the rendered
+# login page itself). Used by `_fetch_filelist_response` to set the
+# stale flag for UI surfacing.
+_FILELIST_LOGIN_MARKERS = (
+    '<title>Login | My Anonamouse</title>',
+    'data-uclass="0"',
+)
 
 
 async def _fetch_filelist_response(token: str, torrent_id: str):
@@ -1024,8 +1173,19 @@ async def _fetch_filelist_response(token: str, torrent_id: str):
     Split out so the debug-match endpoint can surface status code +
     response body without parsing, while production uses the parsed
     convenience wrapper below.
+
+    Auto-degrades when no mbsc cookie is configured: returns None
+    rather than firing a request that will reliably come back as the
+    login page (and waste the ~2s round trip). Callers already treat
+    None as "couldn't verify, leave bundle at Possible".
     """
     if not torrent_id:
+        return None
+    mbsc = _current_mbsc_token
+    if not mbsc:
+        # mbsc not configured → filelist verification is the dead-end
+        # path documented in the project_seshat_mam_url_confidence
+        # memory. Skip the fetch; B1 bundle cap + badge still apply.
         return None
     url = f"{MAM_FILELIST_URL}?torrentid={torrent_id}"
     try:
@@ -1033,10 +1193,17 @@ async def _fetch_filelist_response(token: str, torrent_id: str):
         effective = _current_token or token
         resp = await client.get(
             url,
-            headers=_filelist_headers(effective, torrent_id),
+            headers=_filelist_headers(effective, mbsc, torrent_id),
             timeout=15,
         )
         await _handle_response_cookie(resp)
+        # Sniff for the login-page markers so the UI can surface
+        # "Possibly expired" without needing every caller to reason
+        # about MAM's auth-rejection shape. Cheap substring check —
+        # only runs on the (typically <50KB) filelist response body.
+        body = resp.text or ""
+        if any(marker in body for marker in _FILELIST_LOGIN_MARKERS):
+            _mark_mbsc_stale()
         return resp
     except Exception as e:
         logger.debug(f"  Filelist {torrent_id}: fetch failed: {e}")

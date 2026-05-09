@@ -12,13 +12,24 @@ result lands in "possible" instead. Verified here in isolation; Part
 B2 will add a filelist-verification override that re-promotes a low-ts
 bundle when the search title appears as a filename.
 """
+import httpx
+import pytest
+
 from app.discovery.sources.mam import (
     _BUNDLE_PROMOTE_TS_FLOOR,
+    _extract_mbsc,
+    _fetch_filelist_response,
     _filelist_contains_title,
     _filelist_headers,
+    _handle_response_cookie,
     _is_bundle,
     _normalize_for_filename_match,
     _parse_filelist_html,
+    get_current_mbsc_token,
+    mark_mbsc_fresh,
+    mbsc_is_stale,
+    set_current_mbsc_token,
+    set_mbsc_rotation_callback,
 )
 
 
@@ -238,20 +249,20 @@ class TestFilelistHeaders:
 
     def test_referer_points_at_torrent_page(self):
         # The Referer is one of the AJAX-shape signals.
-        h = _filelist_headers("token-stub", "424895")
+        h = _filelist_headers("token-stub", "mbsc-stub", "424895")
         assert h["Referer"] == "https://www.myanonamouse.net/t/424895"
 
     def test_jquery_signature_accept_header(self):
         # jQuery's $.ajax() sends Accept "text/html, */*; q=0.01" by
         # default. The q=0.01 is what jQuery uses.
-        h = _filelist_headers("t", "1")
+        h = _filelist_headers("t", "m", "1")
         assert h["Accept"] == "text/html, */*; q=0.01"
 
     def test_browser_user_agent(self):
         # curl/8.0 alone (the search-API UA) gets the wrapper response.
         # Browser UA is one of the signals MAM uses to decide whether
         # to render the page chrome vs. the bare AJAX fragment.
-        h = _filelist_headers("t", "1")
+        h = _filelist_headers("t", "m", "1")
         assert "Firefox" in h["User-Agent"]
         assert "Mozilla" in h["User-Agent"]
 
@@ -260,17 +271,46 @@ class TestFilelistHeaders:
         # browser fingerprint of a fetch()/$.ajax() XHR call. MAM's
         # filelist endpoint appears to gate the bare-fragment
         # response on these.
-        h = _filelist_headers("t", "1")
+        h = _filelist_headers("t", "m", "1")
         assert h["Sec-Fetch-Dest"] == "empty"
         assert h["Sec-Fetch-Mode"] == "cors"
         assert h["Sec-Fetch-Site"] == "same-origin"
 
     def test_cookie_carries_mam_id(self):
-        # Auth still flows through mam_id even though the request shape
-        # mimics a browser. The token comes from the rotated session
-        # store, same as every other MAM call.
-        h = _filelist_headers("session-abc", "424895")
+        # Auth flows through mam_id for everything except filelist;
+        # we still carry it on filelist requests because Mark's
+        # browser does (Firefox cookie jar attaches everything that
+        # matches the domain). Pinned so a future refactor doesn't
+        # silently drop it.
+        h = _filelist_headers("session-abc", "browser-xyz", "424895")
         assert "mam_id=session-abc" in h["Cookie"]
+
+    def test_cookie_carries_mbsc(self):
+        # mbsc is the actual auth-tier cookie for /tor/filelist.php —
+        # mam_id alone returns the login page (B2 diagnosis).
+        h = _filelist_headers("session-abc", "browser-xyz", "424895")
+        assert "mbsc=browser-xyz" in h["Cookie"]
+
+    def test_cookie_combines_both_with_separator(self):
+        # When both are configured, browsers send "mam_id=...; mbsc=..."
+        # — pin the exact wire shape so MAM's parser sees the same
+        # structure it does from a real browser.
+        h = _filelist_headers("session-abc", "browser-xyz", "424895")
+        assert h["Cookie"] == "mam_id=session-abc; mbsc=browser-xyz"
+
+    def test_cookie_omits_empty_mbsc_segment(self):
+        # mbsc not configured → emit only mam_id, never "mam_id=x; mbsc="
+        # which would be malformed and might trip up MAM's cookie
+        # parser into a different rejection path.
+        h = _filelist_headers("session-abc", "", "424895")
+        assert h["Cookie"] == "mam_id=session-abc"
+
+    def test_cookie_omits_empty_mam_id_segment(self):
+        # Edge case: only mbsc configured. Shouldn't happen in practice
+        # (mam_id is required for everything else) but the builder
+        # should still produce a clean cookie.
+        h = _filelist_headers("", "browser-xyz", "424895")
+        assert h["Cookie"] == "mbsc=browser-xyz"
 
 
 class TestFilelistParser:
@@ -368,3 +408,229 @@ class TestFilelistContainsTitle:
         # If user's calibre title has punctuation but filename doesn't.
         # "Duel: Nature" → "duel nature" → matches.
         assert _filelist_contains_title(self.filenames, "Duel: Nature") is True
+
+
+# ─── mbsc browser-session cookie ────────────────────────────
+
+
+def _make_response(headers: list, body: str = "x") -> httpx.Response:
+    """Build a real httpx.Response with a bound request.
+
+    httpx.Response.cookies lazily walks the request URL when picking
+    which Set-Cookie headers apply, so a Response built without a
+    request raises on `.cookies` access. Same helper shape as
+    tests/mam/test_cookie.py.
+    """
+    request = httpx.Request(
+        "GET", "https://www.myanonamouse.net/tor/filelist.php?torrentid=1"
+    )
+    return httpx.Response(
+        200,
+        headers=headers,
+        content=body.encode("utf-8"),
+        request=request,
+    )
+
+
+@pytest.fixture
+def mbsc_state_isolated():
+    """Save + restore mbsc module state around each test.
+
+    Module globals leak across tests in the same process; this fixture
+    snapshots `_current_mbsc_token`, the rotation callback, and the
+    stale flag, lets the test mutate freely, then restores.
+    """
+    from app.discovery.sources import mam as mam_mod
+
+    saved_token = mam_mod._current_mbsc_token
+    saved_cb = mam_mod._mbsc_rotation_callback
+    saved_stale = mam_mod._mbsc_stale
+    try:
+        yield
+    finally:
+        mam_mod._current_mbsc_token = saved_token
+        mam_mod._mbsc_rotation_callback = saved_cb
+        mam_mod._mbsc_stale = saved_stale
+
+
+class TestExtractMbsc:
+    """Set-Cookie parser for the mbsc cookie. Mirrors TestExtractMamId
+    in tests/mam/test_cookie.py so a future jar-handling refactor
+    can't silently break one cookie's rotation while leaving the
+    other working."""
+
+    def test_extracts_from_jar(self):
+        resp = _make_response(
+            [("set-cookie", "mbsc=NEW_BROWSER_TOKEN; Path=/; HttpOnly")]
+        )
+        assert _extract_mbsc(resp) == "NEW_BROWSER_TOKEN"
+
+    def test_returns_none_when_no_cookie(self):
+        resp = _make_response([("content-type", "text/html")])
+        assert _extract_mbsc(resp) is None
+
+    def test_unrelated_cookie_returns_none(self):
+        # A mam_id rotation in the same response must not be
+        # mis-extracted as an mbsc value.
+        resp = _make_response(
+            [("set-cookie", "mam_id=ROTATED_API_TOKEN; Path=/")]
+        )
+        assert _extract_mbsc(resp) is None
+
+
+class TestMbscRotationHandler:
+    """The handler is the only path that promotes a Set-Cookie value
+    into the in-memory token + persistence callback. Drift here would
+    silently kill rotation for the mbsc cookie."""
+
+    async def test_rotation_updates_token_and_fires_callback(
+        self, mbsc_state_isolated
+    ):
+        set_current_mbsc_token("OLD_VALUE")
+        seen: list[str] = []
+
+        async def cb(new_token: str) -> None:
+            seen.append(new_token)
+
+        set_mbsc_rotation_callback(cb)
+        # Force the debounce window past the threshold so the test
+        # doesn't depend on real wall-clock timing.
+        from app.discovery.sources import mam as mam_mod
+        mam_mod._last_mbsc_rotation_save = 0.0
+
+        resp = _make_response([("set-cookie", "mbsc=FRESH_VALUE; Path=/")])
+        await _handle_response_cookie(resp)
+
+        assert get_current_mbsc_token() == "FRESH_VALUE"
+        assert seen == ["FRESH_VALUE"]
+
+    async def test_rotation_clears_stale_flag(self, mbsc_state_isolated):
+        # A successful rotation means MAM accepted our cookie enough
+        # to mint a new one — definitive evidence that whatever made
+        # us mark stale earlier is no longer relevant.
+        from app.discovery.sources import mam as mam_mod
+        mam_mod._mbsc_stale = True
+        set_current_mbsc_token("OLD")
+        mam_mod._last_mbsc_rotation_save = 0.0
+
+        resp = _make_response([("set-cookie", "mbsc=NEW; Path=/")])
+        await _handle_response_cookie(resp)
+
+        assert mbsc_is_stale() is False
+
+    async def test_no_rotation_when_value_unchanged(
+        self, mbsc_state_isolated
+    ):
+        # MAM occasionally echoes the same cookie back. Don't fire
+        # the callback for a no-op; the persist budget is precious.
+        set_current_mbsc_token("SAME")
+        seen: list[str] = []
+
+        async def cb(new_token: str) -> None:
+            seen.append(new_token)
+
+        set_mbsc_rotation_callback(cb)
+        resp = _make_response([("set-cookie", "mbsc=SAME; Path=/")])
+        await _handle_response_cookie(resp)
+
+        assert seen == []
+
+
+class TestMbscAutoDegrade:
+    """When mbsc isn't configured, filelist verification must
+    short-circuit BEFORE any network call — both to avoid the wasted
+    ~2s round trip and to keep B1's bundle-cap-with-badge as the
+    correct UX without mbsc."""
+
+    async def test_fetch_returns_none_when_mbsc_unset(
+        self, mbsc_state_isolated
+    ):
+        set_current_mbsc_token("")  # explicit "not configured"
+
+        # No transport mocking needed — the auto-degrade short-circuit
+        # fires before any HTTP call. If this test ever tries to reach
+        # MAM, that's a regression and the test (running in CI without
+        # network) will fail loudly.
+        result = await _fetch_filelist_response("any-token", "424895")
+        assert result is None
+
+    async def test_fetch_returns_none_when_torrent_id_empty(
+        self, mbsc_state_isolated
+    ):
+        # Pre-existing guard, not an mbsc thing — pin it so a future
+        # refactor doesn't drop it.
+        set_current_mbsc_token("valid-mbsc")
+        result = await _fetch_filelist_response("any-token", "")
+        assert result is None
+
+
+class TestMbscStaleFlag:
+    """Stale detection drives the Settings UI pill that tells Mark to
+    paste a fresh mbsc when MAM starts rejecting the old one."""
+
+    def test_starts_fresh(self, mbsc_state_isolated):
+        from app.discovery.sources import mam as mam_mod
+        mam_mod._mbsc_stale = False
+        assert mbsc_is_stale() is False
+
+    def test_mark_fresh_clears(self, mbsc_state_isolated):
+        from app.discovery.sources import mam as mam_mod
+        mam_mod._mbsc_stale = True
+        mark_mbsc_fresh()
+        assert mbsc_is_stale() is False
+
+    async def test_login_page_response_marks_stale(
+        self, mbsc_state_isolated, monkeypatch
+    ):
+        # Wire a mocked transport that returns the MAM login wrapper
+        # (the response shape the original B2 work observed when
+        # mam_id was sent without mbsc). The fetcher should detect
+        # the marker and flip the stale flag.
+        from app.discovery.sources import mam as mam_mod
+
+        set_current_mbsc_token("expired-mbsc")
+        mam_mod._mbsc_stale = False
+
+        login_body = (
+            "<html><head>"
+            '<title>Login | My Anonamouse</title>'
+            '</head><body data-uclass="0">login form</body></html>'
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=login_body, request=request)
+
+        mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr(mam_mod, "_get_client", lambda: mock_client)
+        try:
+            resp = await _fetch_filelist_response("mam-id", "424895")
+        finally:
+            await mock_client.aclose()
+
+        assert resp is not None
+        assert resp.status_code == 200
+        assert mbsc_is_stale() is True
+
+    async def test_real_filelist_response_does_not_mark_stale(
+        self, mbsc_state_isolated, monkeypatch
+    ):
+        # The happy path: MAM returns the bare table fragment. No
+        # login marker present → flag stays clear.
+        from app.discovery.sources import mam as mam_mod
+
+        set_current_mbsc_token("good-mbsc")
+        mam_mod._mbsc_stale = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, text=DEMON_ACCORDS_FILELIST_HTML, request=request
+            )
+
+        mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr(mam_mod, "_get_client", lambda: mock_client)
+        try:
+            await _fetch_filelist_response("mam-id", "424895")
+        finally:
+            await mock_client.aclose()
+
+        assert mbsc_is_stale() is False

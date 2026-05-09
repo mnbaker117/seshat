@@ -42,6 +42,7 @@ _log = logging.getLogger("seshat.secrets")
 # Only genuinely sensitive values (passwords, tokens, cookies).
 SECRET_KEYS: dict[str, str] = {
     "mam_session_id": "MAM session cookie",
+    "mam_browser_session_id": "MAM browser session cookie (mbsc)",
     "mam_irc_password": "MAM IRC password",
     "qbit_password": "qBittorrent password",
     "hardcover_api_key": "Hardcover API Bearer token",
