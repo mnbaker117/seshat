@@ -227,29 +227,43 @@ class TestBundlePromoteCap:
 
 
 class TestFilelistHeaders:
-    """Pin the AJAX-shape headers MAM requires for /tor/filelist.php
+    """Pin the browser-shape headers MAM requires for /tor/filelist.php
     to return the bare <table> fragment instead of the full site
-    wrapper. Confirmed via the debug-match endpoint: with curl/8.0 +
-    application/json (the working search-API headers) the same URL
-    served the favicon-laden landing page; with these headers it
-    serves the fragment we can parse.
+    wrapper. Production-confirmed via the debug-match endpoint:
+    Seshat's working search-API headers (curl/8.0 UA, JSON content
+    type) and a partial AJAX fix (Referer + jQuery Accept + XHR
+    marker) BOTH still got the wrapper. Only switching to a Firefox
+    UA + Sec-Fetch-* markers got the bare fragment back.
     """
 
     def test_referer_points_at_torrent_page(self):
-        # The Referer is the strongest signal — without it MAM treats
-        # the request as a direct navigation and serves chrome.
+        # The Referer is one of the AJAX-shape signals.
         h = _filelist_headers("token-stub", "424895")
         assert h["Referer"] == "https://www.myanonamouse.net/t/424895"
 
     def test_jquery_signature_accept_header(self):
         # jQuery's $.ajax() sends Accept "text/html, */*; q=0.01" by
-        # default. The q=0.01 is what MAM appears to look for.
+        # default. The q=0.01 is what jQuery uses.
         h = _filelist_headers("t", "1")
         assert h["Accept"] == "text/html, */*; q=0.01"
 
-    def test_xhr_marker(self):
+    def test_browser_user_agent(self):
+        # curl/8.0 alone (the search-API UA) gets the wrapper response.
+        # Browser UA is one of the signals MAM uses to decide whether
+        # to render the page chrome vs. the bare AJAX fragment.
         h = _filelist_headers("t", "1")
-        assert h["X-Requested-With"] == "XMLHttpRequest"
+        assert "Firefox" in h["User-Agent"]
+        assert "Mozilla" in h["User-Agent"]
+
+    def test_sec_fetch_xhr_markers(self):
+        # Sec-Fetch-Dest:empty + Mode:cors + Site:same-origin is the
+        # browser fingerprint of a fetch()/$.ajax() XHR call. MAM's
+        # filelist endpoint appears to gate the bare-fragment
+        # response on these.
+        h = _filelist_headers("t", "1")
+        assert h["Sec-Fetch-Dest"] == "empty"
+        assert h["Sec-Fetch-Mode"] == "cors"
+        assert h["Sec-Fetch-Site"] == "same-origin"
 
     def test_cookie_carries_mam_id(self):
         # Auth still flows through mam_id even though the request shape

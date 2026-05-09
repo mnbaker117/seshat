@@ -976,22 +976,35 @@ def _filelist_headers(token: str, torrent_id: str) -> dict:
     wrapper (favicons, menus, etc.) — same URL, status 200, but the
     <table id="fileListTable"> fragment is replaced by a logged-in
     landing page. Production-confirmed via the debug-match endpoint:
-    the curl/8.0 + Content-Type:application/json headers that work
-    perfectly for the search API trigger the wrapper response here.
+    the curl/8.0 UA + minimal headers that work for the search API
+    triggered the wrapper response here even with Referer + jQuery
+    Accept signature added.
 
-    Three signals together get us the fragment:
-      - Referer pointing at the torrent's own page (the AJAX origin)
-      - Accept "text/html, */*; q=0.01" (jQuery's signature q-value)
-      - X-Requested-With: XMLHttpRequest (jQuery's same-origin marker)
+    Switched to a browser User-Agent + the Sec-Fetch-* AJAX markers
+    a Firefox $.ajax() call would send. Each header here matches what
+    we captured from a working browser request to filelist.php; trim
+    cautiously, MAM is sensitive about the request shape:
+      - Mozilla UA — curl/8.0 alone gets the wrapper
+      - Sec-Fetch-{Dest,Mode,Site} — flags this as an XHR not a nav
+      - Referer pointing at the torrent's own page
+      - Accept "text/html, */*; q=0.01" (jQuery default)
 
-    User-Agent stays curl/8.0 to keep all MAM endpoints on a single
-    UA — switching only filelist would split telemetry without help.
+    The mam_id cookie still authenticates; only the UI rendering mode
+    flips. No other MAM endpoint in Seshat needs these headers, so
+    keep them scoped to filelist requests rather than promoting them
+    to _build_headers — the search API specifically needs curl/8.0.
     """
     return {
-        "User-Agent": "curl/8.0",
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) "
+            "Gecko/20100101 Firefox/150.0"
+        ),
         "Accept": "text/html, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"{MAM_TORRENT_BASE}/{torrent_id}",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
         "Cookie": f"mam_id={token}",
     }
 
