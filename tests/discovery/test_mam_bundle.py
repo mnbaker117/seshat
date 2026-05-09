@@ -249,20 +249,20 @@ class TestFilelistHeaders:
 
     def test_referer_points_at_torrent_page(self):
         # The Referer is one of the AJAX-shape signals.
-        h = _filelist_headers("token-stub", "mbsc-stub", "424895")
+        h = _filelist_headers("mbsc-stub", "424895")
         assert h["Referer"] == "https://www.myanonamouse.net/t/424895"
 
     def test_jquery_signature_accept_header(self):
         # jQuery's $.ajax() sends Accept "text/html, */*; q=0.01" by
         # default. The q=0.01 is what jQuery uses.
-        h = _filelist_headers("t", "m", "1")
+        h = _filelist_headers("m", "1")
         assert h["Accept"] == "text/html, */*; q=0.01"
 
     def test_browser_user_agent(self):
         # curl/8.0 alone (the search-API UA) gets the wrapper response.
         # Browser UA is one of the signals MAM uses to decide whether
         # to render the page chrome vs. the bare AJAX fragment.
-        h = _filelist_headers("t", "m", "1")
+        h = _filelist_headers("m", "1")
         assert "Firefox" in h["User-Agent"]
         assert "Mozilla" in h["User-Agent"]
 
@@ -271,46 +271,28 @@ class TestFilelistHeaders:
         # browser fingerprint of a fetch()/$.ajax() XHR call. MAM's
         # filelist endpoint appears to gate the bare-fragment
         # response on these.
-        h = _filelist_headers("t", "m", "1")
+        h = _filelist_headers("m", "1")
         assert h["Sec-Fetch-Dest"] == "empty"
         assert h["Sec-Fetch-Mode"] == "cors"
         assert h["Sec-Fetch-Site"] == "same-origin"
 
-    def test_cookie_carries_mam_id(self):
-        # Auth flows through mam_id for everything except filelist;
-        # we still carry it on filelist requests because Mark's
-        # browser does (Firefox cookie jar attaches everything that
-        # matches the domain). Pinned so a future refactor doesn't
-        # silently drop it.
-        h = _filelist_headers("session-abc", "browser-xyz", "424895")
-        assert "mam_id=session-abc" in h["Cookie"]
-
-    def test_cookie_carries_mbsc(self):
-        # mbsc is the actual auth-tier cookie for /tor/filelist.php —
-        # mam_id alone returns the login page (B2 diagnosis).
-        h = _filelist_headers("session-abc", "browser-xyz", "424895")
-        assert "mbsc=browser-xyz" in h["Cookie"]
-
-    def test_cookie_combines_both_with_separator(self):
-        # When both are configured, browsers send "mam_id=...; mbsc=..."
-        # — pin the exact wire shape so MAM's parser sees the same
-        # structure it does from a real browser.
-        h = _filelist_headers("session-abc", "browser-xyz", "424895")
-        assert h["Cookie"] == "mam_id=session-abc; mbsc=browser-xyz"
-
-    def test_cookie_omits_empty_mbsc_segment(self):
-        # mbsc not configured → emit only mam_id, never "mam_id=x; mbsc="
-        # which would be malformed and might trip up MAM's cookie
-        # parser into a different rejection path.
-        h = _filelist_headers("session-abc", "", "424895")
-        assert h["Cookie"] == "mam_id=session-abc"
-
-    def test_cookie_omits_empty_mam_id_segment(self):
-        # Edge case: only mbsc configured. Shouldn't happen in practice
-        # (mam_id is required for everything else) but the builder
-        # should still produce a clean cookie.
-        h = _filelist_headers("", "browser-xyz", "424895")
+    def test_cookie_carries_only_mbsc(self):
+        # The browser sends ONLY mbsc on filelist requests (verified
+        # 2026-05-09 from Mark's DevTools — the only session-relevant
+        # cookie present at MAM is mbsc; there is no mam_id cookie at
+        # all). Sending mam_id alongside mbsc triggers MAM's
+        # cross-session-defense logout (Set-Cookie deletions for uid +
+        # mam_id + mbsc). Pin the exact wire shape so a future
+        # refactor doesn't accidentally re-introduce mam_id.
+        h = _filelist_headers("browser-xyz", "424895")
         assert h["Cookie"] == "mbsc=browser-xyz"
+
+    def test_cookie_does_not_include_mam_id(self):
+        # Belt + suspenders for the regression that bit production on
+        # 2026-05-09: every filelist request was 302'd to login because
+        # the cookie header carried both mam_id and mbsc.
+        h = _filelist_headers("browser-xyz", "424895")
+        assert "mam_id=" not in h["Cookie"]
 
 
 class TestFilelistParser:
@@ -619,7 +601,7 @@ class TestMbscAutoDegrade:
         # fires before any HTTP call. If this test ever tries to reach
         # MAM, that's a regression and the test (running in CI without
         # network) will fail loudly.
-        result = await _fetch_filelist_response("any-token", "424895")
+        result = await _fetch_filelist_response("424895")
         assert result is None
 
     async def test_fetch_returns_none_when_torrent_id_empty(
@@ -628,7 +610,7 @@ class TestMbscAutoDegrade:
         # Pre-existing guard, not an mbsc thing — pin it so a future
         # refactor doesn't drop it.
         set_current_mbsc_token("valid-mbsc")
-        result = await _fetch_filelist_response("any-token", "")
+        result = await _fetch_filelist_response("")
         assert result is None
 
 
@@ -671,7 +653,7 @@ class TestMbscStaleFlag:
         mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr(mam_mod, "_get_client", lambda: mock_client)
         try:
-            resp = await _fetch_filelist_response("mam-id", "424895")
+            resp = await _fetch_filelist_response("424895")
         finally:
             await mock_client.aclose()
 
@@ -697,7 +679,7 @@ class TestMbscStaleFlag:
         mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr(mam_mod, "_get_client", lambda: mock_client)
         try:
-            await _fetch_filelist_response("mam-id", "424895")
+            await _fetch_filelist_response("424895")
         finally:
             await mock_client.aclose()
 

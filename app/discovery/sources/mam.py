@@ -1106,7 +1106,7 @@ def _filelist_contains_title(filenames: list[str], *titles: str) -> bool:
     return False
 
 
-def _filelist_headers(token: str, mbsc_token: str, torrent_id: str) -> dict:
+def _filelist_headers(mbsc_token: str, torrent_id: str) -> dict:
     """Headers for /tor/filelist.php that make MAM return the bare table.
 
     Without these headers MAM responds with the full site-chrome HTML
@@ -1126,23 +1126,16 @@ def _filelist_headers(token: str, mbsc_token: str, torrent_id: str) -> dict:
       - Referer pointing at the torrent's own page
       - Accept "text/html, */*; q=0.01" (jQuery default)
 
-    Cookie carries BOTH `mam_id` (long-lived API session) and `mbsc`
-    (rotating browser session) because Mark's actual browser sends
-    both — Firefox's cookie jar attaches every cookie matching the
-    domain, and MAM's auth tier for /tor/filelist.php specifically
-    needs mbsc (mam_id alone returns the login page; see the
-    project_seshat_mam_url_confidence memory). Empty-token segments
-    are skipped to avoid emitting `Cookie: mam_id=; mbsc=...` when
-    one half isn't configured. No other MAM endpoint in Seshat needs
-    these headers, so keep them scoped to filelist requests rather
-    than promoting them to _build_headers — the search API
-    specifically needs curl/8.0 and only mam_id.
+    Cookie carries ONLY `mbsc`. The browser doesn't send mam_id at
+    all (verified by inspecting Mark's MAM cookies in DevTools on
+    2026-05-09 — the only session-relevant cookie present is mbsc;
+    `mp_enabled` is just a Mixpanel tracking flag). Including mam_id
+    on the same request triggered MAM's cross-session-defense logout:
+    HTTP 302 → login.php with `Set-Cookie: mam_id=deleted; mbsc=deleted;
+    uid=deleted; Max-Age=0` — MAM treated the mam_id+mbsc combo as a
+    session-confused state and tried to terminate the session entirely.
+    See project_seshat_mam_url_confidence memory for the dig.
     """
-    cookie_parts: list[str] = []
-    if token:
-        cookie_parts.append(f"mam_id={token}")
-    if mbsc_token:
-        cookie_parts.append(f"mbsc={mbsc_token}")
     return {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) "
@@ -1154,7 +1147,7 @@ def _filelist_headers(token: str, mbsc_token: str, torrent_id: str) -> dict:
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
-        "Cookie": "; ".join(cookie_parts),
+        "Cookie": f"mbsc={mbsc_token}",
     }
 
 
@@ -1169,7 +1162,7 @@ _FILELIST_LOGIN_MARKERS = (
 )
 
 
-async def _fetch_filelist_response(token: str, torrent_id: str):
+async def _fetch_filelist_response(torrent_id: str):
     """Low-level filelist GET — returns the raw httpx.Response or None.
 
     Split out so the debug-match endpoint can surface status code +
@@ -1192,10 +1185,12 @@ async def _fetch_filelist_response(token: str, torrent_id: str):
     url = f"{MAM_FILELIST_URL}?torrentid={torrent_id}"
     try:
         client = _get_client()
-        effective = _current_token or token
+        # Note: no mam_id passed — sending mam_id on filelist requests
+        # triggers MAM's cross-session-defense logout (see
+        # _filelist_headers docstring). Filelist auths on mbsc alone.
         resp = await client.get(
             url,
-            headers=_filelist_headers(effective, mbsc, torrent_id),
+            headers=_filelist_headers(mbsc, torrent_id),
             timeout=15,
         )
         # Sniff for login-page markers BEFORE running the rotation
@@ -1218,7 +1213,7 @@ async def _fetch_filelist_response(token: str, torrent_id: str):
         return None
 
 
-async def _fetch_filelist(token: str, torrent_id: str) -> list[str]:
+async def _fetch_filelist(torrent_id: str) -> list[str]:
     """Fetch the per-torrent filelist and return the filenames.
 
     GET /tor/filelist.php?torrentid=<id> with browser-AJAX-shaped
@@ -1232,7 +1227,7 @@ async def _fetch_filelist(token: str, torrent_id: str) -> list[str]:
     cap at "possible", a hit in the filelist promotes back to "found"
     (the bundle URL is still correct because the user's book IS in it).
     """
-    resp = await _fetch_filelist_response(token, torrent_id)
+    resp = await _fetch_filelist_response(torrent_id)
     if resp is None or resp.status_code != 200 or not resp.text:
         if resp is not None:
             logger.debug(
@@ -1590,7 +1585,7 @@ async def check_book(
         if needs_filelist_check:
             tid = best["torrent_id"]
             if tid not in filelist_cache:
-                filelist_cache[tid] = await _fetch_filelist(token, tid)
+                filelist_cache[tid] = await _fetch_filelist(tid)
             filenames = filelist_cache[tid]
             if filenames and _filelist_contains_title(filenames, title, search_title):
                 bundle_filelist_verified = True
@@ -1901,7 +1896,7 @@ async def debug_check_book(
                     # the response body land in the debug trace.
                     fetch_url = f"{MAM_FILELIST_URL}?torrentid={tid}"
                     bundle_check["fetch_url"] = fetch_url
-                    resp = await _fetch_filelist_response(token, tid)
+                    resp = await _fetch_filelist_response(tid)
                     if resp is None:
                         bundle_check["fetch_http_status"] = "exception_or_no_id"
                         debug_filelist_cache[tid] = []
