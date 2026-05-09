@@ -1377,6 +1377,12 @@ function DiscMamSection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
         <span style={{ fontSize: 13, color: t.textDim }}>min</span>
       </div>
     </SF>
+    <SF label="Skip Recently-Scanned" desc='Possible/Not Found books re-scanned within this many days are skipped on bulk scans, so the queue rotates through the full library instead of cycling the same tail. 0 disables (legacy behavior — every scan re-evaluates everything). Manual rescans from the book sidebar always bypass.'>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <input type="number" min={0} value={s.mam_recent_scan_skip_days as number ?? 7} onChange={e => upd("mam_recent_scan_skip_days", parseInt(e.target.value) || 0)} style={nist} />
+        <span style={{ fontSize: 13, color: t.textDim }}>days</span>
+      </div>
+    </SF>
     {/* Format priorities side-by-side — both lists are short (6-7
         rows) so stacking them wastes vertical space. Wrapped in
         a 2-column grid with a vertical separator for visual

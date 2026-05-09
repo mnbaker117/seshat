@@ -122,6 +122,13 @@ CREATE TABLE IF NOT EXISTS books (
     mam_has_multiple INTEGER NOT NULL DEFAULT 0,
     mam_my_snatched INTEGER NOT NULL DEFAULT 0,
     mam_is_bundle INTEGER NOT NULL DEFAULT 0,
+    -- Unix epoch seconds (REAL). Stamped on every successful MAM
+    -- scan (FOUND/POSSIBLE/NOT_FOUND), NOT on auth_error or other
+    -- transient failures. Drives the "skip recently-scanned books"
+    -- eligibility filter so the scan front rotates through the full
+    -- library instead of treading water on slow-moving Possible /
+    -- Not Found tails. NULL means never scanned.
+    mam_last_scanned_at REAL,
     -- source_url stores a JSON dict mapping source-plugin name to URL:
     --   {"goodreads": "https://www.goodreads.com/book/show/123",
     --    "hardcover": "https://hardcover.app/books/slug", ...}
@@ -515,6 +522,17 @@ MIGRATIONS = [
     # badge and the scan logic can avoid auto-promoting low-title-match
     # bundles to "Found". See _is_bundle in app/discovery/sources/mam.py.
     "ALTER TABLE books ADD COLUMN mam_is_bundle INTEGER NOT NULL DEFAULT 0",
+    # mam_last_scanned_at: unix epoch seconds, stamped on successful
+    # MAM scans (FOUND/POSSIBLE/NOT_FOUND). Drives the "skip recently-
+    # scanned" eligibility filter — books scanned within the configured
+    # window (default 7 days, see mam_recent_scan_skip_days) are
+    # excluded from bulk scan eligibility so the queue front rotates
+    # through the full library rather than re-evaluating the same
+    # Possible/Not Found tail every cycle. Also drives oldest-first
+    # ordering on the eligible set so libraries get full coverage over
+    # time. Manual sidebar rescans bypass the filter (they hit
+    # check_book directly, not the eligibility query).
+    "ALTER TABLE books ADD COLUMN mam_last_scanned_at REAL",
 ]
 
 

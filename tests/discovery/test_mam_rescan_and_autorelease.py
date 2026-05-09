@@ -233,3 +233,273 @@ async def test_scheduler_clears_expired_unreleased(
         "past-book": 0,
         "today-book": 0,
     }
+
+
+# ─── Recently-scanned skip + oldest-first ordering ───────────────
+
+
+class TestRecentScanCutoffSeconds:
+    """Reads the configurable window from settings; default is 7 days."""
+
+    def test_default_is_seven_days(self, monkeypatch):
+        from app import config as app_config
+        from app.discovery.sources.mam import _recent_scan_cutoff_seconds
+
+        # Pass an explicit dict so we don't need a real settings.json.
+        cutoff = _recent_scan_cutoff_seconds(dict(app_config.DEFAULT_SETTINGS))
+        assert cutoff == 7 * 86400.0
+
+    def test_zero_disables(self):
+        from app.discovery.sources.mam import _recent_scan_cutoff_seconds
+
+        assert _recent_scan_cutoff_seconds({"mam_recent_scan_skip_days": 0}) == 0.0
+
+    def test_negative_disables(self):
+        # Defensive: a malformed settings value shouldn't crash, just
+        # treat as "disabled".
+        from app.discovery.sources.mam import _recent_scan_cutoff_seconds
+
+        assert _recent_scan_cutoff_seconds({"mam_recent_scan_skip_days": -3}) == 0.0
+
+    def test_garbage_falls_back_to_default(self):
+        from app.discovery.sources.mam import _recent_scan_cutoff_seconds
+
+        # Non-numeric → fall back to 7 (the documented default).
+        assert _recent_scan_cutoff_seconds({"mam_recent_scan_skip_days": "weekly"}) == 7 * 86400.0
+
+    def test_fractional_days_supported(self):
+        # Power-user case: tighter cadence than a whole day.
+        from app.discovery.sources.mam import _recent_scan_cutoff_seconds
+
+        assert _recent_scan_cutoff_seconds({"mam_recent_scan_skip_days": 0.5}) == 0.5 * 86400.0
+
+
+class TestRecentScanSkipClause:
+    """SQL fragment for excluding recently-scanned books from the
+    eligibility query. Returns empty string when disabled so the
+    base predicate stays unchanged."""
+
+    def test_disabled_returns_empty(self):
+        from app.discovery.sources.mam import _recent_scan_skip_clause
+
+        assert _recent_scan_skip_clause(0) == ""
+        assert _recent_scan_skip_clause(0.0) == ""
+        assert _recent_scan_skip_clause(-100) == ""
+
+    def test_enabled_emits_null_or_older_than_cutoff(self):
+        from app.discovery.sources.mam import _recent_scan_skip_clause
+
+        clause = _recent_scan_skip_clause(7 * 86400.0)
+        # Always preserves never-scanned books (NULL → keep) — they're
+        # the highest-priority candidates.
+        assert "mam_last_scanned_at IS NULL" in clause
+        # And keeps any book whose timestamp is before the cutoff.
+        assert "mam_last_scanned_at <" in clause
+        # Leading AND so it composes with the existing predicate.
+        assert clause.lstrip().startswith("AND")
+
+    def test_aliased_prefix(self):
+        # Queries that JOIN authors need `b.` prefix to disambiguate.
+        from app.discovery.sources.mam import _recent_scan_skip_clause
+
+        clause = _recent_scan_skip_clause(7 * 86400.0, prefix="b.")
+        assert "b.mam_last_scanned_at" in clause
+        assert " mam_last_scanned_at" not in clause  # no unprefixed reference
+
+
+class TestRecentScanOrderClause:
+    """Oldest-first ORDER BY fragment. Pairs with the skip clause to
+    give libraries full coverage over time."""
+
+    def test_owned_first_then_oldest_then_id(self):
+        from app.discovery.sources.mam import _recent_scan_order_clause
+
+        clause = _recent_scan_order_clause()
+        # Owned books still get priority.
+        assert "owned DESC" in clause
+        # Oldest first (NULL → 0 sorts before any positive timestamp,
+        # so never-scanned books lead).
+        assert "COALESCE(mam_last_scanned_at, 0) ASC" in clause
+        # Stable id tiebreaker.
+        assert "id ASC" in clause
+
+    def test_aliased_prefix(self):
+        from app.discovery.sources.mam import _recent_scan_order_clause
+
+        clause = _recent_scan_order_clause(prefix="b.")
+        assert "b.owned" in clause
+        assert "COALESCE(b.mam_last_scanned_at, 0)" in clause
+        assert "b.id ASC" in clause
+
+
+async def test_skip_clause_excludes_recently_scanned_rows(single_library):
+    """End-to-end: a row scanned 1 day ago is excluded when the window
+    is 7 days; a row scanned 10 days ago is included; never-scanned
+    rows are always included."""
+    from app.discovery.sources.mam import (
+        _NEEDS_SCAN_BASIC_BARE,
+        _recent_scan_skip_clause,
+    )
+    import time as _time
+
+    db, aid = single_library
+    now = _time.time()
+    await db.execute(
+        "INSERT INTO books (title, author_id, mam_status, mam_last_scanned_at) "
+        "VALUES "
+        "('never-scanned', ?, 'possible', NULL),"
+        "('day-old', ?, 'possible', ?),"
+        "('ten-days-old', ?, 'possible', ?)",
+        (aid, aid, now - 86400, aid, now - 10 * 86400),
+    )
+    await db.commit()
+
+    # 7-day window — day-old should be excluded; ten-days-old included.
+    skip_clause = _recent_scan_skip_clause(7 * 86400.0)
+    rows = await db.execute_fetchall(
+        f"SELECT title FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}{skip_clause} "
+        f"ORDER BY title"
+    )
+    titles = [r[0] for r in rows]
+    assert "day-old" not in titles
+    assert "ten-days-old" in titles
+    assert "never-scanned" in titles
+
+
+async def test_skip_clause_disabled_includes_all(single_library):
+    """When the skip is disabled (cutoff=0), the eligibility query
+    matches the legacy behavior — every Possible row is in the queue
+    regardless of last-scan timestamp."""
+    from app.discovery.sources.mam import (
+        _NEEDS_SCAN_BASIC_BARE,
+        _recent_scan_skip_clause,
+    )
+    import time as _time
+
+    db, aid = single_library
+    await db.execute(
+        "INSERT INTO books (title, author_id, mam_status, mam_last_scanned_at) "
+        "VALUES "
+        "('just-scanned', ?, 'possible', ?),"
+        "('never-scanned', ?, 'possible', NULL)",
+        (aid, _time.time(), aid),
+    )
+    await db.commit()
+
+    skip_clause = _recent_scan_skip_clause(0)  # disabled → empty string
+    rows = await db.execute_fetchall(
+        f"SELECT title FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}{skip_clause}"
+    )
+    titles = sorted(r[0] for r in rows)
+    assert titles == ["just-scanned", "never-scanned"]
+
+
+async def test_oldest_first_ordering(single_library):
+    """End-to-end: the order clause sorts never-scanned (NULL → 0)
+    first, then ascending by timestamp, then by id. Owned books
+    still sort to the front before any of that."""
+    from app.discovery.sources.mam import _recent_scan_order_clause
+    import time as _time
+
+    db, aid = single_library
+    now = _time.time()
+    # Insert with explicit ids so we can pin tiebreaker behavior.
+    await db.execute(
+        "INSERT INTO books "
+        "(id, title, author_id, owned, mam_status, mam_last_scanned_at) VALUES "
+        "(1, 'old-unowned', ?, 0, 'possible', ?),"
+        "(2, 'recent-unowned', ?, 0, 'possible', ?),"
+        "(3, 'never-unowned', ?, 0, 'possible', NULL),"
+        "(4, 'old-owned', ?, 1, 'possible', ?)",
+        (aid, now - 30 * 86400, aid, now - 1 * 86400, aid, aid, now - 30 * 86400),
+    )
+    await db.commit()
+
+    rows = await db.execute_fetchall(
+        f"SELECT title FROM books "
+        f"ORDER BY {_recent_scan_order_clause()}"
+    )
+    titles = [r[0] for r in rows]
+    # owned books first (just one), then never-scanned, then oldest
+    # unowned, then most recent.
+    assert titles == [
+        "old-owned",
+        "never-unowned",
+        "old-unowned",
+        "recent-unowned",
+    ]
+
+
+async def test_auth_error_does_not_stamp_timestamp(single_library):
+    """The CASE in the UPDATE statement preserves the existing
+    timestamp on auth_error — otherwise a bad cookie would mark
+    every book as 'recently scanned' and starve the queue when auth
+    recovers. Tests the SQL pattern directly so we catch any drift
+    between the three call sites that share the same logic."""
+    import time as _time
+
+    db, aid = single_library
+    original_ts = _time.time() - 10 * 86400  # 10 days ago
+    await db.execute(
+        "INSERT INTO books (id, title, author_id, mam_status, mam_last_scanned_at) "
+        "VALUES (1, 't', ?, 'possible', ?)",
+        (aid, original_ts),
+    )
+    await db.commit()
+
+    # Mirror the production UPDATE shape from scan_books_batch.
+    new_ts = _time.time()
+    await db.execute(
+        """
+        UPDATE books SET mam_status=?,
+               mam_last_scanned_at=CASE
+                   WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                   ELSE ?
+               END
+        WHERE id=1
+        """,
+        ("auth_error", "auth_error", new_ts),
+    )
+    await db.commit()
+
+    row = await db.execute_fetchall(
+        "SELECT mam_last_scanned_at FROM books WHERE id=1"
+    )
+    # The CASE preserved the original timestamp; the new value was
+    # NOT written.
+    assert row[0][0] == original_ts
+
+
+async def test_successful_scan_stamps_timestamp(single_library):
+    """The other half of the contract: a real scan result (found /
+    possible / not_found) DOES update the timestamp."""
+    import time as _time
+
+    db, aid = single_library
+    original_ts = _time.time() - 10 * 86400
+    await db.execute(
+        "INSERT INTO books (id, title, author_id, mam_status, mam_last_scanned_at) "
+        "VALUES (1, 't', ?, 'possible', ?)",
+        (aid, original_ts),
+    )
+    await db.commit()
+
+    new_ts = _time.time()
+    for status in ("found", "possible", "not_found"):
+        await db.execute(
+            """
+            UPDATE books SET mam_status=?,
+                   mam_last_scanned_at=CASE
+                       WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                       ELSE ?
+                   END
+            WHERE id=1
+            """,
+            (status, status, new_ts),
+        )
+        await db.commit()
+        row = await db.execute_fetchall(
+            "SELECT mam_last_scanned_at FROM books WHERE id=1"
+        )
+        # Each non-auth_error status stamps the new timestamp.
+        assert row[0][0] == new_ts

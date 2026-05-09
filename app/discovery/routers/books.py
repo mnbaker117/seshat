@@ -12,6 +12,7 @@ COUNT subquery per row — see `_SERIES_TOTAL_JOIN` for the rationale.
 import json
 import logging
 import re
+import time
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app import state
@@ -1021,10 +1022,16 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
                 logger.error(f"Bulk MAM scan error on book {bid} ({btitle[:40]}): {e}")
                 stats["errors"] += 1
                 continue
+            # Stamp mam_last_scanned_at on successful scans only — see
+            # scan_books_batch for the auth_error-skip rationale.
             await db.execute("""
                 UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
                        mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?,
-                       mam_is_bundle=?
+                       mam_is_bundle=?,
+                       mam_last_scanned_at=CASE
+                           WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                           ELSE ?
+                       END
                 WHERE id=?
             """, (
                 check["mam_url"], check["status"], check["mam_formats"],
@@ -1032,6 +1039,8 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
                 1 if check["mam_has_multiple"] else 0,
                 1 if check.get("mam_my_snatched") else 0,
                 1 if check.get("mam_is_bundle") else 0,
+                check["status"],
+                time.time(),
                 bid,
             ))
             stats["scanned"] += 1

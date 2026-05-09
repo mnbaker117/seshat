@@ -102,6 +102,67 @@ _NEEDS_SCAN_STRICT_ALIASED = (
     "AND b.is_unreleased = 0 AND b.hidden = 0"
 )
 
+
+def _recent_scan_cutoff_seconds(settings: Optional[dict] = None) -> float:
+    """Return the cutoff window (seconds) for the recently-scanned skip.
+
+    Reads `mam_recent_scan_skip_days` from settings (default 7). 0 or
+    negative disables the skip — every eligible book is in the queue
+    regardless of last-scan timestamp. Used by `_recent_scan_skip_clause`
+    and `_recent_scan_order_clause` below.
+    """
+    if settings is None:
+        from app.config import load_settings
+        settings = load_settings()
+    days = settings.get("mam_recent_scan_skip_days", 7)
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        days = 7.0
+    if days <= 0:
+        return 0.0
+    return days * 86400.0
+
+
+def _recent_scan_skip_clause(
+    cutoff_seconds: float, prefix: str = ""
+) -> str:
+    """Build the SQL fragment that excludes recently-scanned books.
+
+    Returns either an empty string (cutoff disabled) or
+    " AND ({prefix}mam_last_scanned_at IS NULL OR {prefix}mam_last_scanned_at < <unix_ts>)".
+    The cutoff timestamp is computed at call time, not stored — every
+    query gets a fresh "now - window" value.
+
+    `prefix` is "" for bare queries or "b." for queries that JOIN
+    authors and need a table-qualified column reference.
+    """
+    if cutoff_seconds <= 0:
+        return ""
+    cutoff_ts = time.time() - cutoff_seconds
+    col = f"{prefix}mam_last_scanned_at"
+    return f" AND ({col} IS NULL OR {col} < {cutoff_ts})"
+
+
+def _recent_scan_order_clause(prefix: str = "") -> str:
+    """Build the ORDER BY fragment for oldest-first scan ordering.
+
+    Returns "{prefix}owned DESC, COALESCE({prefix}mam_last_scanned_at, 0) ASC, {prefix}id ASC"
+    so the eligible set is processed in:
+      1. Owned books first (priority by ownership)
+      2. Never-scanned (NULL → 0) before any scanned book
+      3. Oldest-scanned before newest-scanned
+      4. Stable id tiebreaker
+    Pairs with `_recent_scan_skip_clause` to give libraries full scan
+    coverage over time even with small batch sizes.
+    """
+    col = f"{prefix}mam_last_scanned_at"
+    return (
+        f"{prefix}owned DESC, "
+        f"COALESCE({col}, 0) ASC, "
+        f"{prefix}id ASC"
+    )
+
 # Match quality thresholds (0-1 scale, uses scoring.score_match)
 # The combined score blends 70% title similarity + 30% author overlap,
 # so a threshold of 0.65 means moderate title + good author, or
@@ -2360,6 +2421,10 @@ async def scan_books_batch(
             return {"scanned": 0, "found": 0, "possible": 0, "not_found": 0,
                     "errors": 0, "error": None}
         placeholders = ",".join("?" * len(book_ids))
+        # Snapshot mode (book_ids provided) doesn't apply the recently-
+        # scanned skip — the caller already curated the ID set, our job
+        # is to scan exactly those books. Snapshot was built upstream
+        # (e.g. start_full_scan) where the skip filter does apply.
         rows = await db.execute_fetchall(f"""
             SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased,
                    s.name as series_name
@@ -2367,17 +2432,21 @@ async def scan_books_batch(
             JOIN authors a ON b.author_id = a.id
             LEFT JOIN series s ON b.series_id = s.id
             WHERE b.id IN ({placeholders})
-            ORDER BY b.owned DESC, b.id ASC
+            ORDER BY {_recent_scan_order_clause('b.')}
         """, tuple(book_ids))
     else:
+        # Live-eligibility mode: apply the skip clause + oldest-first
+        # ordering so the queue rotates through the full library.
+        cutoff = _recent_scan_cutoff_seconds()
+        skip_clause = _recent_scan_skip_clause(cutoff, prefix="b.")
         rows = await db.execute_fetchall(f"""
             SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased,
                    s.name as series_name
             FROM books b
             JOIN authors a ON b.author_id = a.id
             LEFT JOIN series s ON b.series_id = s.id
-            WHERE {_NEEDS_SCAN_BASIC_ALIASED}
-            ORDER BY b.owned DESC, b.id ASC
+            WHERE {_NEEDS_SCAN_BASIC_ALIASED}{skip_clause}
+            ORDER BY {_recent_scan_order_clause('b.')}
             LIMIT ?
         """, (limit,))
 
@@ -2445,11 +2514,20 @@ async def scan_books_batch(
         check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids, series_name=book_series or "", content_type=content_type)
         stats["scanned"] += 1
 
-        # Write result to DB
+        # Write result to DB. Stamp mam_last_scanned_at on
+        # successful scans (any status that actually represents a
+        # round-trip with MAM) but NOT on auth_error — otherwise a
+        # bad cookie would mark every book as recently scanned and
+        # starve the queue when auth recovers. The CASE keeps the
+        # existing timestamp untouched on auth_error.
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
                    mam_torrent_id=?, mam_category=?, mam_has_multiple=?, mam_my_snatched=?,
-                   mam_is_bundle=?
+                   mam_is_bundle=?,
+                   mam_last_scanned_at=CASE
+                       WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                       ELSE ?
+                   END
             WHERE id=?
         """, (
             check["mam_url"],
@@ -2460,6 +2538,8 @@ async def scan_books_batch(
             1 if check["mam_has_multiple"] else 0,
             1 if check.get("mam_my_snatched") else 0,
             1 if check.get("mam_is_bundle") else 0,
+            check["status"],
+            time.time(),
             book_id,
         ))
 
@@ -2522,10 +2602,12 @@ async def start_full_scan(db) -> dict:
     if running:
         return {"error": "A full scan is already in progress"}
 
+    cutoff = _recent_scan_cutoff_seconds()
+    skip_clause = _recent_scan_skip_clause(cutoff)
     id_rows = await db.execute_fetchall(f"""
         SELECT id FROM books
-        WHERE {_NEEDS_SCAN_STRICT_BARE}
-        ORDER BY owned DESC, id ASC
+        WHERE {_NEEDS_SCAN_STRICT_BARE}{skip_clause}
+        ORDER BY {_recent_scan_order_clause()}
     """)
     snapshot = [r[0] for r in id_rows]
     total = len(snapshot)
@@ -2614,15 +2696,20 @@ async def run_full_scan_batch(
             FROM books b
             JOIN authors a ON b.author_id = a.id
             WHERE b.id IN ({placeholders})
-            ORDER BY b.owned DESC, b.id ASC
+            ORDER BY {_recent_scan_order_clause('b.')}
         """, tuple(batch_ids))
     else:
+        # Legacy no-snapshot fallback. Apply skip + oldest-first the
+        # same way the snapshot path's source query (start_full_scan)
+        # does so the two paths produce comparable queues.
+        cutoff = _recent_scan_cutoff_seconds()
+        skip_clause = _recent_scan_skip_clause(cutoff, prefix="b.")
         book_rows = await db.execute_fetchall(f"""
             SELECT b.id, b.title, a.name as author_name
             FROM books b
             JOIN authors a ON b.author_id = a.id
-            WHERE {_NEEDS_SCAN_STRICT_ALIASED}
-            ORDER BY b.owned DESC, b.id ASC
+            WHERE {_NEEDS_SCAN_STRICT_ALIASED}{skip_clause}
+            ORDER BY {_recent_scan_order_clause('b.')}
             LIMIT ?
         """, (batch_size,))
 
@@ -2658,16 +2745,24 @@ async def run_full_scan_batch(
         check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids, content_type=content_type)
         scanned += 1
 
+        # Same auth-error-aware timestamp guard as scan_books_batch —
+        # see that function's UPDATE for full rationale.
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
                    mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?,
-                   mam_is_bundle=?
+                   mam_is_bundle=?,
+                   mam_last_scanned_at=CASE
+                       WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                       ELSE ?
+                   END
             WHERE id=?
         """, (
             check["mam_url"], check["status"], check["mam_formats"],
             check["mam_torrent_id"], 1 if check["mam_has_multiple"] else 0,
             1 if check.get("mam_my_snatched") else 0,
             1 if check.get("mam_is_bundle") else 0,
+            check["status"],
+            time.time(),
             book_id,
         ))
 

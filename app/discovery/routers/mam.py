@@ -746,10 +746,16 @@ async def mam_scan_single_book(book_id: int, slug: str | None = Query(None)):
             lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
             content_type=ct,
         )
+        # Stamp mam_last_scanned_at on successful scans only — see
+        # scan_books_batch for the auth_error-skip rationale.
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
                    mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?,
-                   mam_is_bundle=?
+                   mam_is_bundle=?,
+                   mam_last_scanned_at=CASE
+                       WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                       ELSE ?
+                   END
             WHERE id=?
         """, (
             check["mam_url"], check["status"], check["mam_formats"],
@@ -757,6 +763,8 @@ async def mam_scan_single_book(book_id: int, slug: str | None = Query(None)):
             1 if check["mam_has_multiple"] else 0,
             1 if check.get("mam_my_snatched") else 0,
             1 if check.get("mam_is_bundle") else 0,
+            check["status"],
+            time.time(),
             book_id,
         ))
         await db.commit()

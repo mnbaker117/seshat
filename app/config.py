@@ -575,6 +575,12 @@ DEFAULT_SETTINGS = {
     "mam_scanning_enabled": True,
     "mam_skip_ip_update": True,
     "mam_scan_interval_minutes": 360,
+    # Days within which a Possible/Not Found result is considered
+    # "recently scanned" and skipped on the next bulk scan. Prevents
+    # the scan front from getting stuck cycling through the same
+    # slow-moving tail every tick. 0 = always re-scan everything
+    # (legacy behavior). Manual sidebar rescans always bypass this.
+    "mam_recent_scan_skip_days": 7,
     "mam_format_priority": ["epub", "azw", "azw3", "pdf", "djvu", "azw4"],
     "rate_mam": 2,
     "last_mam_validated_at": None,
