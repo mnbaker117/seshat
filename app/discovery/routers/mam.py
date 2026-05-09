@@ -42,6 +42,9 @@ from app.discovery.sources.mam import (
     get_mam_stats,
     check_book as mam_check_book,
     _resolve_mam_languages,
+    _recent_scan_cutoff_seconds,
+    _recent_scan_skip_clause,
+    _recent_scan_order_clause,
 )
 from app import state
 
@@ -167,14 +170,25 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
     # Iteration order matches `_discovered_libraries` (configured order).
     per_lib_snapshots: list[tuple[dict, list[int]]] = []
     remaining_budget = limit if limit else None
+    # Apply the recently-scanned skip + oldest-first ordering so the
+    # Command Center's manual MAM scan honors the same filters as the
+    # full-scan and live-eligibility paths. Without this the snapshot
+    # would re-include every Possible/Not Found book regardless of
+    # when it was last scanned, defeating the whole point of the
+    # mam_recent_scan_skip_days setting (Mark's UAT 2026-05-09:
+    # canceled scan came back with the same 1,932 books even though
+    # 1,127 of them had been freshly stamped).
+    cutoff = _recent_scan_cutoff_seconds(s)
+    skip_clause = _recent_scan_skip_clause(cutoff)
+    order_clause = _recent_scan_order_clause()
     for lib in state._discovered_libraries:
         if remaining_budget is not None and remaining_budget <= 0:
             break
         ldb = await get_db(slug=lib["slug"])
         try:
             id_rows = await ldb.execute_fetchall(
-                f"SELECT id FROM books WHERE {_NEEDS_SCAN_BASIC_BARE} "
-                "ORDER BY owned DESC, id ASC"
+                f"SELECT id FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}"
+                f"{skip_clause} ORDER BY {order_clause}"
             )
             ids = [r[0] for r in id_rows]
         finally:

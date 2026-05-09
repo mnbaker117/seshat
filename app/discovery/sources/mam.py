@@ -2475,6 +2475,17 @@ async def scan_books_batch(
         # (shouldn't happen — finally block guarantees decrement) so a
         # bug can't strand MAM forever.
         #
+        # Library syncs (Calibre / ABS) get the same per-book deference
+        # via `state._library_sync_in_progress`. The `/api/mam/scan`
+        # router has a between-batches `_wait_for_other_writers` check,
+        # but that's too coarse — a sync that fires mid-batch (a 150-
+        # book batch can take ~15 minutes) holds the writer lock long
+        # enough for MAM's next UPDATE to time out and crash the whole
+        # scan task with `database is locked` (Mark's UAT 2026-05-09).
+        # Per-book pause prevents that by committing + waiting at sub-
+        # second granularity instead of letting MAM bash against a
+        # held lock until busy_timeout expires.
+        #
         # CRITICAL: commit before the pause-sleep loop. The previous
         # iteration's UPDATE books call started an implicit transaction
         # that only flushes at the per-book `db.commit()` below. Without
@@ -2484,23 +2495,36 @@ async def scan_books_batch(
         # to prevent. v1.1.9-dev3 testing confirmed: Goodreads spent 30s
         # blocked on UPDATE authors while MAM sat paused with its last
         # UPDATE uncommitted.
-        if state._source_scan_refs > 0:
+        if state._source_scan_refs > 0 or state._library_sync_in_progress:
             await db.commit()
+            reason_parts = []
+            if state._source_scan_refs > 0:
+                reason_parts.append(
+                    f"{state._source_scan_refs} source scan(s)"
+                )
+            if state._library_sync_in_progress:
+                reason_parts.append("library sync")
+            reason = " + ".join(reason_parts)
             logger.info(
-                f"MAM [{i+1}/{len(rows)}] paused — {state._source_scan_refs} "
-                f"source scan(s) in progress"
+                f"MAM [{i+1}/{len(rows)}] paused — {reason} in progress"
             )
             paused_at = asyncio.get_event_loop().time()
-            while state._source_scan_refs > 0:
+            while (
+                state._source_scan_refs > 0
+                or state._library_sync_in_progress
+            ):
                 if asyncio.get_event_loop().time() - paused_at > 1200:
                     logger.warning(
-                        f"MAM [{i+1}/{len(rows)}] paused 20min — refcount "
-                        f"stuck at {state._source_scan_refs}, resuming anyway"
+                        f"MAM [{i+1}/{len(rows)}] paused 20min — "
+                        f"resuming anyway (refcount={state._source_scan_refs}, "
+                        f"library_sync={state._library_sync_in_progress})"
                     )
                     break
                 await asyncio.sleep(1.0)
             else:
-                logger.info(f"MAM [{i+1}/{len(rows)}] resumed — source scan finished")
+                logger.info(
+                    f"MAM [{i+1}/{len(rows)}] resumed — concurrent writers finished"
+                )
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 

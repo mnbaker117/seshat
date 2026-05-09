@@ -470,6 +470,134 @@ async def test_auth_error_does_not_stamp_timestamp(single_library):
     assert row[0][0] == original_ts
 
 
+async def test_per_book_pause_for_library_sync(single_library, monkeypatch):
+    """Regression: when library sync starts mid-batch, MAM scan was
+    crashing with `database is locked` instead of pausing — the
+    pre-existing `_wait_for_other_writers` only fires between
+    batches, but a 150-book batch can run 15+ minutes and the sync
+    holds the writer lock long enough to exceed busy_timeout. Per-
+    book pause via `state._library_sync_in_progress` prevents that.
+
+    Test: stub check_book + register_ip so we don't hit MAM; set the
+    library_sync flag BEFORE the scan; have a parallel task flip the
+    flag back to False after a short delay; verify scan_books_batch
+    blocked until the flag cleared.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    from app import state
+    from app.discovery.sources import mam as mam_mod
+
+    # Seed one eligible book.
+    db, aid = single_library
+    await db.execute(
+        "INSERT INTO books (title, author_id, mam_status) "
+        "VALUES ('one', ?, NULL)",
+        (aid,),
+    )
+    await db.commit()
+
+    # Stub network calls.
+    async def fake_register_ip(*_a, **_kw):
+        return {"success": True, "message": "ok"}
+
+    async def fake_check_book(*_a, **_kw):
+        return {
+            "status": "not_found", "mam_url": "", "mam_torrent_id": None,
+            "mam_title": None, "mam_formats": None,
+            "mam_has_multiple": False, "mam_my_snatched": False,
+            "mam_is_bundle": False,
+        }
+
+    monkeypatch.setattr(mam_mod, "register_ip", fake_register_ip)
+    monkeypatch.setattr(mam_mod, "check_book", fake_check_book)
+
+    # Snapshot + restore state flags so the test doesn't bleed.
+    saved_refs = state._source_scan_refs
+    saved_sync = state._library_sync_in_progress
+    state._source_scan_refs = 0
+    state._library_sync_in_progress = True
+
+    # Flip the flag off after 2s so the scan can resume + complete.
+    async def _release_after(delay):
+        await _asyncio.sleep(delay)
+        state._library_sync_in_progress = False
+
+    release_task = _asyncio.create_task(_release_after(2.0))
+
+    try:
+        started = _time.monotonic()
+        result = await mam_mod.scan_books_batch(
+            db, session_id="tok", limit=1, delay=0.0,
+            skip_ip_update=True, lang_ids=[1],
+        )
+        elapsed = _time.monotonic() - started
+    finally:
+        await release_task
+        state._source_scan_refs = saved_refs
+        state._library_sync_in_progress = saved_sync
+
+    assert result["scanned"] == 1
+    # Scan should have waited at least the ~2s release delay before
+    # the per-book write fired. Tight floor (1.5s) tolerates timing
+    # jitter on slow CI; the bug-state would have completed in ~0s
+    # since check_book is a stub.
+    assert elapsed >= 1.5, f"Scan ran in {elapsed:.2f}s — pause didn't fire"
+
+
+async def test_command_center_router_snapshot_applies_skip(
+    single_library, monkeypatch, tmp_path,
+):
+    """Regression: the /api/mam/scan router's per-library snapshot used
+    inline SQL with the old ORDER BY and no skip clause, so a canceled-
+    then-restarted scan would re-include every book — including the
+    1,127 Mark had just freshly stamped before a `database is locked`
+    crash terminated the in-flight batch (UAT 2026-05-09 14:46). Wire
+    the same `_recent_scan_*` helpers the other call sites use.
+    """
+    import time as _time
+
+    # Seed: 5 eligible books — 3 stamped fresh (last 1h), 2 never
+    # scanned. With a 7-day skip the eligible queue should be 2.
+    db, aid = single_library
+    now = _time.time()
+    fresh_ts = now - 3600  # 1 hour ago
+    await db.execute(
+        "INSERT INTO books (title, author_id, mam_status, mam_last_scanned_at) "
+        "VALUES "
+        "('fresh-1', ?, 'possible', ?),"
+        "('fresh-2', ?, 'not_found', ?),"
+        "('fresh-3', ?, 'possible', ?),"
+        "('never-1', ?, NULL, NULL),"
+        "('never-2', ?, 'possible', NULL)",
+        (aid, fresh_ts, aid, fresh_ts, aid, fresh_ts, aid, aid),
+    )
+    await db.commit()
+
+    # The endpoint reads settings via load_settings, then builds the
+    # snapshot. We don't need to fire the actual scan — just exercise
+    # the snapshot SQL the way the router does.
+    from app.discovery.sources.mam import (
+        _NEEDS_SCAN_BASIC_BARE,
+        _recent_scan_cutoff_seconds,
+        _recent_scan_skip_clause,
+        _recent_scan_order_clause,
+    )
+
+    cutoff = _recent_scan_cutoff_seconds({"mam_recent_scan_skip_days": 7})
+    skip = _recent_scan_skip_clause(cutoff)
+    order = _recent_scan_order_clause()
+
+    rows = await db.execute_fetchall(
+        f"SELECT title FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}"
+        f"{skip} ORDER BY {order}"
+    )
+    titles = [r[0] for r in rows]
+    # The 3 fresh ones are excluded; only the 2 never-scanned remain.
+    assert sorted(titles) == ["never-1", "never-2"]
+
+
 async def test_successful_scan_stamps_timestamp(single_library):
     """The other half of the contract: a real scan result (found /
     possible / not_found) DOES update the timestamp."""
