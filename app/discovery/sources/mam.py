@@ -969,10 +969,63 @@ def _filelist_contains_title(filenames: list[str], *titles: str) -> bool:
     return False
 
 
+def _filelist_headers(token: str, torrent_id: str) -> dict:
+    """Headers for /tor/filelist.php that make MAM return the bare table.
+
+    Without these headers MAM responds with the full site-chrome HTML
+    wrapper (favicons, menus, etc.) — same URL, status 200, but the
+    <table id="fileListTable"> fragment is replaced by a logged-in
+    landing page. Production-confirmed via the debug-match endpoint:
+    the curl/8.0 + Content-Type:application/json headers that work
+    perfectly for the search API trigger the wrapper response here.
+
+    Three signals together get us the fragment:
+      - Referer pointing at the torrent's own page (the AJAX origin)
+      - Accept "text/html, */*; q=0.01" (jQuery's signature q-value)
+      - X-Requested-With: XMLHttpRequest (jQuery's same-origin marker)
+
+    User-Agent stays curl/8.0 to keep all MAM endpoints on a single
+    UA — switching only filelist would split telemetry without help.
+    """
+    return {
+        "User-Agent": "curl/8.0",
+        "Accept": "text/html, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{MAM_TORRENT_BASE}/{torrent_id}",
+        "Cookie": f"mam_id={token}",
+    }
+
+
+async def _fetch_filelist_response(token: str, torrent_id: str):
+    """Low-level filelist GET — returns the raw httpx.Response or None.
+
+    Split out so the debug-match endpoint can surface status code +
+    response body without parsing, while production uses the parsed
+    convenience wrapper below.
+    """
+    if not torrent_id:
+        return None
+    url = f"{MAM_FILELIST_URL}?torrentid={torrent_id}"
+    try:
+        client = _get_client()
+        effective = _current_token or token
+        resp = await client.get(
+            url,
+            headers=_filelist_headers(effective, torrent_id),
+            timeout=15,
+        )
+        await _handle_response_cookie(resp)
+        return resp
+    except Exception as e:
+        logger.debug(f"  Filelist {torrent_id}: fetch failed: {e}")
+        return None
+
+
 async def _fetch_filelist(token: str, torrent_id: str) -> list[str]:
     """Fetch the per-torrent filelist and return the filenames.
 
-    GET /tor/filelist.php?torrentid=<id> returns an HTML fragment with
+    GET /tor/filelist.php?torrentid=<id> with browser-AJAX-shaped
+    headers (see _filelist_headers) returns an HTML fragment with
     a <table id="fileListTable"> whose middle <td> in each row is the
     filename. Returns an empty list on any error — callers MUST treat
     empty as "couldn't verify", not "verified absent".
@@ -982,23 +1035,15 @@ async def _fetch_filelist(token: str, torrent_id: str) -> list[str]:
     cap at "possible", a hit in the filelist promotes back to "found"
     (the bundle URL is still correct because the user's book IS in it).
     """
-    if not torrent_id:
-        return []
-    url = f"{MAM_FILELIST_URL}?torrentid={torrent_id}"
-    try:
-        resp = await _do_get(url, token)
-        if resp.status_code != 200 or not resp.text:
+    resp = await _fetch_filelist_response(token, torrent_id)
+    if resp is None or resp.status_code != 200 or not resp.text:
+        if resp is not None:
             logger.debug(
                 f"  Filelist {torrent_id}: HTTP {resp.status_code}, "
                 f"body={len(resp.text or '')} chars — skipping verify"
             )
-            return []
-        return _parse_filelist_html(resp.text)
-    except Exception as e:
-        # Verification is best-effort; a failed fetch shouldn't break
-        # the scan, just leave the bundle capped at "possible".
-        logger.debug(f"  Filelist {torrent_id}: fetch failed: {e}")
         return []
+    return _parse_filelist_html(resp.text)
 
 
 def _is_bundle(item: dict) -> bool:
@@ -1661,8 +1706,11 @@ async def debug_check_book(
                     # we want the raw response visible in the trace.
                     fetch_url = f"{MAM_FILELIST_URL}?torrentid={tid}"
                     bundle_check["fetch_url"] = fetch_url
-                    try:
-                        resp = await _do_get(fetch_url, token)
+                    resp = await _fetch_filelist_response(token, tid)
+                    if resp is None:
+                        bundle_check["fetch_http_status"] = "exception_or_no_id"
+                        debug_filelist_cache[tid] = []
+                    else:
                         bundle_check["fetch_http_status"] = resp.status_code
                         bundle_check["fetch_response_first_500_chars"] = (
                             (resp.text or "")[:500]
@@ -1671,9 +1719,6 @@ async def debug_check_book(
                             debug_filelist_cache[tid] = _parse_filelist_html(resp.text)
                         else:
                             debug_filelist_cache[tid] = []
-                    except Exception as e:
-                        bundle_check["fetch_http_status"] = f"exception: {e}"
-                        debug_filelist_cache[tid] = []
                 else:
                     bundle_check["fetch_url"] = "(cached from earlier pass)"
                 filenames = debug_filelist_cache.get(tid, [])

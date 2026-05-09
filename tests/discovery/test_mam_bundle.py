@@ -15,6 +15,7 @@ bundle when the search title appears as a filename.
 from app.discovery.sources.mam import (
     _BUNDLE_PROMOTE_TS_FLOOR,
     _filelist_contains_title,
+    _filelist_headers,
     _is_bundle,
     _normalize_for_filename_match,
     _parse_filelist_html,
@@ -223,6 +224,39 @@ class TestBundlePromoteCap:
 
         # Bundle with strong title match (no cap) — normal promote.
         assert should_promote(True, 0.95, 0.95, verified=False) is True
+
+
+class TestFilelistHeaders:
+    """Pin the AJAX-shape headers MAM requires for /tor/filelist.php
+    to return the bare <table> fragment instead of the full site
+    wrapper. Confirmed via the debug-match endpoint: with curl/8.0 +
+    application/json (the working search-API headers) the same URL
+    served the favicon-laden landing page; with these headers it
+    serves the fragment we can parse.
+    """
+
+    def test_referer_points_at_torrent_page(self):
+        # The Referer is the strongest signal — without it MAM treats
+        # the request as a direct navigation and serves chrome.
+        h = _filelist_headers("token-stub", "424895")
+        assert h["Referer"] == "https://www.myanonamouse.net/t/424895"
+
+    def test_jquery_signature_accept_header(self):
+        # jQuery's $.ajax() sends Accept "text/html, */*; q=0.01" by
+        # default. The q=0.01 is what MAM appears to look for.
+        h = _filelist_headers("t", "1")
+        assert h["Accept"] == "text/html, */*; q=0.01"
+
+    def test_xhr_marker(self):
+        h = _filelist_headers("t", "1")
+        assert h["X-Requested-With"] == "XMLHttpRequest"
+
+    def test_cookie_carries_mam_id(self):
+        # Auth still flows through mam_id even though the request shape
+        # mimics a browser. The token comes from the rotated session
+        # store, same as every other MAM call.
+        h = _filelist_headers("session-abc", "424895")
+        assert "mam_id=session-abc" in h["Cookie"]
 
 
 class TestFilelistParser:
