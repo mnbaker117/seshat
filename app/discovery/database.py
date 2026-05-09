@@ -122,6 +122,13 @@ CREATE TABLE IF NOT EXISTS books (
     mam_has_multiple INTEGER NOT NULL DEFAULT 0,
     mam_my_snatched INTEGER NOT NULL DEFAULT 0,
     mam_is_bundle INTEGER NOT NULL DEFAULT 0,
+    -- Part C — perceptual hash (16-char hex pHash) of the book's
+    -- local/source cover image. Compared against MAM candidate covers
+    -- during scan via `app.mam.cover_hash.hamming_distance`. NULL when
+    -- the book has no cover available or hashing failed (e.g. malformed
+    -- file). Populated by Calibre/ABS sync hooks on cover landing and
+    -- by the source-scan write path when `cover_url` lands.
+    cover_phash TEXT,
     -- Unix epoch seconds (REAL). Stamped on every successful MAM
     -- scan (FOUND/POSSIBLE/NOT_FOUND), NOT on auth_error or other
     -- transient failures. Drives the "skip recently-scanned books"
@@ -533,6 +540,13 @@ MIGRATIONS = [
     # time. Manual sidebar rescans bypass the filter (they hit
     # check_book directly, not the eligibility query).
     "ALTER TABLE books ADD COLUMN mam_last_scanned_at REAL",
+    # cover_phash: 16-char hex pHash of the book's local/source cover
+    # image. Compared against MAM candidate covers during scan
+    # (`app.mam.cover_hash.hamming_distance`) to verify URL correctness
+    # — low distance = strong promote signal. NULL when no cover or
+    # hashing failed. Populated by Calibre/ABS sync hooks on cover
+    # landing and by source-scan cover_url writes.
+    "ALTER TABLE books ADD COLUMN cover_phash TEXT",
 ]
 
 

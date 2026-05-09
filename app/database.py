@@ -322,6 +322,22 @@ CREATE TABLE IF NOT EXISTS book_grab_links (
     UNIQUE(library_slug, book_id)
 );
 CREATE INDEX IF NOT EXISTS idx_book_grab_links_lookup ON book_grab_links (library_slug, book_id);
+
+-- Part C — cover-image perceptual hash cache (MAM URL verification).
+-- Lives in the global DB (not per-library) because torrent_id is
+-- universal across libraries — same torrent evaluated against ebook
+-- AND audiobook libraries reuses the same fetched cover. Stale rows
+-- past the 30-day TTL in `app/mam/cover_hash.py` get silently re-fetched
+-- on next read. Diagnostic columns (width/height/bytes) are useful when
+-- investigating odd distance comparisons via SQL.
+CREATE TABLE IF NOT EXISTS mam_cover_hashes (
+    torrent_id  TEXT PRIMARY KEY,
+    phash       TEXT NOT NULL,
+    fetched_at  REAL NOT NULL,
+    width       INTEGER,
+    height      INTEGER,
+    bytes       INTEGER
+);
 """
 
 
@@ -393,6 +409,17 @@ MIGRATIONS: list[str] = [
         UNIQUE(library_slug, book_id)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_book_grab_links_lookup ON book_grab_links (library_slug, book_id)",
+    # Part C — cover-image perceptual hash cache. Global (not per-library)
+    # because torrent_id is universal across libraries. See full doc on
+    # the SCHEMA block above and `app/mam/cover_hash.py`.
+    """CREATE TABLE IF NOT EXISTS mam_cover_hashes (
+        torrent_id  TEXT PRIMARY KEY,
+        phash       TEXT NOT NULL,
+        fetched_at  REAL NOT NULL,
+        width       INTEGER,
+        height      INTEGER,
+        bytes       INTEGER
+    )""",
 ]
 
 

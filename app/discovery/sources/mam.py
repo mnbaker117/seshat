@@ -225,6 +225,37 @@ _BUNDLE_PROMOTE_TS_FLOOR = 0.85
 # b6cb988).
 _BUNDLE_VERIFICATION_ENABLED = True
 
+# ── Cover-image verification (Part C) ──────────────────────────
+# Multi-candidate cover-pHash ranker for MAM URL verification. When
+# the searched book has a cover hash on its books row, fetch covers
+# for the top-N text candidates, compute pHash distance against the
+# searched book's cover, and:
+#   - PROMOTE the candidate if any non-bundle candidate has distance
+#     <= _COVER_PROMOTE_DIST_MAX (replacing the text-score winner)
+#   - DEMOTE candidates whose distance >= _COVER_DEMOTE_DIST_MIN
+#     (filtered out before the format-priority pick)
+#
+# Validated 2026-05-09 against 16 cover pairs from Mark's library:
+# right-Possibles cluster at distance 0-6, wrong-matches at 28-36,
+# with a 22-bit empty band between. See project_seshat_mam_url_confidence
+# memory for the experiment + threshold derivation.
+#
+# Bundles are EXCLUDED from cover verification — MAM bundle covers
+# show the bundle's art (omnibus/series cover), not the individual
+# book's cover, so cover-pHash would always look like "wrong" for
+# legitimate bundle matches. Bundle URL verification (filelist +
+# description, the existing path) owns bundle decisions.
+#
+# The two thresholds are gated SEPARATELY: promotion ships first
+# (safe under any Cohort C rate — false-promote requires distance
+# <= 10 which only happens for same-image), demotion ships as a
+# follow-up after production data accumulates in the deadband.
+_COVER_VERIFICATION_ENABLED = False  # master gate — flip after UAT
+_COVER_DEMOTION_ENABLED = False      # separate gate — needs prod data
+_COVER_PROMOTE_DIST_MAX = 10         # pHash <= → promote (data: max(right)=6)
+_COVER_DEMOTE_DIST_MIN = 22          # pHash >= → demote (data: min(wrong)=28)
+_COVER_TOPN_CANDIDATES = 5           # only fetch covers for top-N text candidates
+
 # Default delay between MAM API requests (seconds)
 DEFAULT_DELAY = 2.0
 
@@ -1766,6 +1797,87 @@ def _evaluate_results(
 
 
 # ---------------------------------------------------------------------------
+# Cover-image verification (Part C) — multi-candidate ranker
+# ---------------------------------------------------------------------------
+
+
+async def _annotate_candidate_covers(
+    candidates: list[dict],
+    seshat_cover_phash: str,
+    token: str,
+    cover_phash_cache: dict,
+    *,
+    topn: int = _COVER_TOPN_CANDIDATES,
+) -> None:
+    """Annotate top-N non-bundle candidates with cover_distance + cover_signal.
+
+    Mutates `candidates` in place. Bundles get `cover_signal="skipped_bundle"`
+    because MAM's bundle covers show the omnibus art, not the individual
+    book — bundle URL verification (filelist + description) owns those.
+
+    For non-bundles in the top-N pool: fetches each cover (cache flow:
+    in-memory `cover_phash_cache` → persistent `mam_cover_hashes` table →
+    HTTP), computes Hamming distance vs `seshat_cover_phash`, and assigns
+    a signal:
+      - "promote" — distance <= _COVER_PROMOTE_DIST_MAX (10)
+      - "demote"  — distance >= _COVER_DEMOTE_DIST_MIN (22)
+      - "neutral" — in the deadband
+      - "no_data" — fetch/decode failed (degrade gracefully, no action)
+
+    Candidates outside the top-N pool get `cover_signal="not_evaluated"` —
+    we never fetched their cover, so callers must not infer anything from
+    the absence of a promote/demote.
+    """
+    if not seshat_cover_phash or not candidates:
+        return
+    # Initialize all candidates with the appropriate skip signal so the
+    # debug-match endpoint can clearly distinguish "we didn't try" from
+    # "we tried and got nothing".
+    for c in candidates:
+        if c.get("is_bundle"):
+            c["cover_signal"] = "skipped_bundle"
+        else:
+            c["cover_signal"] = "not_evaluated"
+        c.setdefault("cover_distance", None)
+        c.setdefault("mam_cover_phash", None)
+
+    # Top-N non-bundle pool by text confidence (highest first).
+    pool = sorted(
+        [c for c in candidates if not c.get("is_bundle")],
+        key=lambda c: c.get("confidence", 0.0),
+        reverse=True,
+    )[:topn]
+    if not pool:
+        return
+
+    from app.mam.cover_hash import (
+        fetch_and_hash_mam_cover,
+        hamming_distance,
+    )
+
+    for cand in pool:
+        tid = cand["torrent_id"]
+        if tid in cover_phash_cache:
+            mam_phash = cover_phash_cache[tid]
+        else:
+            mam_phash = await fetch_and_hash_mam_cover(tid, token)
+            cover_phash_cache[tid] = mam_phash
+        if mam_phash is None:
+            cand["cover_signal"] = "no_data"
+            cand["cover_distance"] = None
+            continue
+        dist = hamming_distance(seshat_cover_phash, mam_phash)
+        cand["cover_distance"] = dist
+        cand["mam_cover_phash"] = mam_phash
+        if dist <= _COVER_PROMOTE_DIST_MAX:
+            cand["cover_signal"] = "promote"
+        elif dist >= _COVER_DEMOTE_DIST_MIN:
+            cand["cover_signal"] = "demote"
+        else:
+            cand["cover_signal"] = "neutral"
+
+
+# ---------------------------------------------------------------------------
 # Per-book check — five-pass cascade with format-aware scoring
 # ---------------------------------------------------------------------------
 
@@ -1778,6 +1890,7 @@ async def check_book(
     lang_ids: Optional[list[int]] = None,
     series_name: str = "",
     content_type: str = "ebook",
+    seshat_cover_phash: Optional[str] = None,
 ) -> dict:
     """
     Five-pass search cascade for a single book, with format preference scoring.
@@ -1786,6 +1899,13 @@ async def check_book(
     audiobook variants — search main_cat, format filtering, category
     rejection, default priority list. Callers that don't pass
     content_type get the ebook path (historical behavior).
+
+    `seshat_cover_phash` (optional, hex string) enables Part C cover
+    verification when also gated by `_COVER_VERIFICATION_ENABLED`. When
+    set, cover-pHash distance against top-N MAM candidates can promote
+    a non-text-winner to Found (and, when `_COVER_DEMOTION_ENABLED`,
+    filter out cover-mismatched candidates). Callers that don't pass
+    it (or pass None) get the legacy text-only cascade.
 
     Returns dict with:
       status, mam_url, mam_torrent_id, mam_title, mam_formats, mam_has_multiple,
@@ -1832,6 +1952,12 @@ async def check_book(
     # bundle across multiple cascade passes; cache so we hit the
     # description endpoint at most once per bundle per evaluation.
     description_cache: dict[str, Optional[str]] = {}
+    # Per-evaluation cache for cover-pHash fetches. Same torrent surfacing
+    # in multiple passes only fetches its cover once. The persistent
+    # `mam_cover_hashes` table behind `cover_hash.fetch_and_hash_mam_cover`
+    # carries hits across books; this in-memory cache covers the in-call
+    # repeat candidates that don't need a SQLite round-trip.
+    cover_phash_cache: dict[str, Optional[str]] = {}
 
     async def _try_evaluate(pass_num: int, resp: dict, search_title: str) -> bool:
         """
@@ -1866,12 +1992,79 @@ async def check_book(
         confirmed = [m for m in matches if m["author_matched"]]
         all_viable = confirmed if confirmed else matches
 
+        # ── Cover-image verification (Part C) ──────────────────
+        # Multi-candidate ranker: when the searched book has a cover
+        # hash and the master gate is on, fetch covers for top-N
+        # non-bundle candidates and let pHash distance promote (low) /
+        # demote (high) regardless of text score. Bundles are excluded
+        # — bundle URL verification owns those decisions.
+        #
+        # Promote behavior: any non-bundle candidate with cover_signal
+        # "promote" REPLACES the text winner — even if text picked a
+        # different candidate as best. This is the fix for cases like
+        # Raw (Bk1 vs Bk6) and Right of Retribution 2 (D6) where a
+        # lower-text-score candidate has the actually-matching cover.
+        #
+        # Demote behavior: candidates with cover_signal "demote" are
+        # filtered OUT of the pool before _pick_best_result. Gated
+        # SEPARATELY because demotion needs more production data to
+        # validate — Cohort C (right book, different cover art) was
+        # only sampled ~20/800 Possibles in Mark's library.
+        #
+        # All cover code is dead (no fetches, no annotations) when
+        # _COVER_VERIFICATION_ENABLED is False, so the legacy text-only
+        # cascade pays nothing.
+        cover_promoter_winner = None
+        if _COVER_VERIFICATION_ENABLED and seshat_cover_phash:
+            await _annotate_candidate_covers(
+                all_viable, seshat_cover_phash, token, cover_phash_cache,
+            )
+            promoters = [
+                c for c in all_viable
+                if c.get("cover_signal") == "promote"
+            ]
+            if promoters:
+                # Format-priority pick within the promoter set —
+                # multiple cover-promoted candidates (rare) tiebreak on
+                # the same format/match_pct/seeders rules as elsewhere.
+                cover_promoter_winner = _pick_best_result(
+                    promoters, format_priority,
+                )
+                logger.debug(
+                    f"  Pass {pass_num}: COVER-PROMOTE "
+                    f"'{cover_promoter_winner['mam_title'][:50]}' — "
+                    f"distance={cover_promoter_winner.get('cover_distance')} "
+                    f"<= {_COVER_PROMOTE_DIST_MAX}; replaces text winner"
+                )
+            elif _COVER_DEMOTION_ENABLED:
+                # Strip cover-rejected candidates from the pool. If
+                # demotion empties all_viable, the cascade falls through
+                # to the next pass / NotFound — same shape as "no
+                # matches survived scoring".
+                pre_demote_count = len(all_viable)
+                all_viable = [
+                    c for c in all_viable
+                    if c.get("cover_signal") != "demote"
+                ]
+                demoted_count = pre_demote_count - len(all_viable)
+                if demoted_count:
+                    logger.debug(
+                        f"  Pass {pass_num}: COVER-DEMOTE filtered "
+                        f"{demoted_count} candidate(s) (distance >= "
+                        f"{_COVER_DEMOTE_DIST_MIN})"
+                    )
+                if not all_viable:
+                    return False
+
         # Check if multiple distinct uploads exist (different torrent IDs)
         unique_ids = set(m["torrent_id"] for m in all_viable)
         has_multiple = len(unique_ids) > 1
 
-        # Pick best result by format preference
-        best = _pick_best_result(all_viable, format_priority)
+        # Pick best result by format preference. The cover-promoter
+        # winner (if any) takes precedence over the text-priority pick.
+        best = cover_promoter_winner or _pick_best_result(
+            all_viable, format_priority,
+        )
         if not best:
             return False
 
@@ -1980,14 +2173,26 @@ async def check_book(
             and not bundle_contents_verified
         )
 
+        # Cover-pHash verification (Part C): when the cover-promoter
+        # winner replaced the text winner above, treat that as decisive
+        # evidence the URL is right and promote to Found regardless of
+        # text confidence. Bundles can never reach this branch (excluded
+        # from cover verification) so we don't need to interact with
+        # promote_blocked_by_bundle.
+        cover_verified = best.get("cover_signal") == "promote"
+
         # Promote to FOUND when:
+        #  - cover-pHash verification matched (definitive — same image
+        #    means same upload, even when text score disagrees), OR
         #  - bundle contents verification succeeded via filelist OR
         #    description (definitive enough — promote even at low conf
         #    because we have evidence the URL points at the right book), OR
         #  - confidence clears the regular threshold and the bundle cap
         #    isn't blocking it.
-        should_promote = bundle_contents_verified or (
-            conf >= MATCH_PROMOTE_SCORE and not promote_blocked_by_bundle
+        should_promote = (
+            cover_verified
+            or bundle_contents_verified
+            or (conf >= MATCH_PROMOTE_SCORE and not promote_blocked_by_bundle)
         )
         if should_promote:
             result["status"] = STATUS_FOUND
@@ -2094,32 +2299,43 @@ async def debug_check_book(
     content_type: str = "ebook",
     lang_ids: Optional[list[int]] = None,
     delay: float = 0.5,
+    seshat_cover_phash: Optional[str] = None,
 ) -> dict:
     """Run the cascade for one book and return a full structured trace.
 
-    Trace shape:
+    `seshat_cover_phash` (optional, hex pHash) enables Part C cover
+    verification surfacing. When provided, top-N non-bundle candidates
+    per pass get fetched + compared, and each result's trace gains a
+    `cover_check` field with `distance`, `signal`, and `mam_phash`.
+    Unlike production scanning, debug-match runs cover annotation
+    UNGATED (regardless of `_COVER_VERIFICATION_ENABLED`) — the whole
+    point is to let Mark see the signal even when production won't act
+    on it yet.
+
+    Trace shape (cover_check + cover_input fields are new in step 5):
       {
         "input": {...},
+        "cover_input": {                # NEW: cover-verification inputs
+          "seshat_phash": str | None,    # the hash used for comparisons
+          "thresholds": {                # surfaced for UI display
+            "promote_max": int,
+            "demote_min": int,
+            "topn": int,
+          },
+        },
         "passes": [
           {
-            "pass_num": 1,
-            "search_title": "...",
-            "search_author": "..." | None,
-            "raw_response_keys": [...],
-            "raw_total_found": int | None,
-            "result_count_returned": int,
-            "first_result_full": {raw item dict},  # for schema discovery
+            ...,
             "results": [
               {
-                "torrent_id", "mam_title", "mam_authors",
-                "all_keys": [...],
-                "category", "filetype", "language", "lang_code",
-                "seeders", "my_snatched",
-                "numfiles_field", "files_field", "filecount_field",
-                "description_field_present", "description_sample",
-                "score_vs_calibre_title": {breakdown},
-                "score_vs_search_title": {breakdown},
-                "confidence_max", "decision",
+                ...,
+                "cover_check": {              # NEW (only when phash given)
+                  "distance": int | None,
+                  "signal": "promote" | "demote" | "neutral" |
+                            "no_data" | "skipped_bundle" | "not_evaluated",
+                  "mam_phash": str | None,
+                },
+                "decision": ...,  # extended with would_promote_via_cover_verification
               }, ...
             ]
           }, ...
@@ -2141,6 +2357,20 @@ async def debug_check_book(
         "thresholds": {
             "min": MATCH_MIN_SCORE,
             "promote": MATCH_PROMOTE_SCORE,
+        },
+        # Part C cover-verification surface. `seshat_phash` is whatever
+        # the caller provided (None when omitted → cover_check will be
+        # absent on per-result entries). Production master gate
+        # (`_COVER_VERIFICATION_ENABLED`) is INTENTIONALLY ignored here:
+        # debug-match always shows the signal so Mark can validate the
+        # design before flipping the production gate.
+        "cover_input": {
+            "seshat_phash": seshat_cover_phash,
+            "thresholds": {
+                "promote_max": _COVER_PROMOTE_DIST_MAX,
+                "demote_min": _COVER_DEMOTE_DIST_MIN,
+                "topn": _COVER_TOPN_CANDIDATES,
+            },
         },
         "passes": [],
     }
@@ -2169,6 +2399,11 @@ async def debug_check_book(
     debug_filelist_cache: dict[str, list[str]] = {}
     # Same description cache pattern as production — see check_book.
     debug_description_cache: dict[str, Optional[str]] = {}
+    # Cover-pHash cache (in-memory only — persistent cache lives in the
+    # global `mam_cover_hashes` table, hit transparently via
+    # cover_hash.fetch_and_hash_mam_cover). Same torrent across multiple
+    # debug passes only fetches once.
+    debug_cover_phash_cache: dict[str, Optional[str]] = {}
 
     for pass_num, pass_authors, search_title in passes_to_run:
         pass_trace: dict = {
@@ -2365,6 +2600,50 @@ async def debug_check_book(
                 "bundle_check": bundle_check,
                 "decision": decision,
             })
+
+        # Part C cover-verification surfacing — only runs when caller
+        # provided a seshat-side phash. Uses the same helper as
+        # production (_annotate_candidate_covers), but UNGATED relative
+        # to `_COVER_VERIFICATION_ENABLED` so debug-match shows the
+        # signal even before the production gate flips.
+        #
+        # Updates each result's `cover_check` block + extends `decision`
+        # to "would_promote_via_cover_verification" when the cover
+        # signal would have driven the result's promotion (and the
+        # candidate isn't already promoting via filelist/description).
+        if seshat_cover_phash and pass_trace["results"]:
+            cover_pool = [
+                {
+                    "torrent_id": r["torrent_id"],
+                    "confidence": r["confidence_max"],
+                    "is_bundle": r["bundle_check"]["is_bundle"],
+                }
+                for r in pass_trace["results"]
+                if r["torrent_id"]
+            ]
+            await _annotate_candidate_covers(
+                cover_pool, seshat_cover_phash, token,
+                debug_cover_phash_cache,
+            )
+            by_tid = {c["torrent_id"]: c for c in cover_pool}
+            for r in pass_trace["results"]:
+                annotated = by_tid.get(r["torrent_id"], {})
+                r["cover_check"] = {
+                    "distance": annotated.get("cover_distance"),
+                    "signal": annotated.get(
+                        "cover_signal", "not_evaluated"
+                    ),
+                    "mam_phash": annotated.get("mam_cover_phash"),
+                }
+                # If cover signal would promote AND nothing else already
+                # promoted this result, override the decision so the
+                # trace clearly attributes the would-be promote to the
+                # cover signal.
+                if (
+                    r["cover_check"]["signal"] == "promote"
+                    and not r["decision"].startswith("would_promote_via")
+                ):
+                    r["decision"] = "would_promote_via_cover_verification"
 
         trace["passes"].append(pass_trace)
 

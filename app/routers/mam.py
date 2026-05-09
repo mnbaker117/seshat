@@ -252,6 +252,10 @@ async def debug_match(
     author: str,
     series: str = "",
     content_type: str = "ebook",
+    seshat_cover_phash: Optional[str] = None,
+    book_id: Optional[int] = None,
+    slug: Optional[str] = None,
+    seshat_cover_url: Optional[str] = None,
 ) -> dict:
     """Toggle-gated developer endpoint: replay the MAM cascade for one book
     and return a structured trace (raw response shape + per-result scoring
@@ -260,6 +264,24 @@ async def debug_match(
     Off by default — enabled via Settings → Operational. Used to diagnose
     "Possible" matches that are actually correct (and the inverse) and to
     verify field names in MAM's response shape when refining scoring logic.
+
+    **Part C cover-verification surface.** Pass any ONE of three inputs to
+    enable per-candidate cover-pHash distance comparisons in the trace
+    (resolution priority: direct → book lookup → URL fetch):
+
+      - `seshat_cover_phash` — 16-char hex pHash, used directly. Easiest
+        for repeated testing once you've hashed an image once.
+      - `book_id` (+ optional `slug`) — looks up the book in the chosen
+        per-library DB. Tries `cover_phash` column first, falls back to
+        hashing the local `cover_path`, then fetching `cover_url`. The
+        most ergonomic path once step 3 backfill ships.
+      - `seshat_cover_url` — fetches the URL through the cookie-aware
+        client (works for MAM CDN URLs as well as external sources)
+        and hashes the bytes.
+
+    The resolution path lands in `trace.cover_input.source` so callers
+    can see which input drove the comparison. Cover signals appear on
+    each result as `cover_check: {distance, signal, mam_phash}`.
     """
     settings = load_settings()
     if not settings.get("mam_debug_match_enabled"):
@@ -277,6 +299,33 @@ async def debug_match(
     if not token:
         raise HTTPException(400, "No MAM cookie configured")
 
+    # Resolve seshat_cover_phash from one of the three optional inputs.
+    # Resolution metadata threads back to the caller via the trace's
+    # cover_input block so the endpoint user can see which path fired.
+    resolved_phash: Optional[str] = None
+    cover_resolution: dict = {"source": None, "error": None}
+    if seshat_cover_phash:
+        resolved_phash = seshat_cover_phash.strip().lower()
+        cover_resolution["source"] = "direct"
+    elif book_id is not None:
+        try:
+            resolved_phash = await _resolve_phash_from_book_lookup(
+                book_id=book_id, slug=slug, token=token,
+                resolution_meta=cover_resolution,
+            )
+        except Exception as e:
+            cover_resolution["error"] = f"book_lookup_failed: {e}"
+            _log.exception("cover phash book lookup failed")
+    elif seshat_cover_url:
+        try:
+            resolved_phash = await _resolve_phash_from_url(
+                url=seshat_cover_url, token=token,
+                resolution_meta=cover_resolution,
+            )
+        except Exception as e:
+            cover_resolution["error"] = f"url_fetch_failed: {e}"
+            _log.exception("cover phash url fetch failed")
+
     from app.discovery.sources.mam import debug_check_book
 
     try:
@@ -286,12 +335,111 @@ async def debug_match(
             authors=author,
             series_name=series,
             content_type=content_type,
+            seshat_cover_phash=resolved_phash,
         )
     except Exception as e:
         _log.exception("debug_match cascade failed")
         raise HTTPException(500, f"Debug match failed: {e}")
 
+    # Surface resolution metadata even when the caller passed nothing —
+    # makes the trace self-describing for diagnostic export.
+    trace["cover_input"]["resolution"] = cover_resolution
     return trace
+
+
+async def _resolve_phash_from_book_lookup(
+    *,
+    book_id: int,
+    slug: Optional[str],
+    token: str,
+    resolution_meta: dict,
+) -> Optional[str]:
+    """Look up book in per-library DB; resolve cover_phash via fallback chain.
+
+    Resolution chain:
+      1. `books.cover_phash` (after step 3 backfill) — already hashed
+      2. `books.cover_path` (local file on disk, e.g. Calibre cover)
+      3. `books.cover_url` (external URL, fetched via auth-aware client)
+
+    Updates `resolution_meta` in place with `source`, `book_id`, `slug`,
+    and any of `cover_path` / `cover_url` that drove the resolution.
+    """
+    from app.discovery.database import get_db
+    from app.mam.cover_hash import hash_image_file
+
+    db = await get_db(slug=slug)
+    try:
+        row = await (await db.execute(
+            "SELECT cover_phash, cover_path, cover_url "
+            "FROM books WHERE id = ?",
+            (int(book_id),),
+        )).fetchone()
+    finally:
+        await db.close()
+
+    resolution_meta["book_id"] = book_id
+    resolution_meta["slug"] = slug
+    if not row:
+        resolution_meta["error"] = f"book {book_id} not found in slug={slug or '(active)'}"
+        return None
+
+    # Tier 1: pre-computed phash on the row (post-step-3 path)
+    if row["cover_phash"]:
+        resolution_meta["source"] = "book_lookup_phash"
+        return str(row["cover_phash"]).strip().lower()
+
+    # Tier 2: local cover file
+    if row["cover_path"]:
+        h = hash_image_file(row["cover_path"])
+        if h:
+            resolution_meta["source"] = "book_lookup_path"
+            resolution_meta["cover_path"] = row["cover_path"]
+            return h
+        resolution_meta["error"] = f"cover_path hash failed: {row['cover_path']}"
+
+    # Tier 3: remote cover_url
+    if row["cover_url"]:
+        h = await _resolve_phash_from_url(
+            url=row["cover_url"], token=token,
+            resolution_meta=resolution_meta,
+        )
+        if h:
+            # Override source to indicate the indirection path.
+            resolution_meta["source"] = "book_lookup_url"
+            return h
+
+    if not resolution_meta.get("error"):
+        resolution_meta["error"] = "book has no cover_phash / cover_path / cover_url"
+    return None
+
+
+async def _resolve_phash_from_url(
+    *,
+    url: str,
+    token: str,
+    resolution_meta: dict,
+) -> Optional[str]:
+    """Fetch URL via auth-aware client (MAM CDN-compatible) and hash bytes."""
+    from app.mam.cookie import _do_get
+    from app.mam.cover_hash import hash_image_bytes
+
+    resolution_meta["cover_url"] = url
+    if "myanonamouse.net" in url:
+        resp = await _do_get(url, token=token, timeout=15)
+    else:
+        # External source (Goodreads / Hardcover / etc.) — no MAM auth needed.
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url)
+    if resp.status_code != 200:
+        resolution_meta["error"] = f"url fetch HTTP {resp.status_code}"
+        return None
+    h = hash_image_bytes(resp.content)
+    if not h:
+        resolution_meta["error"] = "url fetch decoded but pHash failed"
+        return None
+    resolution_meta["source"] = resolution_meta.get("source") or "url_fetch"
+    return h
 
 
 @router.post("/test-notification", response_model=ValidateResponse)
