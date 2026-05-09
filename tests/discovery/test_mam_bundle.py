@@ -157,27 +157,72 @@ class TestBundlePromoteCap:
         # be elevated to Found, not just "above the normal bar".
         assert _BUNDLE_PROMOTE_TS_FLOOR > 0.70
 
-    def test_cap_predicate(self):
-        # Mirror the predicate from _try_evaluate so a refactor that
-        # changes the cap logic without updating it here gets caught.
-        def would_cap(is_bundle: bool, conf: float, ts: float) -> bool:
-            return is_bundle and conf >= 0.70 and ts < _BUNDLE_PROMOTE_TS_FLOOR
+    def test_filelist_verification_gate(self):
+        # Mirror the verification trigger from _try_evaluate. Fires
+        # whenever the best candidate is a bundle, the author overlaps,
+        # and the title alone doesn't strongly match — independent of
+        # the blended confidence score. The latter point is the bugfix
+        # in B2.1: B2's gate was tied to conf >= 0.70, which meant
+        # author-only matches like Duel Nature → Demon Accords Series
+        # (conf 0.30) never got verified.
+        def needs_filelist_check(
+            is_bundle: bool, author_matched: bool, ts: float
+        ) -> bool:
+            return (
+                is_bundle
+                and author_matched
+                and ts < _BUNDLE_PROMOTE_TS_FLOOR
+            )
 
-        # Demon Accords Series for "Duel Nature": author-only match on
-        # a bundle. Confidence 0.30 < 0.70 → wouldn't promote anyway,
-        # cap doesn't fire.
-        assert would_cap(True, 0.30, 0.0) is False
+        # The Duel Nature → Demon Accords Series case: low conf, low ts,
+        # author matches, bundle. Must verify.
+        assert needs_filelist_check(True, True, 0.0) is True
 
-        # Hypothetical bundle that scores high on confidence (e.g. via
-        # series boost + author) but title doesn't really match — cap.
-        assert would_cap(True, 0.74, 0.50) is True
+        # No author overlap: don't burn a fetch on a totally unrelated
+        # bundle (e.g. "Duel Nature" against "Mixed Calibre Library").
+        assert needs_filelist_check(True, False, 0.0) is False
 
-        # Same scores but not a bundle — let normal promote logic run.
-        assert would_cap(False, 0.74, 0.50) is False
+        # Bundle whose title strongly matches the calibre title
+        # (intentional bundle catalog entry) — promotes via the normal
+        # path without needing a filelist fetch.
+        assert needs_filelist_check(True, True, 0.95) is False
 
-        # Bundle whose own title strongly matches the user's calibre
-        # title (intentional bundle catalog entry) — let it promote.
-        assert would_cap(True, 0.95, 0.95) is False
+        # Single-book result — never bundle-verify.
+        assert needs_filelist_check(False, True, 0.0) is False
+
+    def test_promote_after_verification_predicate(self):
+        # Final promote decision. Mirrors the should_promote logic in
+        # _try_evaluate so future refactors can't drop the bundle-cap
+        # safety or break the verification override.
+        def should_promote(
+            is_bundle: bool, conf: float, ts: float, verified: bool
+        ) -> bool:
+            blocked = (
+                is_bundle
+                and ts < _BUNDLE_PROMOTE_TS_FLOOR
+                and not verified
+            )
+            return verified or (conf >= 0.70 and not blocked)
+
+        # Verified bundle promotes regardless of low confidence.
+        # This is THE Duel Nature path after B2.1.
+        assert should_promote(True, 0.30, 0.0, verified=True) is True
+
+        # Same low-conf bundle, NOT verified — stays at possible.
+        assert should_promote(True, 0.30, 0.0, verified=False) is False
+
+        # High-conf bundle with weak title and no verification — capped.
+        # (false-Found protection: bundle URL is misleading)
+        assert should_promote(True, 0.74, 0.50, verified=False) is False
+
+        # Same scores but verification succeeded — promote.
+        assert should_promote(True, 0.74, 0.50, verified=True) is True
+
+        # Non-bundle high-conf — normal promote.
+        assert should_promote(False, 0.74, 0.50, verified=False) is True
+
+        # Bundle with strong title match (no cap) — normal promote.
+        assert should_promote(True, 0.95, 0.95, verified=False) is True
 
 
 class TestFilelistParser:

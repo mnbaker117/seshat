@@ -1251,6 +1251,14 @@ async def check_book(
     # Track best "possible" across all passes
     best_possible = None
 
+    # Per-book cache of filelist fetches keyed by torrent_id. Bundles
+    # frequently appear as the best candidate in multiple passes (1, 4,
+    # and 5 for an author with one bundle on MAM all return the same
+    # torrent), and we'd otherwise hit /tor/filelist.php once per pass
+    # for the same answer. Cache is intentionally local to one check_book
+    # call — no reason to keep cross-book state.
+    filelist_cache: dict[str, list[str]] = {}
+
     async def _try_evaluate(pass_num: int, resp: dict, search_title: str) -> bool:
         """
         Evaluate all results from a search pass. Returns True if cascade should stop.
@@ -1314,24 +1322,33 @@ async def check_book(
             "is_bundle": is_bundle,
         }
 
-        # Bundle promote-gate: confidence alone isn't enough to elevate a
-        # collection torrent to "Found" — the URL would point at a multi-
-        # book torrent rather than the searched-for single book. Require
-        # that title-similarity (not just blended confidence) clear a
-        # higher floor, OR (Part B2) that the search title appears as a
-        # filename inside the bundle (definitive proof the URL contains
-        # the user's book even though MAM's title is the collection name).
+        # Bundle filelist verification: when the best candidate is a
+        # multi-book torrent and the user's calibre title doesn't strongly
+        # match the bundle's own title (e.g. searching for "Duel Nature"
+        # against "Demon Accords Series"), confidence alone can't tell us
+        # whether the bundle URL actually contains the searched book or
+        # is a coincidental author-only match. Fetch the bundle's filelist
+        # — a substring hit on the search title is definitive proof the
+        # URL is correct and the result should promote regardless of the
+        # blended confidence score.
+        #
+        # Gate: bundle + author overlap + title-similarity below the
+        # bundle floor. The author check keeps us from spending fetches
+        # on totally-unrelated bundles; the ts floor skips books whose
+        # title already strongly matches the bundle name (intentional
+        # bundle catalog entries) since those promote via the normal
+        # path without needing verification.
         bundle_filelist_verified = False
-        promote_blocked_by_bundle = (
+        needs_filelist_check = (
             is_bundle
-            and conf >= MATCH_PROMOTE_SCORE
+            and best.get("author_matched", False)
             and ts < _BUNDLE_PROMOTE_TS_FLOOR
         )
-        if promote_blocked_by_bundle:
-            # Try to override the cap by fetching the torrent's filelist.
-            # ONE extra GET per bundle-capped result; bundles are rare
-            # enough in real libraries that the cost is bounded.
-            filenames = await _fetch_filelist(token, best["torrent_id"])
+        if needs_filelist_check:
+            tid = best["torrent_id"]
+            if tid not in filelist_cache:
+                filelist_cache[tid] = await _fetch_filelist(token, tid)
+            filenames = filelist_cache[tid]
             if filenames and _filelist_contains_title(filenames, title, search_title):
                 bundle_filelist_verified = True
                 logger.debug(
@@ -1340,19 +1357,28 @@ async def check_book(
                 )
             else:
                 logger.debug(
-                    f"  Pass {pass_num}: BUNDLE-CAP '{best['mam_title'][:50]}' — "
-                    f"conf={conf:.2f} would promote, but ts={ts:.2f} < "
-                    f"{_BUNDLE_PROMOTE_TS_FLOOR} for a bundle and search title "
-                    f"not found in filelist ({len(filenames)} files); held as possible"
+                    f"  Pass {pass_num}: BUNDLE '{best['mam_title'][:50]}' "
+                    f"— title not in filelist ({len(filenames)} files); "
+                    f"held as possible"
                 )
 
-        # Promote to FOUND using the combined confidence score
-        # (70% title similarity + 30% author overlap from scoring.py).
-        # The old threshold was: pct >= 50 AND author_matched (boolean).
-        # The new threshold uses the blended score which already accounts
-        # for both title and author quality in one number.
-        should_promote = conf >= MATCH_PROMOTE_SCORE and (
-            not promote_blocked_by_bundle or bundle_filelist_verified
+        # The cap on confidence-driven promotes for bundles still applies
+        # when filelist verification didn't succeed — a high-confidence
+        # author-only match on a bundle whose filenames don't include
+        # the search title is exactly the false-Found we want to avoid.
+        promote_blocked_by_bundle = (
+            is_bundle
+            and ts < _BUNDLE_PROMOTE_TS_FLOOR
+            and not bundle_filelist_verified
+        )
+
+        # Promote to FOUND when:
+        #  - filelist verification succeeded (definitive — promote even
+        #    at low conf because the URL provably contains the book), OR
+        #  - confidence clears the regular threshold and the bundle cap
+        #    isn't blocking it.
+        should_promote = bundle_filelist_verified or (
+            conf >= MATCH_PROMOTE_SCORE and not promote_blocked_by_bundle
         )
         if should_promote:
             result["status"] = STATUS_FOUND

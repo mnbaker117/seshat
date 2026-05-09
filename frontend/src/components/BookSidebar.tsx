@@ -317,7 +317,7 @@ export function BookSidebar({
           res.status === "found"
             ? "Found ✓"
             : res.status === "possible"
-            ? `Possible (${res.match_pct || "?"}%)`
+            ? `Possible (${res.match_pct ?? "?"}%)`
             : res.status === "not_found"
             ? "Not on MAM"
             : "Scan complete";
