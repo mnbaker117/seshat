@@ -178,6 +178,24 @@ class TestHammingDistance:
         # real cover art. We just need the signal to fire above 0.
         assert d > 5
 
+    def test_returns_native_python_int_not_numpy(self):
+        # Regression: imagehash.__sub__ returns numpy.int64, which is
+        # comparable to int but NOT JSON-serializable by Pydantic. The
+        # production debug-match endpoint failed with
+        # PydanticSerializationError when cover_check.distance carried
+        # a numpy type. Coercion in `hamming_distance` must use type(int).
+        import json
+
+        h1 = cover_hash.hash_image_bytes(_make_image_bytes(color_seed=3))
+        h2 = cover_hash.hash_image_bytes(_make_image_bytes(color_seed=4))
+        d = cover_hash.hamming_distance(h1, h2)
+        # exact type check (isinstance would pass for numpy.int64 too
+        # because np.int64 is a subclass of int on some platforms).
+        assert type(d) is int
+        # Must round-trip through JSON cleanly — this is what Pydantic
+        # ultimately attempts.
+        json.dumps({"distance": d})
+
 
 # ─── Cache helpers (persistent, global DB) ───────────────────────
 

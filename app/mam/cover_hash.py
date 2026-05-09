@@ -118,7 +118,11 @@ def hamming_distance(hash_a: Optional[str], hash_b: Optional[str]) -> int:
     try:
         a = imagehash.hex_to_hash(hash_a)
         b = imagehash.hex_to_hash(hash_b)
-        return a - b
+        # Coerce to native Python int — `imagehash.__sub__` returns
+        # `numpy.int64`, which is comparable to Python int but not
+        # JSON-serializable by Pydantic. Production hit this serializing
+        # debug-match traces with `cover_check.distance` populated.
+        return int(a - b)
     except (ValueError, TypeError):
         return _MAX_DISTANCE
 
