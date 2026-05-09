@@ -574,7 +574,6 @@ _client: Optional[httpx.AsyncClient] = None
 _current_token: Optional[str] = None
 _rotation_callback: Optional[Callable] = None
 _last_rotation_save: float = 0.0
-_MAM_ID_RX = re.compile(r"mam_id=([^;\s]+)")
 
 # Parallel state for the mbsc browser-session cookie. mbsc auths the
 # HTML browse endpoints (filelist.php, /t/<id>) that the long-lived
@@ -587,7 +586,6 @@ _MAM_ID_RX = re.compile(r"mam_id=([^;\s]+)")
 _current_mbsc_token: Optional[str] = None
 _mbsc_rotation_callback: Optional[Callable] = None
 _last_mbsc_rotation_save: float = 0.0
-_MBSC_RX = re.compile(r"mbsc=([^;\s]+)")
 
 # Set when a filelist response comes back as MAM's login page —
 # definitive sign that the configured mbsc is rejected (expired, IP
@@ -687,32 +685,36 @@ def _mark_mbsc_stale() -> None:
 
 
 def _extract_cookie_value(
-    response: httpx.Response, name: str, regex: re.Pattern[str]
+    response: httpx.Response, name: str
 ) -> Optional[str]:
     """Extract a cookie value from a MAM response by name.
 
-    Prefers httpx's parsed cookie jar; falls back to a regex against
-    raw Set-Cookie headers for the case where httpx's jar normalization
-    drops attributes MAM cares about.
+    Reads through httpx's parsed cookie jar exclusively — the jar
+    correctly honors RFC 6265 expiration semantics (`Max-Age=0`,
+    `Expires=` in the past), so a deletion sentinel like
+    `Set-Cookie: mbsc=deleted; Max-Age=0` does NOT appear here and
+    we won't mistake it for a fresh rotation.
+
+    Earlier versions had a regex fallback against raw Set-Cookie
+    headers for "edge cases where httpx drops cookies due to missing
+    attributes" — defensive code with no real-world trigger. The
+    fallback ignored expiration attributes and captured deletion
+    sentinels as rotations, which on 2026-05-09 corrupted both
+    `_current_token` and `_current_mbsc_token` after MAM served a
+    logout response on a rejected filelist fetch (which then poisoned
+    every subsequent search with HTTP 403). Don't add it back.
     """
-    jar_val = response.cookies.get(name)
-    if jar_val:
-        return jar_val
-    for val in response.headers.get_list("set-cookie"):
-        m = regex.search(val)
-        if m:
-            return m.group(1)
-    return None
+    return response.cookies.get(name)
 
 
 def _extract_mam_id(response: httpx.Response) -> Optional[str]:
     """Extract mam_id from a MAM response's Set-Cookie header."""
-    return _extract_cookie_value(response, "mam_id", _MAM_ID_RX)
+    return _extract_cookie_value(response, "mam_id")
 
 
 def _extract_mbsc(response: httpx.Response) -> Optional[str]:
     """Extract mbsc from a MAM response's Set-Cookie header."""
-    return _extract_cookie_value(response, "mbsc", _MBSC_RX)
+    return _extract_cookie_value(response, "mbsc")
 
 
 async def _handle_response_cookie(response: httpx.Response) -> None:
@@ -1196,14 +1198,20 @@ async def _fetch_filelist_response(token: str, torrent_id: str):
             headers=_filelist_headers(effective, mbsc, torrent_id),
             timeout=15,
         )
-        await _handle_response_cookie(resp)
-        # Sniff for the login-page markers so the UI can surface
-        # "Possibly expired" without needing every caller to reason
-        # about MAM's auth-rejection shape. Cheap substring check —
-        # only runs on the (typically <50KB) filelist response body.
+        # Sniff for login-page markers BEFORE running the rotation
+        # handler. MAM's rejection responses include deletion-pattern
+        # Set-Cookie headers (mbsc=deleted; Max-Age=0) that httpx's
+        # jar correctly drops, so the rotation handler is safe even
+        # without this guard — but a body-marker hit means MAM is
+        # actively rejecting our cookie set, and propagating ANY
+        # cookie state from this response (including a real-shaped
+        # mbsc rotation MAM might send alongside the rejection) is
+        # never the right move. Mark stale, return, skip rotation.
         body = resp.text or ""
         if any(marker in body for marker in _FILELIST_LOGIN_MARKERS):
             _mark_mbsc_stale()
+            return resp
+        await _handle_response_cookie(resp)
         return resp
     except Exception as e:
         logger.debug(f"  Filelist {torrent_id}: fetch failed: {e}")

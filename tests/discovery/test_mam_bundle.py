@@ -477,6 +477,74 @@ class TestExtractMbsc:
         )
         assert _extract_mbsc(resp) is None
 
+    def test_max_age_zero_deletion_returns_none(self):
+        # MAM serves Set-Cookie: mbsc=deleted; Max-Age=0 to terminate
+        # a session. Observed 2026-05-09 when a filelist fetch with a
+        # mismatched mam_id+mbsc pair triggered MAM's cross-session
+        # logout response; the prior regex fallback captured "deleted"
+        # as a rotation and persisted it to the encrypted store. The
+        # jar correctly drops Max-Age=0 cookies — extractor must
+        # return None.
+        resp = _make_response(
+            [(
+                "set-cookie",
+                "mbsc=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; "
+                "Max-Age=0; path=/; domain=.myanonamouse.net",
+            )]
+        )
+        assert _extract_mbsc(resp) is None
+
+
+class TestDeletionSentinelNotRotated:
+    """The 2026-05-09 corruption regression: a rejected filelist
+    response includes Set-Cookie deletions for both mam_id and mbsc.
+    The handler must NOT capture either as a rotation, otherwise the
+    in-memory state and encrypted store get poisoned and every
+    subsequent search 403s until container restart."""
+
+    async def test_mbsc_deletion_does_not_rotate(self, mbsc_state_isolated):
+        from app.discovery.sources import mam as mam_mod
+        set_current_mbsc_token("VALID_OLD_VALUE")
+        mam_mod._last_mbsc_rotation_save = 0.0
+        fired: list[str] = []
+        async def cb(new_token: str) -> None:
+            fired.append(new_token)
+        set_mbsc_rotation_callback(cb)
+
+        resp = _make_response([(
+            "set-cookie",
+            "mbsc=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; "
+            "Max-Age=0; path=/; domain=.myanonamouse.net",
+        )])
+        await _handle_response_cookie(resp)
+
+        # In-memory token preserved; callback never fired.
+        assert get_current_mbsc_token() == "VALID_OLD_VALUE"
+        assert fired == []
+
+    async def test_mam_id_deletion_does_not_rotate(self, mbsc_state_isolated):
+        # Same defense for the parallel mam_id slot in the discovery
+        # module — the regression bit BOTH cookies because MAM sent
+        # deletion sentinels for mam_id AND mbsc on the same response.
+        from app.discovery.sources import mam as mam_mod
+        saved_token = mam_mod._current_token
+        saved_save = mam_mod._last_rotation_save
+        try:
+            mam_mod._current_token = "VALID_OLD_MAM_ID"
+            mam_mod._last_rotation_save = 0.0
+
+            resp = _make_response([(
+                "set-cookie",
+                "mam_id=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; "
+                "Max-Age=0; path=/; domain=.myanonamouse.net",
+            )])
+            await _handle_response_cookie(resp)
+
+            assert mam_mod._current_token == "VALID_OLD_MAM_ID"
+        finally:
+            mam_mod._current_token = saved_token
+            mam_mod._last_rotation_save = saved_save
+
 
 class TestMbscRotationHandler:
     """The handler is the only path that promotes a Set-Cookie value

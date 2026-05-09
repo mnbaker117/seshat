@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from typing import Awaitable, Callable, Optional
 
 import httpx
@@ -112,14 +111,6 @@ _rotation_callback: Optional[
     Callable[[str], Awaitable[None]]
 ] = None
 
-# Regex fallback for extracting mam_id from a raw Set-Cookie string.
-# httpx's response.cookies dict is the preferred path (it handles all
-# the RFC 6265 edge cases), but if MAM ever sends something the jar
-# doesn't recognize, this catches `mam_id=<value>` followed by either
-# `;`, whitespace, or end-of-string.
-_MAM_ID_RX = re.compile(r"mam_id=([^;\s]+)")
-
-
 def set_current_token(token: str) -> None:
     """Seed the in-memory current token, usually from settings.json.
 
@@ -189,28 +180,22 @@ def set_rotation_callback(
 def _extract_mam_id_from_response(response: httpx.Response) -> Optional[str]:
     """Pull the new mam_id value out of a MAM response, or None.
 
-    Prefers httpx's parsed `response.cookies` dict; falls back to a
-    regex against the raw `Set-Cookie` header. Returns None if neither
-    path finds a new value.
-    """
-    # Primary path: httpx already parsed the Set-Cookie header into
-    # its cookie jar. The value there is the authoritative decoded
-    # form of what MAM sent.
-    jar_value = response.cookies.get("mam_id")
-    if jar_value:
-        return jar_value
+    Reads from httpx's cookie jar exclusively. The jar honors RFC 6265
+    expiration semantics (Max-Age=0, Expires-in-the-past), so deletion
+    sentinels MAM sends to terminate a session — `Set-Cookie:
+    mam_id=deleted; Max-Age=0` and friends — correctly produce None
+    here rather than a "rotation" to the literal string "deleted".
 
-    # Fallback path: walk the raw Set-Cookie headers ourselves. This
-    # catches the case where httpx's jar-normalization layer decides
-    # not to accept the cookie (wrong domain attribute, mismatched
-    # secure flag, etc.) but MAM clearly meant to set it.
-    for header_name, header_value in response.headers.items():
-        if header_name.lower() != "set-cookie":
-            continue
-        match = _MAM_ID_RX.search(header_value)
-        if match:
-            return match.group(1)
-    return None
+    The previous implementation had a regex fallback against raw
+    Set-Cookie headers for "edge cases where httpx drops cookies",
+    but the fallback ignored expiration attributes and captured
+    deletion sentinels as rotations. On 2026-05-09 this corrupted
+    the discovery module's parallel `_current_token` slot after a
+    rejected filelist fetch, which then 403'd every subsequent search
+    in the live container until restart. Removed; trust httpx's
+    RFC implementation.
+    """
+    return response.cookies.get("mam_id")
 
 
 async def _handle_response_cookie(response: httpx.Response) -> None:

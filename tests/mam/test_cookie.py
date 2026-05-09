@@ -256,6 +256,36 @@ class TestExtractMamId:
         result = _extract_mam_id_from_response(resp)
         assert result in ("FIRST", "SECOND")
 
+    def test_max_age_zero_deletion_returns_none(self):
+        # MAM uses Set-Cookie: mam_id=deleted; Max-Age=0 to terminate
+        # a session (observed when a filelist fetch with mismatched
+        # cookie pair triggers MAM's cross-session-defense logout).
+        # The jar correctly drops Max-Age=0 cookies; we must return
+        # None so the rotation handler doesn't capture "deleted" as
+        # a fresh value and persist it to the encrypted store. This
+        # was the 2026-05-09 corruption bug — see cookie.py docstring.
+        resp = self._make_response(
+            [(
+                "set-cookie",
+                "mam_id=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; "
+                "Max-Age=0; path=/; domain=.myanonamouse.net",
+            )]
+        )
+        assert _extract_mam_id_from_response(resp) is None
+
+    def test_expires_in_past_deletion_returns_none(self):
+        # Belt + suspenders: same test but relying only on the
+        # `Expires=` attribute (no Max-Age). Either is enough for
+        # the jar to drop the cookie under RFC 6265.
+        resp = self._make_response(
+            [(
+                "set-cookie",
+                "mam_id=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; "
+                "path=/; domain=.myanonamouse.net",
+            )]
+        )
+        assert _extract_mam_id_from_response(resp) is None
+
 
 class TestHandleResponseCookie:
     """The handler that runs on every MAM response. Verifies it
