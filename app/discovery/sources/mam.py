@@ -148,14 +148,16 @@ _BUNDLE_NUMFILES_FLOOR = 5
 # the (Part B2) filelist-verification path can promote with confidence.
 _BUNDLE_PROMOTE_TS_FLOOR = 0.85
 
-# Master switch for the bundle-filelist verification path. Disabled
-# (2026-05-09) because /tor/filelist.php rejects the mam_id cookie
-# with the login page — see the project_seshat_mam_url_confidence
-# memory for the full diagnosis. Re-enabled once the parallel mbsc
-# browser-session cookie ships (Phase 2). Bundle detection + cap
-# still work without it; bundles just stay at "possible" instead of
-# auto-promoting via filelist proof.
-_FILELIST_VERIFICATION_ENABLED = False
+# Master switch for the bundle-filelist verification path. Production
+# fetch fires when the bundle cap path needs a tiebreaker (bundle +
+# author overlap + ts < BUNDLE_PROMOTE_TS_FLOOR). Auto-degrades to
+# Possible-with-badge when no mbsc is configured (the only request
+# shape MAM accepts on /tor/filelist.php — see _filelist_headers
+# docstring). End-to-end validated 2026-05-09 via debug-match against
+# the Demon Accords Series bundle. See project_seshat_mam_url_confidence
+# memory for the full design and the cookie-shape investigation
+# (commits 967054c + b6cb988).
+_FILELIST_VERIFICATION_ENABLED = True
 
 # Default delay between MAM API requests (seconds)
 DEFAULT_DELAY = 2.0

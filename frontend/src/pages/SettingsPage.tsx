@@ -180,7 +180,7 @@ function BadgeList({ items, onEdit, onClear }: { items: string[]; onEdit: () => 
 
 interface CredItem { key: string; label: string; configured: boolean; }
 
-function CredField({ item, desc, onSaved, canGenerate }: { item: CredItem; desc?: string; onSaved: () => void; canGenerate?: boolean }) {
+function CredField({ item, desc, onSaved, canGenerate, clearable, clearConfirm }: { item: CredItem; desc?: string; onSaved: () => void; canGenerate?: boolean; clearable?: boolean; clearConfirm?: string }) {
   const t = useTheme();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
@@ -189,6 +189,12 @@ function CredField({ item, desc, onSaved, canGenerate }: { item: CredItem; desc?
     if (!value.trim()) return;
     setBusy(true);
     try { await api.post(`/v1/credentials/${item.key}`, { value: value.trim() }); setEditing(false); setValue(""); onSaved(); }
+    catch { /* */ } finally { setBusy(false); }
+  }
+  async function clear() {
+    if (!confirm(clearConfirm || `Clear ${item.label}?`)) return;
+    setBusy(true);
+    try { await api.del(`/v1/credentials/${item.key}`); onSaved(); }
     catch { /* */ } finally { setBusy(false); }
   }
   function generate() {
@@ -202,6 +208,7 @@ function CredField({ item, desc, onSaved, canGenerate }: { item: CredItem; desc?
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 14, color: t.textDim, letterSpacing: "3px" }}>••••••••</span>
           <Btn variant="ghost" onClick={() => { setEditing(true); setValue(""); }}>Change</Btn>
+          {clearable && <Btn variant="ghost" onClick={clear} disabled={busy}>Clear</Btn>}
         </div>
       ) : editing ? (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -669,12 +676,14 @@ function DesktopSettingsPage() {
             const desc = c.key === "mam_session_id"
               ? 'MAM → Preferences → Security → Generate Session.'
               : c.key === "mam_browser_session_id"
-              ? 'Optional. MAM site → DevTools → Application → Cookies → mbsc value. Enables bundle URL verification (filelist fetch); without it, bundles stay at "Possible" with the badge.'
+              ? 'Optional. MAM site → DevTools → Application → Cookies → mbsc value. Enables bundle URL verification (filelist fetch) — bundles containing your searched book auto-promote to Found. Without it, bundles stay at "Possible" with the badge. Note: the filelist endpoint isn\'t on MAM\'s documented API list, so this scraping technically falls outside the approved automation surface — use at your own risk.'
               : "Password for SASL authentication.";
             const showStale = c.key === "mam_browser_session_id" && c.configured && mbscStale;
+            const clearable = c.key === "mam_browser_session_id";
+            const clearConfirm = "Clear mbsc and disable bundle filelist verification? Bundles will stay at 'Possible' until you paste a fresh value.";
             return (
               <div key={c.key} style={{ position: "relative" }}>
-                <CredField item={c} onSaved={loadCreds} desc={desc} />
+                <CredField item={c} onSaved={loadCreds} desc={desc} clearable={clearable} clearConfirm={clearConfirm} />
                 {showStale && (
                   <div style={{
                     marginTop: -8, marginLeft: 12, marginBottom: 8,

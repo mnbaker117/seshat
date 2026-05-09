@@ -276,11 +276,15 @@ function MobileCredField({
   desc,
   onSaved,
   canGenerate,
+  clearable,
+  clearConfirm,
 }: {
   item: CredItem;
   desc?: string;
   onSaved: () => void;
   canGenerate?: boolean;
+  clearable?: boolean;
+  clearConfirm?: string;
 }) {
   const t = useTheme();
   const [editing, setEditing] = useState(false);
@@ -294,6 +298,19 @@ function MobileCredField({
       await api.post(`/v1/credentials/${item.key}`, { value: value.trim() });
       setEditing(false);
       setValue("");
+      onSaved();
+    } catch {
+      /* ignore */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    if (!confirm(clearConfirm || `Clear ${item.label}?`)) return;
+    setBusy(true);
+    try {
+      await api.del(`/v1/credentials/${item.key}`);
       onSaved();
     } catch {
       /* ignore */
@@ -336,6 +353,16 @@ function MobileCredField({
           >
             Change
           </MobileBtn>
+          {clearable && (
+            <MobileBtn
+              variant="ghost"
+              onClick={clear}
+              disabled={busy}
+              style={{ minHeight: 36, fontSize: 13 }}
+            >
+              Clear
+            </MobileBtn>
+          )}
         </div>
       ) : editing ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -670,13 +697,22 @@ export default function MobileSettingsPage() {
             c.key === "mam_session_id"
               ? "Browser cookie value (for the website API)"
               : c.key === "mam_browser_session_id"
-              ? "Optional. mbsc cookie from your browser — enables bundle URL verification."
+              ? "Optional. mbsc cookie from your browser — enables bundle URL verification. Filelist scraping isn't on MAM's documented API list; use at own risk."
               : "IRC SASL password (for #announce)";
           const showStale =
             c.key === "mam_browser_session_id" && c.configured && mbscStale;
+          const clearable = c.key === "mam_browser_session_id";
+          const clearConfirm =
+            "Clear mbsc and disable bundle filelist verification? Bundles will stay at 'Possible' until you paste a fresh value.";
           return (
             <div key={c.key}>
-              <MobileCredField item={c} onSaved={loadCreds} desc={desc} />
+              <MobileCredField
+                item={c}
+                onSaved={loadCreds}
+                desc={desc}
+                clearable={clearable}
+                clearConfirm={clearConfirm}
+              />
               {showStale && (
                 <div
                   style={{
