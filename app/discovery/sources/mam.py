@@ -492,7 +492,7 @@ def _extract_core_title(title: str) -> Optional[str]:
 # entirely lets the cascade find both volumes (cover-pHash sorts
 # the right one out per Part C). Anchored to title end so we don't
 # strip mid-title numbers like "1984" or "Apollo 11".
-_RE_TRAILING_VOLUME = re.compile(r"\s+\d+\s*$")
+_RE_TRAILING_VOLUME = re.compile(r"\s{1,8}\d{1,4}\s{0,8}$")
 
 
 # Typographic / smart-quote pairs MAM treats as distinct search tokens.

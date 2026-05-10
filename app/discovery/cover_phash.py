@@ -115,7 +115,8 @@ async def _fetch_and_hash_url(
     if not url:
         return None
     try:
-        if "myanonamouse.net" in url and token:
+        from app.mam.cookie import _is_mam_url
+        if _is_mam_url(url) and token:
             from app.mam.cookie import _do_get
             resp = await _do_get(url, token=token, timeout=15)
         else:

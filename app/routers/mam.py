@@ -401,11 +401,11 @@ async def _resolve_phash_from_url(
     resolution_meta: dict,
 ) -> Optional[str]:
     """Fetch URL via auth-aware client (MAM CDN-compatible) and hash bytes."""
-    from app.mam.cookie import _do_get
+    from app.mam.cookie import _do_get, _is_mam_url
     from app.mam.cover_hash import hash_image_bytes
 
     resolution_meta["cover_url"] = url
-    if "myanonamouse.net" in url:
+    if _is_mam_url(url):
         resp = await _do_get(url, token=token, timeout=15)
     else:
         # External source (Goodreads / Hardcover / etc.) — no MAM auth needed.

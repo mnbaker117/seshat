@@ -49,7 +49,7 @@ _STOPWORDS = frozenset({"the", "a", "an", "of", "and", "in", "on", "for", "to", 
 # the series-strip leaves nothing meaningful, we fall back to comparing
 # volumes directly so we don't promote Book 2 as a match for Book 5.
 _VOLUME_RX = re.compile(
-    r"\b(?:book|volume|vol|tome|part|episode)\b\.?\s*#?(\d+)(?:\.\d+)?\b",
+    r"\b(?:book|volume|vol|tome|part|episode)\b\.?\s{0,8}#?(\d{1,4})(?:\.\d{1,4})?\b",
     re.I,
 )
 
@@ -57,12 +57,12 @@ _VOLUME_RX = re.compile(
 # easily a real word like "I, Robot"). Anchored to title end so we don't
 # match Roman characters inside titles ("X-Men", "II of III").
 _ROMAN_VOLUME_RX = re.compile(
-    r"\s+(II|III|IV|V|VI|VII|VIII|IX|X|XI|XII|XIII|XIV|XV|XVI|XVII|XVIII|XIX|XX)\s*$",
+    r"\s{1,8}(II|III|IV|V|VI|VII|VIII|IX|X|XI|XII|XIII|XIV|XV|XVI|XVII|XVIII|XIX|XX)\s{0,8}$",
     re.I,
 )
 # Trailing bare arabic number (1-2 digits, anchored). Mirrors what MAM
 # uploaders use as the volume marker on series like "Right of Retribution 02".
-_TRAILING_ARABIC_VOLUME_RX = re.compile(r"\s+(\d{1,2})\s*$")
+_TRAILING_ARABIC_VOLUME_RX = re.compile(r"\s{1,8}(\d{1,2})\s{0,8}$")
 
 _ROMAN_TO_INT = {
     "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8,
@@ -81,15 +81,15 @@ _LEADING_NUMERIC_RX = re.compile(r"^(?:[ivxIVX]+|\d+)\b")
 # mismatch short-circuit to definitively reject candidates whose range
 # excludes the searched book's volume.
 _VOLUME_RANGE_KEYWORDED_RX = re.compile(
-    r"\b(?:books?|volumes?|vols?|tomes?|parts?|episodes?)\b\.?\s*"
-    r"#?(\d+)(?:\.\d+)?\s*[-–—]\s*#?(\d+)(?:\.\d+)?\b",
+    r"\b(?:books?|volumes?|vols?|tomes?|parts?|episodes?)\b\.?\s{0,8}"
+    r"#?(\d{1,4})(?:\.\d{1,4})?\s{0,8}[-–—]\s{0,8}#?(\d{1,4})(?:\.\d{1,4})?\b",
     re.I,
 )
 # Bare trailing range like "Demon Accords 1-4" / "Foo (1-3)" — only
 # matches at title end to avoid false positives on dates / hyphenated
 # words mid-title.
 _VOLUME_RANGE_TRAILING_RX = re.compile(
-    r"(?:\s|\()(\d+)\s*[-–—]\s*(\d+)\s*\)?\s*$",
+    r"(?:\s|\()(\d{1,4})\s{0,8}[-–—]\s{0,8}(\d{1,4})\s{0,8}\)?\s{0,8}$",
 )
 
 
@@ -208,7 +208,7 @@ def _clean_title(title: str) -> str:
     for pat in _NOISE_PATTERNS:
         cleaned = pat.sub("", cleaned)
     # Strip trailing colons, dashes, and whitespace left by removal.
-    cleaned = re.sub(r"[\s:—–-]+$", "", cleaned).strip()
+    cleaned = re.sub(r"[\s:—–-]{1,20}$", "", cleaned).strip()
     return cleaned
 
 

@@ -11,6 +11,8 @@ Three layers:
   3. **Cookie capture** — assertions that the production code is
      attaching the right `mam_id` cookie to outgoing requests.
 """
+import pytest
+
 from app.mam.cookie import (
     _do_get,
     _extract_mam_id_from_response,
@@ -489,3 +491,82 @@ class TestRotationOnGrabPath:
             assert get_current_token() == "recovery"
         finally:
             set_current_token("")
+
+
+class TestIsMamUrl:
+    """Host gate that protects against URL-substring sanitization
+    bypass (CodeQL #25, #28) — `"myanonamouse.net" in url` was tricked
+    by attacker URLs containing the literal substring elsewhere
+    (path / query / fragment), which would have routed the MAM session
+    cookie through `_do_get` to attacker.com."""
+
+    def test_accepts_apex(self):
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://myanonamouse.net/foo") is True
+
+    def test_accepts_www_subdomain(self):
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://www.myanonamouse.net/jsonLoad.php") is True
+
+    def test_accepts_t_subdomain(self):
+        # Tracker subdomain — used by MAM_DYNIP_URL.
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://t.myanonamouse.net/json/dynamicSeedbox.php") is True
+
+    def test_accepts_cdn_subdomain(self):
+        # CDN subdomain — used by cover URLs.
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://cdn.myanonamouse.net/t/p/123/large/456.jpeg") is True
+
+    def test_rejects_substring_in_path(self):
+        # The classic CodeQL bypass — substring elsewhere in the URL.
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://attacker.com/myanonamouse.net/cover.jpg") is False
+
+    def test_rejects_substring_in_query(self):
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://attacker.com/?u=myanonamouse.net") is False
+
+    def test_rejects_substring_in_subdomain_of_attacker(self):
+        # `myanonamouse.net.attacker.com` — endswith would match if
+        # we just stripped scheme. The hostname check rejects.
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://myanonamouse.net.attacker.com/") is False
+
+    def test_rejects_userinfo_spoof(self):
+        # `https://myanonamouse.net@attacker.com/` — `myanonamouse.net`
+        # is the userinfo, real host is `attacker.com`.
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://myanonamouse.net@attacker.com/") is False
+
+    def test_rejects_empty(self):
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("") is False
+
+    def test_rejects_malformed(self):
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("not a url at all") is False
+
+    def test_case_insensitive_host(self):
+        # RFC says hostnames are case-insensitive.
+        from app.mam.cookie import _is_mam_url
+        assert _is_mam_url("https://WWW.MyAnonAmouse.NET/foo") is True
+
+
+class TestDoGetHostGate:
+    """`_do_get` rejects non-MAM URLs to prevent the session cookie
+    from leaking to attacker-controlled hosts (CodeQL #26 defense)."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_mam_url(self):
+        from app.mam.cookie import _do_get
+        with pytest.raises(ValueError, match="non-MAM URL"):
+            await _do_get("https://attacker.com/", token="t")
+
+    @pytest.mark.asyncio
+    async def test_rejects_substring_bypass(self):
+        from app.mam.cookie import _do_get
+        with pytest.raises(ValueError, match="non-MAM URL"):
+            await _do_get(
+                "https://attacker.com/myanonamouse.net", token="t"
+            )

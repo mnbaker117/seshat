@@ -200,7 +200,7 @@ def extract_author_blob_from_text(*texts: str) -> str:
 # "J N Chaney, Jason Anspach".
 
 _SEP_RX = re.compile(
-    r"(?:\s+and\s+|\s+&\s+|\s*/\s*|\s*;\s*|\s*,\s*)",
+    r"(?:\s{1,8}and\s{1,8}|\s{1,8}&\s{1,8}|\s{0,8}/\s{0,8}|\s{0,8};\s{0,8}|\s{0,8},\s{0,8})",
     re.IGNORECASE,
 )
 

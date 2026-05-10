@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 from typing import Awaitable, Callable, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -43,6 +44,32 @@ _log = logging.getLogger("seshat.mam.cookie")
 MAM_BASE_URL = "https://www.myanonamouse.net/"
 MAM_SEARCH_URL = "https://www.myanonamouse.net/tor/js/loadSearchJSONbasic.php"
 MAM_DYNIP_URL = "https://t.myanonamouse.net/json/dynamicSeedbox.php"
+
+
+def _is_mam_url(url: str) -> bool:
+    """True if `url` targets a myanonamouse.net host (any subdomain).
+
+    Defense-in-depth host check used to gate URL fetches that attach
+    the MAM session cookie. Replaces the previous `if "myanonamouse.net"
+    in url` substring checks (CodeQL py/incomplete-url-substring-
+    sanitization #25 / #28) which were bypassable via attacker URLs
+    containing the literal substring elsewhere — e.g.
+    `https://attacker.com/?u=myanonamouse.net` would have routed
+    through MAM auth and leaked the session cookie to attacker.com.
+
+    Accepts the apex `myanonamouse.net` plus any subdomain
+    (`www.`, `t.`, `cdn.` — all three are in active use). Rejects
+    anything that doesn't parse as a URL with a hostname.
+    """
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    return host == "myanonamouse.net" or host.endswith(".myanonamouse.net")
 
 # Numeric category id for "Ebooks" — used by the validation probe to
 # constrain the test search payload. The exact value doesn't matter
@@ -318,7 +345,18 @@ async def _do_get(
     caller immediately uses the rotated token for another request
     (e.g. a grab followed by a validation check), it sees the fresh
     value.
+
+    HOST GATE: rejects any URL that doesn't target a myanonamouse.net
+    host (CodeQL py/full-ssrf #26 defense-in-depth). This client
+    attaches the MAM session cookie — sending it to a non-MAM host
+    would leak credentials. All legitimate callers either use a
+    MAM_*_URL constant or have already host-checked their input via
+    `_is_mam_url` before calling.
     """
+    if not _is_mam_url(url):
+        raise ValueError(
+            f"_do_get refuses non-MAM URL (cookie would leak): {url!r}"
+        )
     effective_token = _resolve_token(token)
     response = await get_client().get(
         url, headers=build_headers(effective_token), timeout=timeout
