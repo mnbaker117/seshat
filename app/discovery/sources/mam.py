@@ -2570,6 +2570,14 @@ async def debug_check_book(
     # Search title + author are still the original inputs (used for
     # scoring), only the raw text sent to MAM differs.
     if test_scoped:
+        # Strip periods from author for the period-tolerance probe (S4).
+        # MAM's author index stores e.g. "Michael R Hicks" without the
+        # period after "R", but our Calibre data has "Michael R. Hicks".
+        # Strict `@author` tokenization may treat "R." as a different
+        # token than "R" — discriminator pass S4 tests this hypothesis
+        # against case 3 (Forged in Flame) which returned 0 from the
+        # period-bearing scoped passes.
+        author_no_periods = authors.replace(".", "")
         scoped_specs = [
             {
                 "scoped_label": "title_filenames_author_broad_srchIn",
@@ -2586,6 +2594,16 @@ async def debug_check_book(
             {
                 "scoped_label": "filenames_only_author",
                 "text_override": f"@filenames {title} @author {authors}",
+                "srchIn_override": None,
+            },
+            {
+                "scoped_label": "title_filenames_author_period_stripped",
+                "text_override": f"@(title,filenames) {title} @author {author_no_periods}",
+                "srchIn_override": None,
+            },
+            {
+                "scoped_label": "title_filenames_no_author_operator",
+                "text_override": f"@(title,filenames) {title}",
                 "srchIn_override": None,
             },
         ]
