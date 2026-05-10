@@ -237,6 +237,53 @@ class TestAnnotateCandidateCovers:
 # ─── Production gate: flag-off path is dead code ────────────────
 
 
+class TestAggressiveDemoteExemption:
+    """Cohort C exemption (Option B): candidates with ts >= 0.95 AND
+    author_matched are exempt from aggressive demotion. UAT confirmed
+    that without this exemption, MMM-class books (right MAM upload at
+    conf=0.96 ts=0.95 with cover_demote due to publisher-rebrand cover
+    art) would have their correct URL silently overwritten to NotFound
+    on the next scan. The exemption preserves them in the candidate
+    pool; the normal text-promote path then decides what to do.
+    """
+
+    def test_exempt_when_ts_high_and_author_match(self):
+        cand = {"title_similarity": 0.95, "author_matched": True}
+        assert mam_mod._exempt_from_aggressive_demote(cand) is True
+
+    def test_exempt_at_perfect_ts(self):
+        cand = {"title_similarity": 1.0, "author_matched": True}
+        assert mam_mod._exempt_from_aggressive_demote(cand) is True
+
+    def test_not_exempt_when_ts_below_threshold(self):
+        # 0.94 doesn't quite meet the 0.95 floor.
+        cand = {"title_similarity": 0.94, "author_matched": True}
+        assert mam_mod._exempt_from_aggressive_demote(cand) is False
+
+    def test_not_exempt_when_author_not_matched(self):
+        # Even ts=1.0 isn't enough without author overlap (e.g.
+        # different-author book happens to share an exact title —
+        # Marvel "Infinity" canary).
+        cand = {"title_similarity": 1.0, "author_matched": False}
+        assert mam_mod._exempt_from_aggressive_demote(cand) is False
+
+    def test_not_exempt_with_default_zero_ts(self):
+        # Raw Bk1 case: tid 790157 has ts=0.0 in pass 1 (series-strip
+        # + empty residue path). Author matches but ts=0 — not exempt.
+        cand = {"title_similarity": 0.0, "author_matched": True}
+        assert mam_mod._exempt_from_aggressive_demote(cand) is False
+
+    def test_handles_missing_keys_safely(self):
+        # Defensive — should default to False when keys are absent
+        # rather than throwing.
+        assert mam_mod._exempt_from_aggressive_demote({}) is False
+
+    def test_threshold_constant_pinned(self):
+        # If anyone changes the floor, re-validate against UAT data
+        # (especially MMM/Raw expectations).
+        assert mam_mod._AGGRESSIVE_DEMOTE_TS_EXEMPTION == 0.95
+
+
 class TestProductionFlags:
     """Pin the production-enabled flag values + thresholds.
 

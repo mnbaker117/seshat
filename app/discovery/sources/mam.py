@@ -273,6 +273,33 @@ def _aggressive_cover_demotion_enabled() -> bool:
         # mode rather than risking a wrong-direction default.
         return False
 
+
+# Cohort C exemption threshold for aggressive demotion. When a
+# candidate's title similarity AND author match are BOTH very strong,
+# the (text + author) signals override the cover-demote signal —
+# protects books like MMM where the right MAM upload happens to use
+# different cover art (publisher rebrand etc.) but everything else
+# matches exactly. Empirical floor of 0.95 chosen because:
+#   - Real wrong-Possible cases score ts < 0.95 (text doesn't strongly
+#     match the wrong book's title)
+#   - Cohort C cases with title-only matches score ts == 1.0 typically
+#   - 0.95 leaves a small buffer for "Title: Subtitle" vs "Title" cases
+_AGGRESSIVE_DEMOTE_TS_EXEMPTION = 0.95
+
+
+def _exempt_from_aggressive_demote(c: dict) -> bool:
+    """Cohort C exemption gate.
+
+    Returns True when a candidate's text + author signals are strong
+    enough to override a cover-demote. Used by aggressive-demotion
+    filtering to preserve high-confidence Cohort C matches whose
+    right URL would otherwise be silently wiped on next scan.
+    """
+    return (
+        c.get("title_similarity", 0.0) >= _AGGRESSIVE_DEMOTE_TS_EXEMPTION
+        and c.get("author_matched", False)
+    )
+
 # Promoter-anchored demotion: filter cover-distant candidates ONLY when
 # at least one candidate also has a cover-promote signal. Rationale: A3
 # UAT (2026-05-09) found 3 Cohort C examples (Raw Bk1, Incarceron, MMM)
@@ -2066,18 +2093,25 @@ async def check_book(
             elif _COVER_DEMOTION_ENABLED and _aggressive_cover_demotion_enabled():
                 # AGGRESSIVE DEMOTION: no cover-promote anchor exists,
                 # but the user-configurable `mam_aggressive_cover_demotion`
-                # flag is on — filter out cover-demoted candidates anyway.
-                # Cleaner Possible-band noise (wrong-Possible URLs vanish)
-                # at the cost of false-rejecting Cohort C books whose
-                # right tid has visually-different cover AND no other
-                # rescue mechanism (description verification, volume
-                # tiebreak, alt-cover discovery) kicks in. Default ON
-                # per Mark's preference; user can flip via Settings →
-                # Discovery → MAM.
+                # flag is on — filter out cover-demoted candidates
+                # anyway. Cleaner Possible-band noise (wrong-Possible
+                # URLs vanish) at the cost of false-rejecting Cohort C
+                # books whose right tid has visually-different cover.
+                #
+                # COHORT C EXEMPTION (Option B): candidates with both
+                # very high text similarity (ts >= 0.95) AND author
+                # matched are EXEMPT from aggressive demotion. Protects
+                # cases like MMM where the right MAM upload happens to
+                # use different cover art (publisher rebrand etc.) but
+                # title + author still match exactly — text and author
+                # signals together override the cover-demote signal,
+                # preventing the wrong-direction silent overwrite of a
+                # known-correct URL on the next scan.
                 pre_demote_count = len(all_viable)
                 all_viable = [
                     c for c in all_viable
                     if c.get("cover_signal") != "demote"
+                    or _exempt_from_aggressive_demote(c)
                 ]
                 demoted_count = pre_demote_count - len(all_viable)
                 if demoted_count:
@@ -2735,6 +2769,12 @@ async def debug_check_book(
             # so the user can see which results would have been
             # filtered. Promoter-anchored mode (when off) lets demoted
             # candidates remain in the pool.
+            #
+            # COHORT C EXEMPTION (Option B): same gate as production —
+            # candidates with ts >= 0.95 AND author_matched are
+            # exempt from aggressive demotion. Their decision is
+            # preserved (not rewritten to the *_demoted_aggressive
+            # variant) so the trace matches what production would do.
             any_promoted = any(
                 (r.get("cover_check") or {}).get("signal") == "promote"
                 for r in pass_trace["results"]
@@ -2745,11 +2785,22 @@ async def debug_check_book(
                 and _aggressive_cover_demotion_enabled()
             ):
                 for r in pass_trace["results"]:
-                    if (r.get("cover_check") or {}).get("signal") == "demote":
-                        if r["decision"].startswith("would_promote"):
-                            r["decision"] = "kept_as_possible_cover_demoted_aggressive"
-                        elif r["decision"] == "kept_as_possible":
-                            r["decision"] = "filtered_out_cover_demoted_aggressive"
+                    if (r.get("cover_check") or {}).get("signal") != "demote":
+                        continue
+                    # Build a candidate-shape dict for the exemption check.
+                    cand_shape = {
+                        "title_similarity": r.get("title_similarity_max", 0.0),
+                        "author_matched": r.get("author_matched", False),
+                    }
+                    if _exempt_from_aggressive_demote(cand_shape):
+                        # Preserve original decision; mark exemption
+                        # so the trace is self-describing.
+                        r["cover_demote_exempt"] = True
+                        continue
+                    if r["decision"].startswith("would_promote"):
+                        r["decision"] = "kept_as_possible_cover_demoted_aggressive"
+                    elif r["decision"] == "kept_as_possible":
+                        r["decision"] = "filtered_out_cover_demoted_aggressive"
 
         trace["passes"].append(pass_trace)
 
