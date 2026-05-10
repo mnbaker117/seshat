@@ -11,6 +11,8 @@ import pytest
 from app.discovery.sources.mam import (
     _alternate_author_forms,
     _alternate_title_forms,
+    _clean_title,
+    _clean_title_loose,
 )
 
 
@@ -169,3 +171,43 @@ class TestTypographicVariants:
         # Plain titles get no typographic variant since they have no
         # punctuation to swap.
         assert _alternate_title_forms("Plain Title") == []
+
+
+# ─── _clean_title apostrophe preservation (Warhawk fix) ────────
+
+
+class TestCleanTitlePreservesApostrophes:
+    """Pin the 2026-05-09 fix: apostrophes (ASCII + typographic) must
+    survive `_clean_title` so MAM's full-text search can tokenize on
+    the same word boundaries it uses to index titles. Pre-fix, both
+    `'` and `’` were stripped, turning "Warhawk's" into "Warhawks"
+    which matched NOTHING in MAM's index. Verified against the live
+    Warhawk's Amnesty case during the second UAT round."""
+
+    def test_ascii_apostrophe_preserved(self):
+        assert _clean_title("Warhawk's Amnesty") == "Warhawk's Amnesty"
+
+    def test_typographic_apostrophe_preserved(self):
+        assert _clean_title("Warhawk’s Amnesty") == "Warhawk’s Amnesty"
+
+    def test_left_single_quote_preserved(self):
+        # Less common but symmetric — pin it so a future regex
+        # tightening doesn't accidentally strip it.
+        assert _clean_title("Foo‘s Bar") == "Foo‘s Bar"
+
+    def test_periods_still_replaced_with_space(self):
+        # Mid-word period still gets RE_ADD_SPACE'd (becomes a space)
+        # then RE_PUNCT'd (no remaining punct). Apostrophe preservation
+        # MUST NOT regress this.
+        assert _clean_title("Foo.Bar") == "Foo Bar"
+
+    def test_other_special_chars_still_stripped(self):
+        # Non-apostrophe special chars (& # @ etc.) keep getting stripped
+        # so the change is narrowly scoped.
+        assert _clean_title("Foo & Bar") == "Foo Bar"
+
+    def test_loose_variant_also_preserves_apostrophes(self):
+        # The loose form (used for title-only pass 5) preserves hyphens
+        # AND must also preserve apostrophes for consistency.
+        assert _clean_title_loose("Warhawk's Amnesty") == "Warhawk's Amnesty"
+        assert _clean_title_loose("Warhawk’s Amnesty") == "Warhawk’s Amnesty"

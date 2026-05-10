@@ -353,8 +353,16 @@ HONORIFICS = re.compile(
 )
 RE_ADD_SPACE = re.compile(r'(?<=\S)[;:,.\-\u2014](?=\S)')
 RE_PUNCT = re.compile(r'[;:,.\-\u2014]')
-RE_SPECIAL = re.compile(r'[^a-zA-Z0-9\s]')
-RE_SPECIAL_KEEP_HYPHEN = re.compile(r'[^a-zA-Z0-9\s\-]')
+# Preserve apostrophes (ASCII + typographic) \u2014 MAM's full-text index
+# tokenizes around apostrophes, so stripping them turns "Warhawk's"
+# into "Warhawks" which matches NOTHING (the index has "warhawk's"
+# as a token, or "warhawk" + "s" depending on how MAM splits ASCII
+# apostrophes). UAT confirmed via the Warhawk's Amnesty case
+# (2026-05-09): direct probe with apostrophe preserved returned the
+# right tid; production with apostrophe stripped returned only the
+# series-sibling siblings.
+RE_SPECIAL = re.compile(r"[^a-zA-Z0-9\s'\u2019\u2018]")
+RE_SPECIAL_KEEP_HYPHEN = re.compile(r"[^a-zA-Z0-9\s\-'\u2019\u2018]")
 
 SUBTITLE_DELIMITERS = [':', ' - ', '|']
 
@@ -1938,6 +1946,22 @@ async def check_book(
                 # high-confidence matches.
                 m["confidence"] = max(0.0, m["confidence"] - 0.20)
                 m["volume_penalty_applied"] = True
+            elif orig_vol is not None and orig_vol >= 2 and cand_vol is None:
+                # Search has explicit Bk2+ volume but candidate has no
+                # volume marker — likely Bk1 of the series surfaced via
+                # a trailing-number variant pass. UAT canary:
+                # "Delivering Justice 2" search hit the variant pass
+                # for "Delivering Justice", returned "Delivering
+                # Justice" (Bk1) at conf=1.0 ts=1.0, and would have
+                # text-promoted as a false-positive.
+                # Cap conf below MATCH_PROMOTE_SCORE so text alone
+                # can't promote, but leave the candidate in the pool
+                # so cover-pHash can still rescue if it happens to
+                # match (Cohort C edge case where MAM uses a no-volume
+                # title for the same Bk2 the user owns).
+                if m["confidence"] > 0.65:
+                    m["confidence"] = 0.65
+                    m["volume_likely_mismatch"] = True
 
         # Re-filter against the min threshold after penalties — drops
         # candidates whose post-penalty confidence falls below MATCH_MIN_SCORE.
@@ -2149,19 +2173,31 @@ async def check_book(
 
         # Promote to FOUND when:
         #  - cover-pHash verification matched (definitive — same image
-        #    means same upload, even when text score disagrees), OR
+        #    means same upload, even when text score disagrees; safe
+        #    without author_match because cover IS the truth signal), OR
         #  - bundle contents verification succeeded via description
         #    (definitive enough — promote even at low conf because we
-        #    have evidence the URL points at the right book), OR
+        #    have evidence the URL points at the right book; gate
+        #    upstream already requires author_matched), OR
         #  - single-torrent description verification matched (Cohort C
-        #    rescue — title mentioned in description), OR
-        #  - confidence clears the regular threshold and the bundle cap
-        #    isn't blocking it.
+        #    rescue — title mentioned in description; gate upstream
+        #    already requires author_matched), OR
+        #  - confidence clears the regular threshold AND the bundle cap
+        #    isn't blocking it AND the author matched. The author check
+        #    is the critical addition — pass 5 (no-author search) can
+        #    return any book whose title matches the search-title; for
+        #    e.g. "Infinity" search, MAM returned a Marvel comic by
+        #    Hickman et al. with ts=1.0/conf=0.7 (right at threshold)
+        #    that would have text-promoted as a false-positive.
         should_promote = (
             cover_verified
             or bundle_contents_verified
             or single_torrent_description_verified
-            or (conf >= MATCH_PROMOTE_SCORE and not promote_blocked_by_bundle)
+            or (
+                conf >= MATCH_PROMOTE_SCORE
+                and not promote_blocked_by_bundle
+                and best.get("author_matched", False)
+            )
         )
         if should_promote:
             result["status"] = STATUS_FOUND
