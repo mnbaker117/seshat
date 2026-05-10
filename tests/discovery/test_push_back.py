@@ -411,3 +411,267 @@ class TestFormatCwaValue:
     def test_rating_int_string(self):
         from app.discovery.push_back import _format_cwa_value
         assert _format_cwa_value("rating", 9.5) == "10"
+
+
+# ─── _parse_cwa_edit_form ──────────────────────────────────────
+#
+# CWA's `/admin/book/<id>` edit form is the source of truth our
+# CWAClient.push needs to mirror. UAT 2026-05-11 found that posting
+# a partial form (only changed fields + csrf) returns 200 silently
+# without persisting anything — CWA re-renders the form with
+# validation errors. The fix: scrape the entire current form, merge
+# our changes, POST the complete form, then verify by re-fetching.
+
+# Minimal sample mirroring CWA's actual edit-form structure.
+_SAMPLE_CWA_FORM = """
+<html><body>
+  <form id="login-snippet"><input name="csrf_token" value="login-csrf"/></form>
+  <form id="edit-form" action="/admin/book/123" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="abc-edit-csrf-xyz"/>
+    <input type="text" name="title" value="Old Title"/>
+    <input type="text" name="authors" value="A. Author"/>
+    <input type="text" name="series" value="Old Series"/>
+    <input type="text" name="series_index" value="1"/>
+    <input type="text" name="pubdate" value="2024-01-01"/>
+    <input type="text" name="publisher" value=""/>
+    <input type="text" name="cover_url" value=""/>
+    <input type="file" name="btn-upload-cover"/>
+    <input type="checkbox" name="detail_view" value="on" checked/>
+    <input type="checkbox" name="checkA" value="on"/>
+    <input type="submit" name="submit" value="Save"/>
+    <select name="languages"><option value="eng" selected>English</option><option value="fra">French</option></select>
+    <textarea name="comments">&lt;p&gt;Old body&lt;/p&gt;</textarea>
+    <input type="text" name="identifier-type-100" value="isbn"/>
+    <input type="text" name="identifier-val-100" value="9781234567890"/>
+  </form>
+</body></html>
+"""
+
+
+class TestParseCwaEditForm:
+    def test_returns_csrf_and_field_dict(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        csrf, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        # Edit form's csrf — NOT the login snippet's.
+        assert csrf == "abc-edit-csrf-xyz"
+        assert fields["csrf_token"] == "abc-edit-csrf-xyz"
+
+    def test_extracts_text_inputs(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        _, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        assert fields["title"] == "Old Title"
+        assert fields["authors"] == "A. Author"
+        assert fields["series"] == "Old Series"
+        assert fields["series_index"] == "1"
+        # Empty-value inputs preserved as empty string (not omitted).
+        assert fields["publisher"] == ""
+
+    def test_skips_file_and_submit_inputs(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        _, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        # File inputs can't roundtrip as form data — must be skipped.
+        assert "btn-upload-cover" not in fields
+        # Submit buttons aren't form data either.
+        assert "submit" not in fields
+
+    def test_checkbox_only_when_checked(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        _, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        # detail_view is checked → included (mirrors browser POST behavior)
+        assert fields["detail_view"] == "on"
+        # checkA is unchecked → omitted
+        assert "checkA" not in fields
+
+    def test_select_takes_selected_option(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        _, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        assert fields["languages"] == "eng"
+
+    def test_textarea_preserves_inner_html(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        _, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        # CWA's `comments` field carries rich HTML — must roundtrip
+        # verbatim (BeautifulSoup unescapes entities to literal markup).
+        assert fields["comments"] == "<p>Old body</p>"
+
+    def test_identifier_pairs_carry_through(self):
+        from app.discovery.push_back import _parse_cwa_edit_form
+        _, fields = _parse_cwa_edit_form(_SAMPLE_CWA_FORM)
+        # Existing identifiers (encoded with their DB row IDs) must
+        # carry through unchanged so the POST doesn't accidentally
+        # drop them.
+        assert fields["identifier-type-100"] == "isbn"
+        assert fields["identifier-val-100"] == "9781234567890"
+
+    def test_raises_when_no_form_found(self):
+        from app.discovery.push_back import _parse_cwa_edit_form, PushFailed
+        # No form at all → can't locate edit form → PushFailed.
+        with pytest.raises(PushFailed, match="could not locate"):
+            _parse_cwa_edit_form("<html><body><p>404</p></body></html>")
+
+    def test_raises_when_no_csrf_in_form(self):
+        from app.discovery.push_back import _parse_cwa_edit_form, PushFailed
+        # Form has title input but no csrf_token — fails to identify
+        # the edit form (since the discriminator requires both).
+        html = """
+        <html><body>
+          <form><input name="title" value="X"/></form>
+        </body></html>
+        """
+        with pytest.raises(PushFailed, match="could not locate"):
+            _parse_cwa_edit_form(html)
+
+
+# ─── CWAClient.push three-phase flow ───────────────────────────
+
+
+class _StubResponse:
+    """Minimal httpx-shaped response stub for monkeypatching."""
+
+    def __init__(self, status_code: int, text: str, cookies: dict | None = None):
+        self.status_code = status_code
+        self.text = text
+        self.cookies = cookies or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _StubHttpClient:
+    """Httpx AsyncClient stand-in. Records calls; serves canned responses
+    keyed by (method, url-substring) FIFO. Only mirrors the surface
+    CWAClient actually uses (`get`, `post`, `cookies`)."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+        self.cookies = {"session": "logged-in"}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+    async def get(self, url, **_kw):
+        self.calls.append(("GET", url, None))
+        return self._consume("GET", url)
+
+    async def post(self, url, *, data=None, headers=None, **_kw):
+        self.calls.append(("POST", url, data))
+        return self._consume("POST", url)
+
+    def _consume(self, method, url):
+        for i, (m, u_part, resp) in enumerate(self._responses):
+            if m == method and u_part in url:
+                return self._responses.pop(i)[2]
+        raise AssertionError(f"unexpected {method} {url} (no canned response)")
+
+
+def _form_html_for(values, csrf="csrf-x"):
+    """Build a CWA-shaped edit form with the given values."""
+    extras = "\n".join(
+        f'<input type="text" name="{k}" value="{v}"/>'
+        for k, v in values.items() if k not in ("csrf_token", "title")
+    )
+    return f"""
+    <html><body>
+      <form>
+        <input type="hidden" name="csrf_token" value="{csrf}"/>
+        <input type="text" name="title" value="{values.get("title", "T")}"/>
+        {extras}
+      </form>
+    </body></html>
+    """
+
+
+class TestCWAClientPush:
+    @pytest.mark.asyncio
+    async def test_merges_partial_into_full_form_and_verifies(self, monkeypatch):
+        """Happy path: GET full form, POST merged payload, GET verifies."""
+        from app.discovery import push_back
+
+        responses = [
+            ("GET", "/login", _StubResponse(200, _form_html_for(
+                {"title": "Old Title", "series": "", "series_index": "1"}, csrf="login-csrf",
+            ))),
+            ("POST", "/login", _StubResponse(200, "ok", cookies={"session": "x"})),
+            ("GET", "/admin/book/55", _StubResponse(200, _form_html_for(
+                {"title": "Old Title", "series": "", "series_index": "1"}, csrf="edit-csrf",
+            ))),
+            ("POST", "/admin/book/55", _StubResponse(200, "ok")),
+            # After save, refetched form shows new series (success).
+            ("GET", "/admin/book/55", _StubResponse(200, _form_html_for(
+                {"title": "Old Title", "series": "New Series", "series_index": "1"},
+                csrf="edit-csrf-2",
+            ))),
+        ]
+        stub = _StubHttpClient(responses)
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kw: stub)
+
+        client = push_back.CWAClient("http://cwa.local", "u", "p")
+        await client.push(55, {"series": "New Series"})
+
+        post_body = next(
+            d for (m, u, d) in stub.calls
+            if m == "POST" and "/admin/book/55" in u
+        )
+        # Our pushed value wins over scraped state.
+        assert post_body["series"] == "New Series"
+        # Scraped state carries through (full-form replacement).
+        assert post_body["title"] == "Old Title"
+        # detail_view forced to "on" so CWA processes as full edit.
+        assert post_body["detail_view"] == "on"
+        # checkA/checkT explicitly disabled.
+        assert post_body["checkA"] == "false"
+        assert post_body["checkT"] == "false"
+        # csrf comes from the scraped EDIT form, not the caller.
+        assert post_body["csrf_token"] == "edit-csrf"
+
+    @pytest.mark.asyncio
+    async def test_raises_when_field_doesnt_persist(self, monkeypatch):
+        """Verification phase catches CWA's silent-failure mode."""
+        from app.discovery import push_back
+
+        responses = [
+            ("GET", "/login", _StubResponse(200, _form_html_for({"title": "T"}))),
+            ("POST", "/login", _StubResponse(200, "ok", cookies={"session": "x"})),
+            ("GET", "/admin/book/77", _StubResponse(200, _form_html_for(
+                {"title": "T", "series": ""}, csrf="csrf1",
+            ))),
+            ("POST", "/admin/book/77", _StubResponse(200, "ok")),
+            # Phase 3 — series STILL empty. CWA silently rejected (UAT canary).
+            ("GET", "/admin/book/77", _StubResponse(200, _form_html_for(
+                {"title": "T", "series": ""}, csrf="csrf2",
+            ))),
+        ]
+        stub = _StubHttpClient(responses)
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kw: stub)
+
+        client = push_back.CWAClient("http://cwa.local", "u", "p")
+        with pytest.raises(push_back.PushFailed, match="did not.*persist"):
+            await client.push(77, {"series": "Should Have Persisted"})
+
+    @pytest.mark.asyncio
+    async def test_raises_on_4xx_post(self, monkeypatch):
+        """HTTP-level failure still raises (existing behavior preserved)."""
+        from app.discovery import push_back
+
+        responses = [
+            ("GET", "/login", _StubResponse(200, _form_html_for({"title": "T"}))),
+            ("POST", "/login", _StubResponse(200, "ok", cookies={"session": "x"})),
+            ("GET", "/admin/book/99", _StubResponse(200, _form_html_for(
+                {"title": "T"}, csrf="c1",
+            ))),
+            ("POST", "/admin/book/99", _StubResponse(500, "server error")),
+        ]
+        stub = _StubHttpClient(responses)
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kw: stub)
+
+        client = push_back.CWAClient("http://cwa.local", "u", "p")
+        with pytest.raises(push_back.PushFailed, match="HTTP 500"):
+            await client.push(99, {"series": "X"})

@@ -29,6 +29,8 @@ import re
 import time
 from typing import Optional
 
+from bs4 import BeautifulSoup
+
 logger = logging.getLogger("seshat.push_back")
 
 
@@ -544,6 +546,99 @@ _CSRF_RX = re.compile(
     re.IGNORECASE,
 )
 
+# Inputs CWA's edit form ships that aren't pushable form fields (file
+# uploads / submit buttons) — skip when scraping current state so we
+# don't try to POST them back as data.
+_CWA_SKIP_INPUT_TYPES = frozenset({
+    "submit", "file", "button", "image", "reset",
+})
+
+
+def _parse_cwa_edit_form(html_text: str) -> tuple[str, dict[str, str]]:
+    """Parse CWA's `/admin/book/<id>` page, returning (csrf, form_state).
+
+    `form_state` is a dict of every editable field's current value
+    (`<input>`, `<select>`, `<textarea>`), keyed by `name`. Used to
+    build a complete-form-replacement POST since CWA's edit handler
+    requires the full form (UAT 2026-05-11: a partial POST containing
+    only the changed field returns 200 silently without persisting
+    anything — CWA re-renders the form with validation errors that
+    httpx can't distinguish from success).
+
+    Identifies the edit form by finding the `<form>` containing BOTH
+    a csrf_token input AND a title input (CWA's edit form is the only
+    form on the page with both — login snippet, search, etc. only
+    have csrf).
+
+    Raises PushFailed when the form can't be located OR csrf is
+    missing — both indicate CWA changed its template and the
+    integration needs review.
+    """
+    soup = BeautifulSoup(html_text, "lxml")
+    target = None
+    for f in soup.find_all("form"):
+        if (
+            f.find("input", attrs={"name": "csrf_token"}) is not None
+            and f.find("input", attrs={"name": "title"}) is not None
+        ):
+            target = f
+            break
+    if target is None:
+        raise PushFailed(
+            "could not locate CWA edit form on /admin/book/<id> page "
+            "(CWA may have changed its template — pin a known-good "
+            "version and retry)"
+        )
+
+    fields: dict[str, str] = {}
+
+    # <input> — text/hidden/email/etc., plus checkbox/radio when checked.
+    for inp in target.find_all("input"):
+        name = inp.get("name") or ""
+        if not name:
+            continue
+        itype = (inp.get("type") or "text").lower()
+        if itype in _CWA_SKIP_INPUT_TYPES:
+            continue
+        if itype in ("checkbox", "radio"):
+            # Browsers only POST checkboxes/radios when checked. Mirror
+            # that semantic: include only when the `checked` attribute
+            # is present.
+            if "checked" not in (inp.attrs or {}):
+                continue
+            fields[name] = inp.get("value") or "on"
+        else:
+            fields[name] = inp.get("value") or ""
+
+    # <select> — take the selected option's value.
+    for sel in target.find_all("select"):
+        name = sel.get("name") or ""
+        if not name:
+            continue
+        selected = sel.find("option", attrs={"selected": True})
+        if selected is None:
+            # No explicit `selected` — browsers default to first option.
+            selected = sel.find("option")
+        fields[name] = (selected.get("value") or "") if selected else ""
+
+    # <textarea> — take the unescaped inner text. CWA's `comments`
+    # field carries HTML entity-encoded inside the textarea (e.g.
+    # `&lt;p&gt;…&lt;/p&gt;`); the browser POSTs the unescaped form
+    # (literal `<p>…</p>`). `.text` mirrors that behavior — returns
+    # the unescaped text content as a string.
+    for ta in target.find_all("textarea"):
+        name = ta.get("name") or ""
+        if not name:
+            continue
+        fields[name] = ta.text or ""
+
+    csrf = fields.get("csrf_token", "")
+    if not csrf:
+        raise PushFailed(
+            "CWA edit form missing csrf_token (template change?)"
+        )
+    return csrf, fields
+
 
 class CWAClient:
     """Login + CSRF-aware client for Calibre-Web-Automated's admin form
@@ -589,44 +684,89 @@ class CWAClient:
         # automatically; we capture for log-and-recover.
         self._cookies = dict(http.cookies)
 
-    async def _scrape_csrf(self, http, book_id: int) -> str:
-        """GET /admin/book/<id> and scrape the form's CSRF token."""
-        page = await http.get(f"{self.base_url}/admin/book/{book_id}")
-        page.raise_for_status()
-        m = _CSRF_RX.search(page.text or "")
-        if not m:
-            raise PushFailed(
-                "could not scrape CSRF token from CWA admin/book page "
-                "(CWA may have changed its template — pin a known-good "
-                "version and retry)"
-            )
-        self._csrf = m.group(1)
-        return self._csrf
-
     async def push(self, book_id: int, form: dict) -> None:
-        """POST /admin/book/<id> with the given form fields."""
+        """POST /admin/book/<id> as a complete form replacement, then
+        verify the changes persisted by re-fetching the form.
+
+        CWA's `/admin/book/<id>` handler expects the entire edit form,
+        not a partial update. UAT 2026-05-11 found that posting just
+        the changed field + csrf returned 200 silently while
+        persisting nothing — CWA's template re-renders the form with
+        validation errors that httpx can't distinguish from success.
+
+        Three-phase flow:
+          1. GET to scrape the current full form state + csrf
+          2. POST our changes merged on top of that state (with
+             `detail_view=on` to ensure CWA processes as a full edit
+             rather than the abbreviated path)
+          3. GET again and verify each pushed field's value actually
+             reflects what we sent — raises PushFailed if CWA accepted
+             the request but didn't persist the change.
+        """
         import httpx
         async with httpx.AsyncClient(
             timeout=self.timeout, follow_redirects=True,
         ) as http:
             await self._login(http)
-            csrf = await self._scrape_csrf(http, book_id)
+
+            # Phase 1: scrape current form state.
+            url = f"{self.base_url}/admin/book/{book_id}"
+            page1 = await http.get(url)
+            page1.raise_for_status()
+            csrf, current_state = _parse_cwa_edit_form(page1.text or "")
+            self._csrf = csrf
+
+            # Phase 2: merge + POST.
             payload = {
+                **current_state,
                 **form,
                 "csrf_token": csrf,
                 # Disable CWA's auto-sort heuristics — we want our
                 # explicit edits to land verbatim, not get rewritten.
                 "checkA": "false",
                 "checkT": "false",
+                # Tell CWA to use the full edit-form code path. Mark's
+                # browser DevTools capture confirmed CWA's UI sends
+                # this; without it CWA may dispatch to a different
+                # handler that drops our fields silently.
+                "detail_view": "on",
             }
             resp = await http.post(
-                f"{self.base_url}/admin/book/{book_id}",
-                data=payload,
-                headers={"X-CSRFToken": csrf},
+                url, data=payload, headers={"X-CSRFToken": csrf},
             )
             if resp.status_code >= 400:
                 raise PushFailed(
                     f"CWA returned HTTP {resp.status_code} on book edit"
+                )
+
+            # Phase 3: verify by re-fetching. CWA returns 200 even on
+            # validation failure (form re-rendered with errors), so
+            # the only reliable check is to look at the persisted
+            # state after the request.
+            try:
+                page2 = await http.get(url)
+                page2.raise_for_status()
+                _, post_state = _parse_cwa_edit_form(page2.text or "")
+            except Exception as e:
+                # Couldn't verify — log and treat as success. False-
+                # failing a legitimate push because we can't re-parse
+                # is worse than letting it through; the next sync will
+                # still reconcile if anything is actually off.
+                logger.warning(
+                    "CWA push verification skipped for book_id=%s: %s",
+                    book_id, e,
+                )
+                return
+
+            mismatches: list[str] = []
+            for k, v in form.items():
+                actual = post_state.get(k, "")
+                if str(actual).strip() != str(v).strip():
+                    mismatches.append(f"{k}: sent {v!r}, got {actual!r}")
+            if mismatches:
+                raise PushFailed(
+                    "CWA accepted the request but field(s) did not "
+                    "persist: " + "; ".join(mismatches)
                 )
 
 

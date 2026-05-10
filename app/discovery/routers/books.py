@@ -499,10 +499,15 @@ async def update_book(bid: int, data: dict = Body(...), slug: str | None = Query
         TRACKED_FIELDS = {
             "title", "description", "pub_date", "expected_date",
             "isbn", "cover_url", "series_index",
+            # series_name is tracked but the diff comparison happens in
+            # the dedicated `if "series_name" in data` branch below
+            # (lines ~620+) since we resolve through series_id rather
+            # than diffing against a column on books directly.
+            "series_name",
         }
         current_row = await (await db.execute(
             "SELECT title, description, pub_date, expected_date, isbn, "
-            "cover_url, series_index, user_edited_fields "
+            "cover_url, series_index, series_id, user_edited_fields "
             "FROM books WHERE id=?", (bid,),
         )).fetchone()
         if not current_row:
@@ -620,6 +625,8 @@ async def update_book(bid: int, data: dict = Body(...), slug: str | None = Query
         # Handle series assignment — find or create series by name
         if "series_name" in data:
             series_name = (data["series_name"] or "").strip()
+            new_sid: int | None = None
+            series_field_emitted = False
             if series_name:
                 # Get the book's author_id for series scoping
                 book_row = await (await db.execute(
@@ -633,18 +640,28 @@ async def update_book(bid: int, data: dict = Body(...), slug: str | None = Query
                         (series_name, aid),
                     )).fetchone()
                     if srow:
-                        sid = srow["id"]
+                        new_sid = srow["id"]
                     else:
                         cur = await db.execute(
                             "INSERT INTO series (name, author_id) VALUES (?, ?)",
                             (series_name, aid),
                         )
-                        sid = cur.lastrowid
-                        logger.info(f"Created new series '{series_name}' (id={sid}) for author_id={aid}")
-                    fields.append("series_id=?"); vals.append(sid)
+                        new_sid = cur.lastrowid
+                        logger.info(f"Created new series '{series_name}' (id={new_sid}) for author_id={aid}")
+                    fields.append("series_id=?"); vals.append(new_sid)
+                    series_field_emitted = True
             else:
                 # Empty series name → remove from series (make standalone)
                 fields.append("series_id=?"); vals.append(None)
+                series_field_emitted = True
+            # Tag series_name as user-edited when the series_id actually
+            # changed. Without this, the calibre/abs sync passes treat
+            # series_id as structural and overwrite our local edit on the
+            # next sync — UAT 2026-05-11 canary: Mark added series to
+            # Delivering Justice {1,2}, sync clobbered it back to NULL on
+            # the next pass because series_name wasn't in user_edited_fields.
+            if series_field_emitted and new_sid != current_row["series_id"]:
+                edited_now.add("series_name")
         # Merge edited_now into the stored user_edited_fields JSON
         # array. Idempotent on repeat saves (set-union); only writes
         # the column when the merged set actually grows. Read failures
