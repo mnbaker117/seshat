@@ -7,6 +7,124 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.4.0] — 2026-05-09
+
+Part C — cover-image perceptual-hash MAM URL verification, end-to-end.
+Mark's hand-curated 29-book UAT dataset confirmed 29/29 expected
+outcomes after a multi-round iteration. First minor-version bump
+under the strict-SemVer policy that started at v2.4.0.
+
+### Added — Cover-image MAM URL verification
+
+- `app/mam/cover_hash.py` — pHash via the `imagehash` library (DCT-based,
+  robust to JPEG quality / scale / mild color shift). Validated 2026-05-09
+  against 16 image pairs from Mark's library: right-Possible covers
+  cluster at distance 0-6, wrong-match covers at 28-36, with a
+  22-bit empty band between. Pure helpers (`hash_image_bytes`,
+  `hash_image_file`, `hamming_distance`), persistent cache
+  (`get/store_cover_hash` against new global `mam_cover_hashes` table,
+  30-day TTL), top-level `fetch_and_hash_mam_cover` that goes through
+  the cookie-aware `_do_get`.
+- `app/discovery/cover_phash.py` — per-library bridge:
+  `backfill_cover_phashes_from_paths` (eager backfill of Calibre
+  `cover_path`-based covers, runs as background task on startup so
+  lifespan isn't blocked) + `ensure_cover_phash` (lazy compute for
+  source-discovered books with `cover_url`). New `books.cover_phash`
+  column auto-populated.
+- `_annotate_candidate_covers` in `sources/mam.py` — top-N=10 non-bundle
+  candidates by text confidence; fetches cover, computes Hamming
+  distance, assigns signal (promote ≤10, demote ≥22, neutral, no_data,
+  skipped_bundle, not_evaluated).
+- `_try_evaluate` integration: cover-promoter winner replaces text
+  winner regardless of conf; promoter-anchored demotion filters
+  competing candidates; aggressive-demotion mode (default ON) filters
+  even without promoter — gated by new
+  `mam_aggressive_cover_demotion` setting (Settings → Discovery → MAM).
+
+### Added — Cohort C rescue
+
+- `_alternate_title_forms` + `_alternate_author_forms` — variant
+  generators for passes 6+ in `check_book`. Fixes three MAM
+  tokenization mismatches surfaced by UAT:
+  - Trailing zero-padded volumes ("Right of Retribution 02" vs "2")
+  - Multi-initial authors ("JJ Cross" vs "J J Cross")
+  - Typographic apostrophe ("Warhawk’s" vs "Warhawk's")
+- `_extract_volume_range` + range-mismatch short-circuit in
+  `score_match_with_breakdown` — bundle "1-4" excludes vol-7 search.
+- `_extract_volume` extended with Roman numeral pattern (II-XX, skips
+  bare "I") + trailing arabic + strip-subtitle fallback. Range gate
+  prevents false-extraction from bundles like "Domestic Decay 2 - 5".
+- `_description_mentions_title_loose` + B3a single-torrent description
+  verification — rescue Cohort C cases where the title appears in
+  description (fetched via documented Search API per TOS).
+- B3b volume disambiguation in `_try_evaluate`: orig has no vol but
+  cand does → -0.20 penalty; orig vol >= 2 + cand has none → cap at 0.65.
+- Confidence as secondary tiebreak in `_pick_best_result` after
+  `match_pct` — ensures B3b volume-penalized siblings lose to
+  the no-vol-marker right candidate (MMM Bk1 over MMM 6).
+- Cohort C exemption (`_exempt_from_aggressive_demote`): candidates
+  with ts ≥ 0.95 AND author_matched are exempt from aggressive
+  filtering — protects MMM-class right matches.
+
+### Changed
+
+- `should_promote` in `_try_evaluate`: text-promote now requires
+  `author_matched=True`. Blocks pass-5 cross-author false positives
+  (UAT canary: Marvel "Infinity" by Hickman et al. would have
+  text-promoted against Tabitha Lord's "Infinity").
+- `_clean_title` + `_clean_title_loose` preserve apostrophes
+  (ASCII + typographic). MAM's index tokenizes around apostrophes;
+  stripping them turned "Warhawk's" into "Warhawks" matching
+  nothing.
+- Variant pass list (`_build_variant_pass_list`) pairs alt-authors
+  with all interesting title shapes (full + short + core +
+  sub_right), not just full title — fixes Veil where the right tid
+  only surfaces with `(JJ Cross, "The Veil")`.
+- `debug_check_book` brought to parity with `_try_evaluate`:
+  variant passes 6+, vol disambiguation, author-match check,
+  aggressive demotion filtering, Cohort C exemption all now
+  visible in the trace.
+
+### Removed (TOS cleanup)
+
+- mbsc browser-session cookie scraping + filelist verification path.
+  MAM staff (Perstephonie, 2026-05-09) confirmed mbsc-tier scraping
+  isn't on Section 1.7's approved automation list. Description-based
+  bundle verification (TOS-allowed via documented Search API) is
+  retained as the sole bundle-content signal. Restoration design
+  notes preserved if MAM ever exposes filelist via the documented API.
+
+### Schema
+
+- `app/database.py`: new `mam_cover_hashes` global-DB table
+  (torrent_id PK, phash, fetched_at, width, height, bytes).
+  Cross-library cache reuse — same torrent evaluated across
+  ebook + audiobook libraries shares one fetch.
+- `app/discovery/database.py`: new `books.cover_phash TEXT` column
+  on per-library books table.
+
+### Dependencies
+
+- Pinned `Pillow==12.2.0` and `ImageHash==4.3.2` (Pillow was
+  transitively pulled; pinning makes the runtime contract
+  explicit).
+
+### Tests
+
+96 new across 6 test files. Suite: 1909 passing, 7 skipped.
+
+### UAT — Mark's hand-curated 29-book dataset
+
+Final result 29/29 ✓ across 14 PROMOTE_FOUND, 3 PROMOTE_VARIANT,
+12 STAY_OR_NOTFOUND. One residual Cohort C case (Raw Bk1, ts=0
+because of series-strip + empty-residue path) needs manual Approve
+to lock in Found — accepted cost. Bonus discovery: Incarceron
+auto-finds an alt MAM upload (tid 49394) whose cover matches
+Mark's Calibre cover, producing a strictly-better URL than the
+previously-stored Cohort C tid 174640.
+
+---
+
 ## [2.3.7.1] — 2026-05-08
 
 Feature-completing fast-follow on v2.3.7. Adds the third leg of the
