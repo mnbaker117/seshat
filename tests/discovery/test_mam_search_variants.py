@@ -11,6 +11,7 @@ import pytest
 from app.discovery.sources.mam import (
     _alternate_author_forms,
     _alternate_title_forms,
+    _build_variant_pass_list,
     _clean_title,
     _clean_title_loose,
 )
@@ -211,3 +212,85 @@ class TestCleanTitlePreservesApostrophes:
         # AND must also preserve apostrophes for consistency.
         assert _clean_title_loose("Warhawk's Amnesty") == "Warhawk's Amnesty"
         assert _clean_title_loose("Warhawk’s Amnesty") == "Warhawk’s Amnesty"
+
+
+# ─── _build_variant_pass_list pairings ──────────────────────────
+
+
+class TestBuildVariantPassList:
+    """Pin the variant-pass list shape so a future refactor can't
+    silently drop the (alt_author, short) pairing that the Veil case
+    depends on."""
+
+    def test_alt_author_paired_with_short_title(self):
+        # Veil canary — alt_authors=['JJ Cross', 'J.J. Cross'],
+        # short='The Veil', title='The Veil: A Dark Bio-Punk Sci-Fi
+        # Thriller'. The variant list MUST include
+        # ('JJ Cross', 'The Veil') because MAM only returns the
+        # right tid 1120995 for that specific (alt_author, short)
+        # combination — not (alt_author, full_title) which excludes
+        # the tid.
+        variants = _build_variant_pass_list(
+            title="The Veil: A Dark Bio-Punk Sci-Fi Thriller",
+            authors="J J Cross",
+            core=None,
+            sub_right="A Dark Bio-Punk Sci-Fi Thriller",
+            short="The Veil",
+            title_only="A Dark Bio-Punk Sci-Fi Thriller",
+        )
+        assert ("JJ Cross", "The Veil") in variants
+
+    def test_alt_title_paired_with_original_author(self):
+        # Right of Retribution canary — alt_title='Right of Retribution'
+        # (trailing num stripped) paired with the original author.
+        variants = _build_variant_pass_list(
+            title="Right of Retribution 2",
+            authors="William D. Arand",
+            core=None,
+            sub_right=None,
+            short=None,
+            title_only="Right of Retribution 2",
+        )
+        assert ("William D. Arand", "Right of Retribution") in variants
+
+    def test_typographic_alt_with_original_author(self):
+        # Warhawk canary — typographic-apostrophe variant of the title
+        # paired with original author.
+        variants = _build_variant_pass_list(
+            title="Warhawk's Amnesty",
+            authors="Ajax Lygan",
+            core=None,
+            sub_right=None,
+            short=None,
+            title_only="Warhawk's Amnesty",
+        )
+        assert ("Ajax Lygan", "Warhawk’s Amnesty") in variants
+
+    def test_dedup_against_passes_1_to_5(self):
+        # Variants matching passes 1-5 must not appear (would burn
+        # API quota on duplicates).
+        variants = _build_variant_pass_list(
+            title="Foo",
+            authors="Bar",
+            core=None,
+            sub_right=None,
+            short=None,
+            title_only="Foo",
+        )
+        for pair in variants:
+            assert pair != ("Bar", "Foo")  # would be pass 1
+            assert pair != (None, "Foo")    # would be pass 5
+
+    def test_cap_respected(self):
+        # Worst case (3 alt_titles × 3 alt_authors + simple combos)
+        # should be capped — pin the max length.
+        variants = _build_variant_pass_list(
+            title="J K Rowling's Magic 2",  # multiple variant axes
+            authors="J R R Tolkien",
+            core=None,
+            sub_right=None,
+            short="J K Rowling's Magic",
+            title_only="J K Rowling's Magic 2",
+            cap=4,
+        )
+        assert len(variants) <= 4

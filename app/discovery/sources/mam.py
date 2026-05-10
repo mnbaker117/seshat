@@ -593,11 +593,24 @@ def _build_variant_pass_list(
             )
     alt_authors = _alternate_author_forms(authors or "")
 
+    # All title-shapes worth pairing with an alt-author. Critical: pair
+    # alt-authors with the short/core forms too, not just the full
+    # title. UAT canary: Veil with author "J J Cross" — alt-author
+    # "JJ Cross" with the FULL title returned 0 results from MAM (the
+    # subtitle excludes the right tid), but with short "The Veil"
+    # returned tid 1120995 cleanly. Pre-fix the variant pass only
+    # tried (alt_author, full_title) and missed.
+    title_shapes: list[str] = [title]
+    for s in (short, core, sub_right):
+        if s and s != title and s not in title_shapes:
+            title_shapes.append(s)
+
     variant_passes: list[tuple[Optional[str], str]] = []
     for alt_t in alt_titles:
         variant_passes.append((authors, alt_t))
     for alt_a in alt_authors:
-        variant_passes.append((alt_a, title))
+        for ts in title_shapes:
+            variant_passes.append((alt_a, ts))
         for alt_t in alt_titles:
             variant_passes.append((alt_a, alt_t))
 
