@@ -398,3 +398,57 @@ class TestDescriptionContainsTitle:
         # numbering need stripping.
         desc = "[*] 01. Duel Nature"
         assert _description_contains_title(desc, "Duel Nature") is True
+
+    def test_distinctive_single_word_title_accepted(self):
+        # UAT canary 2026-05-10: "Chainfire" (9 chars, single token,
+        # title of Sword of Truth Bk9). Distinctive enough to accept.
+        # The structured-line equality match still requires the line
+        # content to EQUAL the title, so false-positive risk is bounded
+        # even with the relaxed gate.
+        desc = "<p>09 - Chainfire</p>"
+        assert _description_contains_title(desc, "Chainfire") is True
+
+    def test_short_single_word_title_still_rejected(self):
+        # < 5 chars AND < 2 tokens — too noisy. Mirrors existing "Dawn"
+        # case. "Raw" is the canonical short single-word title that
+        # collides with prose ("raw materials", "raw emotion").
+        desc = "<p>* Raw</p>"
+        assert _description_contains_title(desc, "Raw") is False
+
+    def test_numbered_dash_prefix_pattern(self):
+        # UAT canary 93760 (Sword of Truth .epub bundle): "<NN> -
+        # <Title>" numbering scheme that the parser previously left as
+        # ['09 - chainfire', '09'] candidates — neither equaled the
+        # title. The new leading-prefix alternation strips "09 - " so
+        # the title surfaces cleanly.
+        desc = (
+            "<p>00 - Debt of Bones</p>"
+            "<p>09 - Chainfire</p>"
+            "<p>10 - Phantom</p>"
+        )
+        assert _description_contains_title(desc, "Chainfire") is True
+        assert _description_contains_title(desc, "Phantom") is True  # 7 chars, single token but distinctive
+        assert _description_contains_title(desc, "Debt of Bones") is True
+
+    def test_inline_asterisk_bullet_splits_lines(self):
+        # UAT canary 5081 (.lit Sword of Truth bundle): every book on
+        # one giant <p> line separated by `&nbsp;* ` markers. Without
+        # the inline-asterisk-bullet block split, the parser saw one
+        # massive run-on line with no per-title boundaries.
+        desc = (
+            "<p>These are great. &nbsp; &nbsp; &nbsp;"
+            "* Wizards First Rule &nbsp; &nbsp; "
+            "* Stone of Tears &nbsp; &nbsp; "
+            "* Chainfire &nbsp; &nbsp; "
+            "* Phantom</p>"
+        )
+        assert _description_contains_title(desc, "Wizards First Rule") is True
+        assert _description_contains_title(desc, "Stone of Tears") is True
+        assert _description_contains_title(desc, "Chainfire") is True
+
+    def test_inline_asterisk_doesnt_split_emphasis(self):
+        # `*word*` (markdown emphasis around a token) should NOT split
+        # — the bullet pattern requires whitespace/&nbsp; on BOTH sides.
+        desc = "<p>You *must* read Duel Nature.</p>"
+        assert _description_contains_title(desc, "must") is False
+        assert _description_contains_title(desc, "Duel Nature") is False

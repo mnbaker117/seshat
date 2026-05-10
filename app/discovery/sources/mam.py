@@ -1343,9 +1343,19 @@ async def _mam_search(
 # negations, and recommendations; the structured-line check rejects
 # all three.
 
-# Block-level HTML/BBCode that becomes a line break.
+# Block-level HTML/BBCode that becomes a line break. Includes the
+# inline literal-asterisk bullet pattern (` * ` with whitespace or
+# `&nbsp;` on either side) — UAT canary 5081 (.lit Sword of Truth
+# bundle) put every book on one giant `<p>` line separated by
+# `&nbsp;* ` markers, which made the per-line equality check see one
+# enormous run-on string with no per-title boundaries. The bullet
+# match is intentionally restrictive (requires whitespace OR &nbsp;
+# on both sides) to avoid splitting on emphasis (`*word*`) or
+# wildcards mid-token.
 _DESC_BLOCK_RX = re.compile(
-    r"<br\s*/?>|</?p\b[^>]*>|</?div\b[^>]*>|</?li\b[^>]*>|\[\*\]",
+    r"<br\s*/?>|</?p\b[^>]*>|</?div\b[^>]*>|</?li\b[^>]*>"
+    r"|\[\*\]"
+    r"|(?:&nbsp;|[ \t])\*(?:&nbsp;|[ \t])",
     re.I,
 )
 
@@ -1405,11 +1415,18 @@ def _strip_to_lines(text: Optional[str]) -> list[str]:
 
 
 # Leading: optional list marker + optional numbering. Examples matched:
-#   "[*] ", "* ", "- ", "01. ", "1) ", "1: "
+#   "[*] ", "* ", "- ", "01. ", "1) ", "1: ", "09 - ", "1 — "
+# The dash-separated numbering form ("09 - Title") is common in bundle
+# descriptions where the uploader uses zero-padded ordinals as a
+# numbering scheme — UAT canary 93760 (Sword of Truth Series .epub
+# bundle) where every entry is "<NN> - <Title>". Without this the
+# parser produced ['09 - chainfire', '09'] as candidates and the
+# title equality check never matched.
 _DESC_LEADING_RX = re.compile(
     r"^[\[\(]?\*[\]\)]?\s*"
     r"|^[*\-•]\s+"
-    r"|^\d+(?:\.\d+)?[\.\):]\s+",
+    r"|^\d+(?:\.\d+)?[\.\):]\s+"
+    r"|^\d+(?:\.\d+)?\s*[-–—]\s+",
 )
 
 
@@ -1540,8 +1557,13 @@ def _description_contains_title(
       - prose mentions ("fans of Duel Nature will love this")
       - recommendation contexts ("if you enjoyed Duel Nature, ...")
       - negations ("does NOT include Duel Nature")
-    Single-word titles are rejected (too noisy for standalone matching);
-    requires ≥ 2 tokens, same threshold as `_filelist_contains_title`.
+    Single-word titles are accepted only when distinctive enough:
+    rejected if BOTH < 2 tokens AND < 5 chars. Mirrors the looser
+    threshold in `_description_mentions_title_loose`. Lets common
+    distinctive single-word titles through ("Chainfire" 9 chars,
+    "Incarceron" 10 chars) while still rejecting noisy short ones
+    ("Raw" 3 chars). Equality match limits false-positive risk even
+    for the now-accepted single-word titles.
     """
     if not description:
         return False
@@ -1550,7 +1572,7 @@ def _description_contains_title(
         if not t:
             continue
         normalized = re.sub(r"\s+", " ", t.strip().lower())
-        if len(normalized.split()) < 2:
+        if len(normalized.split()) < 2 and len(normalized) < 5:
             continue
         valid_titles.add(normalized)
     if not valid_titles:
