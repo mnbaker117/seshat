@@ -235,6 +235,7 @@ async def debug_match(
     book_id: Optional[int] = None,
     slug: Optional[str] = None,
     seshat_cover_url: Optional[str] = None,
+    test_scoped: bool = False,
 ) -> dict:
     """Toggle-gated developer endpoint: replay the MAM cascade for one book
     and return a structured trace (raw response shape + per-result scoring
@@ -315,6 +316,7 @@ async def debug_match(
             series_name=series,
             content_type=content_type,
             seshat_cover_phash=resolved_phash,
+            test_scoped=test_scoped,
         )
     except Exception as e:
         _log.exception("debug_match cascade failed")

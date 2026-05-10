@@ -1234,6 +1234,8 @@ async def _mam_search(
     perpage: int = RESULTS_PER_PAGE,
     lang_ids: Optional[list[int]] = None,
     content_type: str = "ebook",
+    text_override: Optional[str] = None,
+    srchIn_override: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     Search MAM natively (httpx.AsyncClient). Pass authors=None for
@@ -1244,8 +1246,16 @@ async def _mam_search(
     scopes to E-Books, "audiobook" scopes to AudioBooks. Callers that
     want both categories aren't currently supported — scan flows
     know the book's library and pass exactly one.
+
+    `text_override` bypasses _build_query / _clean_title_loose and uses
+    the caller-supplied raw text verbatim. Used by debug_check_book's
+    scoped-operator passes to fire MAM's inline `@field` syntax (e.g.
+    `@(title,filenames) Foo @author Bar`). `srchIn_override` similarly
+    lets callers narrow the field flags from the all-true default.
     """
-    if authors is None:
+    if text_override is not None:
+        query = text_override
+    elif authors is None:
         query = _clean_title_loose(title)
     else:
         query = _build_query(authors, title)
@@ -1253,18 +1263,20 @@ async def _mam_search(
     if not lang_ids:
         lang_ids = [_ENGLISH_LANG_ID]
 
+    srch_in = srchIn_override if srchIn_override is not None else {
+        "author": "true",
+        "description": "true",
+        "filenames": "true",
+        "narrator": "true",
+        "series": "true",
+        "tags": "true",
+        "title": "true",
+    }
+
     payload = json.dumps({
         "tor": {
             "text": query,
-            "srchIn": {
-                "author": "true",
-                "description": "true",
-                "filenames": "true",
-                "narrator": "true",
-                "series": "true",
-                "tags": "true",
-                "title": "true",
-            },
+            "srchIn": srch_in,
             "searchType": "active",
             "searchIn": "torrents",
             "main_cat": [_cat_for(content_type)],
@@ -2427,6 +2439,7 @@ async def debug_check_book(
     lang_ids: Optional[list[int]] = None,
     delay: float = 0.5,
     seshat_cover_phash: Optional[str] = None,
+    test_scoped: bool = False,
 ) -> dict:
     """Run the cascade for one book and return a full structured trace.
 
@@ -2438,6 +2451,15 @@ async def debug_check_book(
     UNGATED (regardless of `_COVER_VERIFICATION_ENABLED`) — the whole
     point is to let Mark see the signal even when production won't act
     on it yet.
+
+    `test_scoped` (opt-in) appends three additional passes that probe
+    MAM's inline `@field` operator syntax (the existing-API alternative
+    to filelist exposure that staff suggested in the 2026-05-10 forum
+    exchange). These passes appear with `pass_kind: "scoped"` and
+    `pass_num` 100+, alongside `scoped_label` / `raw_search_text` /
+    `srchIn_override` in the per-pass trace. Scoring + decisions run
+    through the same machinery so the trace shows whether the scoped
+    operator would have produced a different verdict.
 
     Trace shape (cover_check + cover_input fields are new in step 5):
       {
@@ -2511,14 +2533,19 @@ async def debug_check_book(
     short = _strip_subtitle(title)
     title_only = core or sub_right or short or title
 
-    passes_to_run: list[tuple[int, Optional[str], str]] = [(1, authors, title)]
+    # Each pass dict: pass_num, search_author, search_title, plus optional
+    # pass_kind/scoped_label/text_override/srchIn_override for scoped
+    # passes added when test_scoped=True.
+    passes_to_run: list[dict] = [
+        {"pass_num": 1, "search_author": authors, "search_title": title},
+    ]
     if core:
-        passes_to_run.append((2, authors, core))
+        passes_to_run.append({"pass_num": 2, "search_author": authors, "search_title": core})
     if sub_right and sub_right != core:
-        passes_to_run.append((3, authors, sub_right))
+        passes_to_run.append({"pass_num": 3, "search_author": authors, "search_title": sub_right})
     if short and short != title and short != core:
-        passes_to_run.append((4, authors, short))
-    passes_to_run.append((5, None, title_only))
+        passes_to_run.append({"pass_num": 4, "search_author": authors, "search_title": short})
+    passes_to_run.append({"pass_num": 5, "search_author": None, "search_title": title_only})
 
     # Passes 6+: variant forms (trailing-number / typographic-apostrophe
     # / multi-initial-author). Same logic + cap as production check_book.
@@ -2527,7 +2554,49 @@ async def debug_check_book(
     for vidx, (v_author, v_title) in enumerate(_build_variant_pass_list(
         title, authors, core, sub_right, short, title_only,
     )):
-        passes_to_run.append((6 + vidx, v_author, v_title))
+        passes_to_run.append(
+            {"pass_num": 6 + vidx, "search_author": v_author, "search_title": v_title}
+        )
+
+    # Scoped-operator probe passes (opt-in via test_scoped). These exist
+    # to evaluate MAM's inline `@field` syntax as an alternative to
+    # filelist exposure for bundle-content verification — see the MAM
+    # forum exchange where staff suggested `@(title,filenames) X
+    # @author Y` as the existing-API path. We run three variants so a
+    # diagnostic curl shows whether (a) the inline operator actually
+    # narrows results vs the broad srchIn baseline, (b) explicitly
+    # narrowing srchIn to match the operator changes anything, and
+    # (c) the strictest filename-only form still surfaces our target.
+    # Search title + author are still the original inputs (used for
+    # scoring), only the raw text sent to MAM differs.
+    if test_scoped:
+        scoped_specs = [
+            {
+                "scoped_label": "title_filenames_author_broad_srchIn",
+                "text_override": f"@(title,filenames) {title} @author {authors}",
+                "srchIn_override": None,
+            },
+            {
+                "scoped_label": "title_filenames_author_narrow_srchIn",
+                "text_override": f"@(title,filenames) {title} @author {authors}",
+                "srchIn_override": {
+                    "title": "true", "filenames": "true", "author": "true",
+                },
+            },
+            {
+                "scoped_label": "filenames_only_author",
+                "text_override": f"@filenames {title} @author {authors}",
+                "srchIn_override": None,
+            },
+        ]
+        for sidx, spec in enumerate(scoped_specs):
+            passes_to_run.append({
+                "pass_num": 100 + sidx,
+                "pass_kind": "scoped",
+                "search_author": authors,
+                "search_title": title,
+                **spec,
+            })
 
     # Description cache mirrors production check_book — same torrent
     # surfacing in multiple debug passes only fetches once.
@@ -2538,9 +2607,16 @@ async def debug_check_book(
     # debug passes only fetches once.
     debug_cover_phash_cache: dict[str, Optional[str]] = {}
 
-    for pass_num, pass_authors, search_title in passes_to_run:
+    for pass_spec in passes_to_run:
+        pass_num = pass_spec["pass_num"]
+        pass_authors = pass_spec["search_author"]
+        search_title = pass_spec["search_title"]
+        pass_kind = pass_spec.get("pass_kind", "standard")
+        text_override = pass_spec.get("text_override")
+        srchIn_override = pass_spec.get("srchIn_override")
         pass_trace: dict = {
             "pass_num": pass_num,
+            "pass_kind": pass_kind,
             "search_title": search_title,
             "search_author": pass_authors,
             "raw_response_keys": [],
@@ -2549,11 +2625,17 @@ async def debug_check_book(
             "first_result_full": None,
             "results": [],
         }
+        if pass_kind == "scoped":
+            pass_trace["scoped_label"] = pass_spec.get("scoped_label")
+            pass_trace["raw_search_text"] = text_override
+            pass_trace["srchIn_override"] = srchIn_override
 
         try:
             resp = await _mam_search(
                 token, pass_authors, search_title,
                 lang_ids=lang_ids, content_type=content_type,
+                text_override=text_override,
+                srchIn_override=srchIn_override,
             )
         except _AuthError as e:
             pass_trace["error"] = f"auth_error: {e}"

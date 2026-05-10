@@ -64,7 +64,7 @@ def patch_search(monkeypatch):
     captured_calls = {"n": 0}
     canned: dict = {"resp": _make_mam_response([])}
 
-    async def _fake_search(token, authors, search_title, *, lang_ids=None, content_type="ebook"):
+    async def _fake_search(token, authors, search_title, *, lang_ids=None, content_type="ebook", **_kwargs):
         captured_calls["n"] += 1
         return canned["resp"]
 
