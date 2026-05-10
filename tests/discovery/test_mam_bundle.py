@@ -516,11 +516,19 @@ class TestAuthorMatchPerAuthorSubset:
             "Michael R. Hicks", self._result(["Michael Hicks"]),
         ) is True
 
-    def test_empty_mam_authors_returns_true(self):
-        # Permissive default for missing metadata preserved.
+    def test_empty_mam_authors_returns_false(self):
+        # UAT 2026-05-11 round 2: previously defaulted to True as a
+        # permissive escape hatch for "right book, missing metadata"
+        # (Cohort C-style). In practice, MAM uploads with no listed
+        # authors are almost always generic mega-collections that
+        # text-overlap-match user subtitle templates and clog the
+        # Possible band. Returning False here lets the no-positive-
+        # signal demote filter sweep them to Not Found. Real Cohort C
+        # books have other rescue signals (cover-pHash, description
+        # mention) that fire upstream of the demote filter.
         from app.discovery.sources.mam import _author_match
-        assert _author_match("Anyone", {"author_info": ""}) is True
-        assert _author_match("Anyone", {}) is True
+        assert _author_match("Anyone", {"author_info": ""}) is False
+        assert _author_match("Anyone", {}) is False
 
     def test_search_author_only_initials_returns_true(self):
         # If our search author is something pathological like just

@@ -776,15 +776,26 @@ def _author_match(calibre_authors: str, mam_result: dict) -> bool:
       - middle-initial differences: "Michael R Hicks" vs
         "Michael Hicks" (single-letter "R" filtered)
 
-    Permissive defaults preserved:
-      - Empty mam_authors → True (give missing metadata the benefit
-        of the doubt — Cohort C edge case)
-      - Search author with only single-letter tokens → True (can't
-        meaningfully discriminate)
+    Empty mam_authors → False (UAT 2026-05-11 round 2: previously
+    defaulted to True as a permissive Cohort-C-style escape hatch
+    for "right book, missing metadata"; in practice, MAM uploads with
+    no listed authors are almost always generic mega-collections —
+    "Sci-Fi & Fantasy eBook Master Collection M-Z", "The Tavistock
+    Institute eBook Collection", etc. — that text-overlap-match a
+    user's subtitle template and clog the Possible band. Returning
+    False here lets the no-positive-signal demote filter in
+    _try_evaluate sweep them to Not Found. Real Cohort C cases (right
+    book, weird metadata) still have rescue paths via cover-pHash or
+    description-mention verification, both of which run before the
+    demote filter.
+
+    Permissive default preserved:
+      - Search author with only single-letter tokens → True (no signal
+        to meaningfully discriminate — e.g. "J K" or "X").
     """
     mam_authors = _parse_author_info(mam_result.get("author_info"))
     if not mam_authors:
-        return True
+        return False
 
     def tokens(s: str) -> set:
         s = re.sub(r'\.', '', s.lower())
@@ -2559,6 +2570,19 @@ async def check_book(
         #     The Axe Falls 3) — Mark confirmed BkN doesn't exist on
         #     MAM; only Bk1 was uploaded.
         #
+        #   - `title_similarity < 0.10`: right author surfacing a
+        #     totally different work — e.g. "Grand Theft Planet"
+        #     (DuBoff / Renegade Imperium) returning "Fractured
+        #     Empire: Complete Cadicle Series Boxset" (also DuBoff,
+        #     different series). Confidence comes purely from author
+        #     overlap (~0.30), title contributes 0. UAT round 2
+        #     (2026-05-11): 2 of 8 remaining Possibles fit this
+        #     fingerprint after the per-author-subset author_match
+        #     fix landed. Cohort C cases (right book, totally different
+        #     title) would have been caught by cover-pHash promote
+        #     or single-desc rescue earlier in this function — both
+        #     run before this gate.
+        #
         # Deliberately NOT filtering on `volume_penalty_applied` (the
         # softer -0.20 penalty for "search has no vol, cand has one")
         # since legitimate Bk1-search cases where Calibre lacks the
@@ -2566,10 +2590,12 @@ async def check_book(
         if (
             not best.get("author_matched", False)
             or best.get("volume_likely_mismatch", False)
+            or best.get("title_similarity", 0.0) < 0.10
         ):
             logger.debug(
                 f"  Pass {pass_num}: NO-POSITIVE-SIGNAL — '{best['mam_title'][:50]}' "
-                f"(conf={conf:.3f}, author_matched={best.get('author_matched')}, "
+                f"(conf={conf:.3f}, ts={best.get('title_similarity', 0):.3f}, "
+                f"author_matched={best.get('author_matched')}, "
                 f"vol_likely_mismatch={best.get('volume_likely_mismatch', False)}); "
                 f"not surfacing as Possible"
             )
