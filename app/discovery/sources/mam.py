@@ -2521,6 +2521,35 @@ async def debug_check_book(
                 score_search_breakdown["confidence"],
             )
 
+            # Mirror production volume disambiguation (B3b): use the
+            # ORIGINAL `title` (not per-pass search_title) for volume
+            # comparison so variant passes that strip volume markers
+            # don't wrongly nuke the right candidate's confidence.
+            #   - Both have keyword/extracted vol that DIFFER → conf=0
+            #   - orig has no vol but cand does → -0.20 penalty
+            #   - orig has vol >= 2 and cand has none → cap at 0.65
+            #     (likely Bk1 surfaced for Bk2+ search via variant pass)
+            from app.metadata.scoring import _extract_volume as _vol_extract
+            orig_vol_dbg = _vol_extract(title)
+            cand_vol_dbg = _vol_extract(mam_title)
+            volume_disambig_note = None
+            if (
+                cand_vol_dbg is not None and orig_vol_dbg is not None
+                and cand_vol_dbg != orig_vol_dbg
+            ):
+                confidence = 0.0
+                volume_disambig_note = "volume_mismatch"
+            elif orig_vol_dbg is None and cand_vol_dbg is not None:
+                confidence = max(0.0, confidence - 0.20)
+                volume_disambig_note = "volume_penalty"
+            elif (
+                orig_vol_dbg is not None and orig_vol_dbg >= 2
+                and cand_vol_dbg is None
+                and confidence > 0.65
+            ):
+                confidence = 0.65
+                volume_disambig_note = "volume_likely_mismatch"
+
             ts_max = max(
                 score_full_breakdown["title_similarity"],
                 score_search_breakdown["title_similarity"],
@@ -2563,6 +2592,12 @@ async def debug_check_book(
                         bundle_check["description_match"] = True
 
             # Decision reflects what production would actually do.
+            # Mirrors `_try_evaluate`'s `should_promote` predicate:
+            # text-promote requires author_matched (added 2026-05-09 to
+            # block cross-author false positives — Infinity canary
+            # where pass 5 returned a Marvel comic at ts=1.0/conf=0.7
+            # and would have promoted despite zero overlap with the
+            # source author Tabitha Lord).
             verified = bundle_check["description_match"]
             if confidence < MATCH_MIN_SCORE:
                 decision = "skipped_below_min"
@@ -2576,8 +2611,10 @@ async def debug_check_book(
                 # Conf would normally promote, but bundle cap blocks it
                 # (and the description verification signal didn't fire).
                 decision = "bundle_capped_kept_as_possible"
-            elif confidence >= MATCH_PROMOTE_SCORE:
+            elif confidence >= MATCH_PROMOTE_SCORE and author_matched:
                 decision = "would_promote_to_found"
+            elif confidence >= MATCH_PROMOTE_SCORE:
+                decision = "kept_as_possible_no_author_match"
             else:
                 decision = "kept_as_possible"
 
@@ -2603,6 +2640,8 @@ async def debug_check_book(
                 "score_vs_search_title": score_search_breakdown,
                 "confidence_max": round(confidence, 4),
                 "title_similarity_max": round(ts_max, 4),
+                "author_matched": author_matched,
+                "volume_disambig": volume_disambig_note,
                 "bundle_check": bundle_check,
                 "decision": decision,
             })
