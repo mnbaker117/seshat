@@ -86,7 +86,14 @@ interface MamScanResult {
 }
 
 interface MamScanResponse {
+  // v2.4.x: scan now runs as a background task; the immediate response
+  // is just the start ack. The book's new mam_status arrives via the
+  // page-level polling banner, not in this response.
   error?: string;
+  status?: string;
+  total?: number;
+  // Legacy synchronous-result fields, retained for back-compat with
+  // any older code path that still returns them.
   results?: MamScanResult[];
 }
 
@@ -310,22 +317,19 @@ export function BookSidebar({
         { book_ids: [book.id] },
       );
       if (r.error) {
-        alert(`MAM scan failed: ${r.error}`);
+        toast.error(`MAM scan failed: ${r.error}`);
       } else {
-        const res = (r.results && r.results[0]) || {};
-        const label =
-          res.status === "found"
-            ? "Found ✓"
-            : res.status === "possible"
-            ? `Possible (${res.match_pct ?? "?"}%)`
-            : res.status === "not_found"
-            ? "Not on MAM"
-            : "Scan complete";
-        alert(`MAM ${label}`);
-        if (onEdit) await onEdit();
+        // v2.4.x: backend spawns the scan as a background task and
+        // returns immediately. The result lands asynchronously — the
+        // page-level banner shows live progress; we just acknowledge
+        // the start here. Caller's onEdit() refresh runs in the
+        // background as the scan completes (the banner triggers a
+        // page reload on the running→done transition).
+        toast.info("MAM scan started — track progress in the page banner.");
+        window.dispatchEvent(new CustomEvent("seshat:scan-started"));
       }
     } catch (e) {
-      alert(`MAM scan failed: ${(e as Error).message || e}`);
+      toast.error(`MAM scan failed: ${(e as Error).message || e}`);
     }
     setMamScanning(false);
   };

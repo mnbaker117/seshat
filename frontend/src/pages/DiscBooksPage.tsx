@@ -61,13 +61,12 @@ interface ClearScanDataResponse {
   books_deleted?: number;
 }
 interface ScanMamResponse {
+  // v2.4.x: scan now runs as a background task; this response shape
+  // is the immediate ack after the POST returns. Live progress is
+  // tracked via state._mam_scan_progress (polled separately).
   error?: string;
-  status?: string;
-  scanned?: number;
-  found?: number;
-  possible?: number;
-  not_found?: number;
-  errors?: number;
+  status?: string;       // "started" or "complete" (zero-book case)
+  total?: number;
 }
 interface ScanSourcesResponse {
   error?: string;
@@ -118,6 +117,21 @@ function DesktopBooksPage({
   const [mamOn, setMamOn] = useState(false);
   const [selMode, setSelMode] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
+  // v2.4.x: live MAM scan progress for the in-page banner. Polled
+  // from /discovery/mam/scan/status when a scan is running. The
+  // banner gives UAT visibility into bulk scans kicked off from
+  // the multi-select bar (which previously left the page silent).
+  const [mamScan, setMamScan] = useState<{
+    running?: boolean;
+    scanned?: number;
+    total?: number;
+    found?: number;
+    possible?: number;
+    not_found?: number;
+    errors?: number;
+    current_book?: string;
+    status?: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
 
   const toggleSel = (id: number) =>
@@ -196,6 +210,45 @@ function DesktopBooksPage({
       .catch(() => {});
   }, []);
 
+  // Live MAM scan progress poller — fetches /discovery/mam/scan/status
+  // every 3 seconds and updates the in-page banner. Auto-clears the
+  // banner state when the scan transitions running→done so the banner
+  // disappears after completion. Refreshes the books list once on
+  // that transition so users see the new mam_status values land
+  // without manually reloading.
+  useEffect(() => {
+    let active = true;
+    let prevRunning = false;
+    const tick = async () => {
+      try {
+        const r = await api.get<typeof mamScan & object>(
+          "/discovery/mam/scan/status",
+        );
+        if (!active) return;
+        const isRunning = !!r?.running;
+        if (isRunning) {
+          setMamScan(r);
+        } else if (prevRunning) {
+          // Just finished — show the final summary briefly, then clear.
+          setMamScan(r);
+          setTimeout(() => active && setMamScan(null), 4000);
+          load(pg);
+        } else {
+          setMamScan(null);
+        }
+        prevRunning = isRunning;
+      } catch {
+        /* ignore — scan-status is non-critical */
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [load, pg]);
+
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   const onAction = async (act: BookAction, id: number, slug?: string) => {
@@ -259,6 +312,7 @@ function DesktopBooksPage({
       return;
     setBusy(true);
     try {
+      const selected = sel.size;
       const r = await api.post<ScanMamResponse>(
         "/discovery/books/scan-mam",
         { book_ids: [...sel] },
@@ -266,12 +320,16 @@ function DesktopBooksPage({
       if (r.error) {
         toast.error(r.error);
       } else {
-        toast.success(
-          `MAM scan complete: ${r.scanned || 0} scanned, ${r.found || 0} found, ${r.possible || 0} possible, ${r.not_found || 0} not on MAM`,
+        // Backend now spawns the scan as a background asyncio task and
+        // returns immediately. Surface this with an immediate "started"
+        // toast + dispatch the global scan-started event so any global
+        // poller (or this page's own banner effect) picks it up.
+        toast.info(
+          `MAM scan started — ${r.total ?? selected} book${(r.total ?? selected) === 1 ? "" : "s"}. Track progress in the banner above.`,
         );
         setSel(new Set());
         setSelMode(false);
-        load(pg);
+        window.dispatchEvent(new CustomEvent("seshat:scan-started"));
       }
     } catch (e) {
       toast.error((e as Error).message || "MAM scan failed");
@@ -388,6 +446,43 @@ function DesktopBooksPage({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* MAM scan progress banner — visible whenever a scan (kicked
+          off from this page or anywhere else) is in flight. Surfaces
+          the same data the Dashboard scan widget shows so the user
+          isn't blind to the work happening in the background. */}
+      {mamScan && (mamScan.running || mamScan.status === "complete") ? (
+        <div
+          style={{
+            background: t.cardBg ?? t.bg,
+            border: `1px solid ${t.accent}`,
+            borderLeft: `4px solid ${t.accent}`,
+            borderRadius: 6,
+            padding: "10px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            fontSize: 14,
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ fontWeight: 600, color: t.accent }}>
+              {mamScan.running
+                ? `MAM scan in progress — ${mamScan.scanned ?? 0} / ${mamScan.total ?? 0}`
+                : `MAM scan complete — ${mamScan.scanned ?? 0} / ${mamScan.total ?? 0}`}
+            </div>
+            {mamScan.running && mamScan.current_book ? (
+              <div style={{ fontSize: 12, color: t.td, fontStyle: "italic" }}>
+                Currently scanning: {mamScan.current_book}
+              </div>
+            ) : null}
+            <div style={{ fontSize: 12, color: t.td }}>
+              {mamScan.found ?? 0} found · {mamScan.possible ?? 0} possible · {mamScan.not_found ?? 0} not on MAM
+              {(mamScan.errors ?? 0) > 0 ? ` · ${mamScan.errors} error${mamScan.errors === 1 ? "" : "s"}` : ""}
+            </div>
+          </div>
+        </div>
+      ) : null}
       {/* Sticky sub-header — two rows */}
       <div
         className="bp-sticky"

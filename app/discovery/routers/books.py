@@ -9,6 +9,7 @@ The shared SELECT fragment at the top of this file pre-aggregates
 visible series counts so list endpoints don't fire one correlated
 COUNT subquery per row — see `_SERIES_TOTAL_JOIN` for the rationale.
 """
+import asyncio
 import json
 import logging
 import re
@@ -980,6 +981,14 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
     with the same numeric id (Mark's UAT canary 2026-05-07: same-id
     cross-library data corruption pattern). Frontends operating on
     cross-library selections must pass slug.
+
+    Runs as a background asyncio task tracked through
+    `state._mam_scan_task` / `state._mam_scan_progress` so the unified
+    Dashboard scan widget shows live progress and the Stop button can
+    cancel mid-run. UAT 2026-05-11 canary: previously the endpoint
+    blocked the HTTP request for the entire scan duration AND never
+    registered with the global progress state — so 47-book bulk
+    scans were invisible everywhere except the Logs tab.
     """
     from app.config import load_settings
     from app.discovery.sources.mam import check_book as mam_check_book, _resolve_mam_languages
@@ -997,83 +1006,122 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
         return {"error": "MAM scanning is disabled — enable it in Settings"}
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
+    if state._mam_scan_task and not state._mam_scan_task.done():
+        return {"error": "A MAM scan is already running"}
 
-    db = await get_db(slug)
+    # Pre-fetch book rows + resolve scan settings BEFORE spawning the
+    # task so we can return total count + reject early on missing IDs.
+    db_pre = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
-        rows = await (await db.execute(
+        rows = await (await db_pre.execute(
             f"SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id "
             f"WHERE b.id IN ({placeholders})",
             book_ids,
         )).fetchall()
         if not rows:
             return {"error": "No matching books found"}
-
-        delay = s.get("rate_mam", 2)
-        # content_type routes the bulk scan through the ebook or
-        # audiobook MAM category. Prefer the requested library's
-        # content_type over the active when slug is set, so a sidebar
-        # rescan on an audiobook from a cross-library view doesn't
-        # search MAM's ebook category.
-        if slug:
-            lib_ct = next(
-                (l.get("content_type") for l in state._discovered_libraries
-                 if l.get("slug") == slug),
-                None,
-            )
-            ct = lib_ct or "ebook"
-        else:
-            from app.discovery.routers.mam import _active_content_type
-            ct = _active_content_type()
-        format_priority = s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority")
-        token = await _get_mam_token()
-        lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
-        stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
-        results = []
-
-        from app.discovery.cover_phash import ensure_cover_phash
-        for row in rows:
-            bid, btitle, aname = row["id"], row["title"], row["name"]
-            try:
-                seshat_phash = await ensure_cover_phash(db, bid, token=token)
-                check = await mam_check_book(token, btitle, aname, format_priority, delay, lang_ids=lang_ids, content_type=ct, seshat_cover_phash=seshat_phash)
-            except Exception as e:
-                logger.error(f"Bulk MAM scan error on book {bid} ({btitle[:40]}): {e}")
-                stats["errors"] += 1
-                continue
-            # Stamp mam_last_scanned_at on successful scans only — see
-            # scan_books_batch for the auth_error-skip rationale.
-            await db.execute("""
-                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                       mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?,
-                       mam_is_bundle=?,
-                       mam_last_scanned_at=CASE
-                           WHEN ? = 'auth_error' THEN mam_last_scanned_at
-                           ELSE ?
-                       END
-                WHERE id=?
-            """, (
-                check["mam_url"], check["status"], check["mam_formats"],
-                check["mam_torrent_id"],
-                1 if check["mam_has_multiple"] else 0,
-                1 if check.get("mam_my_snatched") else 0,
-                1 if check.get("mam_is_bundle") else 0,
-                check["status"],
-                time.time(),
-                bid,
-            ))
-            stats["scanned"] += 1
-            if check["status"] == "found":
-                stats["found"] += 1
-            elif check["status"] == "possible":
-                stats["possible"] += 1
-            elif check["status"] == "not_found":
-                stats["not_found"] += 1
-            results.append({"id": bid, "status": check["status"], "match_pct": check.get("match_pct")})
-        await db.commit()
-        return {"status": "complete", **stats, "results": results}
+        # Snapshot the rows now so the background task doesn't need
+        # to hold a DB handle across the whole scan.
+        book_rows = [(r["id"], r["title"], r["name"]) for r in rows]
     finally:
-        await db.close()
+        await db_pre.close()
+
+    delay = s.get("rate_mam", 2)
+    # content_type routes the bulk scan through the ebook or
+    # audiobook MAM category. Prefer the requested library's
+    # content_type over the active when slug is set, so a sidebar
+    # rescan on an audiobook from a cross-library view doesn't
+    # search MAM's ebook category.
+    if slug:
+        lib_ct = next(
+            (l.get("content_type") for l in state._discovered_libraries
+             if l.get("slug") == slug),
+            None,
+        )
+        ct = lib_ct or "ebook"
+    else:
+        from app.discovery.routers.mam import _active_content_type
+        ct = _active_content_type()
+    format_priority = s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority")
+    token = await _get_mam_token()
+    lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
+
+    state._mam_scan_progress = {
+        "running": True, "scanned": 0, "total": len(book_rows),
+        "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+        "current_book": "", "current_library": slug or "",
+        "status": "scanning", "type": "books_bulk",
+    }
+
+    async def _do_scan():
+        from app.discovery.cover_phash import ensure_cover_phash
+        bdb = await get_db(slug)
+        try:
+            for bid, btitle, aname in book_rows:
+                if not state._mam_scan_progress.get("running"):
+                    state._mam_scan_progress.update({"status": "cancelled"})
+                    break
+                # Surface the title BEFORE the network call so the
+                # widget shows what we're waiting on, not what we just
+                # finished.
+                state._mam_scan_progress["current_book"] = btitle[:60]
+                try:
+                    seshat_phash = await ensure_cover_phash(bdb, bid, token=token)
+                    check = await mam_check_book(
+                        token, btitle, aname, format_priority, delay,
+                        lang_ids=lang_ids, content_type=ct,
+                        seshat_cover_phash=seshat_phash,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"Bulk MAM scan error on book {bid} ({btitle[:40]}): {e}")
+                    state._mam_scan_progress["errors"] += 1
+                    state._mam_scan_progress["scanned"] += 1
+                    continue
+                # Stamp mam_last_scanned_at on successful scans only — see
+                # scan_books_batch for the auth_error-skip rationale.
+                await bdb.execute("""
+                    UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                           mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?,
+                           mam_is_bundle=?,
+                           mam_last_scanned_at=CASE
+                               WHEN ? = 'auth_error' THEN mam_last_scanned_at
+                               ELSE ?
+                           END
+                    WHERE id=?
+                """, (
+                    check["mam_url"], check["status"], check["mam_formats"],
+                    check["mam_torrent_id"],
+                    1 if check["mam_has_multiple"] else 0,
+                    1 if check.get("mam_my_snatched") else 0,
+                    1 if check.get("mam_is_bundle") else 0,
+                    check["status"],
+                    time.time(),
+                    bid,
+                ))
+                state._mam_scan_progress["scanned"] += 1
+                st = check["status"]
+                if st in ("found", "possible", "not_found"):
+                    state._mam_scan_progress[st] += 1
+            await bdb.commit()
+            state._mam_scan_progress.update({
+                "running": False, "status": "complete", "current_book": "",
+            })
+        except asyncio.CancelledError:
+            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
+            raise
+        except Exception as e:
+            logger.error(f"Bulk MAM scan failed: {e}", exc_info=True)
+            state._mam_scan_progress.update({
+                "running": False, "status": f"error: {e}", "current_book": "",
+            })
+        finally:
+            await bdb.close()
+
+    state._mam_scan_task = asyncio.create_task(_do_scan())
+    return {"status": "started", "total": len(book_rows)}
 
 
 @router.delete("/books/{bid}")
