@@ -2010,11 +2010,33 @@ async def check_book(
         # candidates (Raw V, Raw VI, etc.); for Right of Retribution 2
         # (orig vol=2), drop candidates with mismatched volumes outright.
         # Imported lazily to avoid a hard import dep at module load.
-        from app.metadata.scoring import _extract_volume as _vol_extract
+        from app.metadata.scoring import (
+            _extract_volume as _vol_extract,
+            _extract_volume_range as _vol_range_extract,
+        )
         orig_vol = _vol_extract(title)
         for m in matches:
             cand_vol = _vol_extract(m["mam_title"])
-            if cand_vol is not None and orig_vol is not None and cand_vol != orig_vol:
+            cand_range = _vol_range_extract(m["mam_title"])
+            if (
+                orig_vol is not None
+                and cand_range is not None
+                and cand_range[0] <= orig_vol <= cand_range[1]
+            ):
+                # Strong positive signal: the candidate is a range bundle
+                # whose extent COVERS the searched volume. `_extract_volume`
+                # returns None for ranges (deliberate range gate), which
+                # would otherwise leave this candidate to fall into the
+                # third branch's no-vol cap or just stay at its raw token-
+                # overlap score. +0.10 boost reflects the structural match.
+                # UAT canary: "Domestic Decay 2" search where bundle
+                # "Series request, Domestic Decay 2 - 5" was outscored
+                # (0.62) by single-Bk1 "Domestic Decay" (capped 0.65).
+                # Boost pushes the correct range bundle to 0.72 — above
+                # promote and above the capped wrong sibling.
+                m["confidence"] = min(1.0, m["confidence"] + 0.10)
+                m["volume_range_match"] = True
+            elif cand_vol is not None and orig_vol is not None and cand_vol != orig_vol:
                 # Definitive: same series, different book.
                 m["confidence"] = 0.0
                 m["volume_mismatch"] = True
@@ -2713,15 +2735,27 @@ async def debug_check_book(
             # ORIGINAL `title` (not per-pass search_title) for volume
             # comparison so variant passes that strip volume markers
             # don't wrongly nuke the right candidate's confidence.
+            #   - Cand has range, orig vol within range → +0.10 boost
             #   - Both have keyword/extracted vol that DIFFER → conf=0
             #   - orig has no vol but cand does → -0.20 penalty
             #   - orig has vol >= 2 and cand has none → cap at 0.65
             #     (likely Bk1 surfaced for Bk2+ search via variant pass)
-            from app.metadata.scoring import _extract_volume as _vol_extract
+            from app.metadata.scoring import (
+                _extract_volume as _vol_extract,
+                _extract_volume_range as _vol_range_extract,
+            )
             orig_vol_dbg = _vol_extract(title)
             cand_vol_dbg = _vol_extract(mam_title)
+            cand_range_dbg = _vol_range_extract(mam_title)
             volume_disambig_note = None
             if (
+                orig_vol_dbg is not None
+                and cand_range_dbg is not None
+                and cand_range_dbg[0] <= orig_vol_dbg <= cand_range_dbg[1]
+            ):
+                confidence = min(1.0, confidence + 0.10)
+                volume_disambig_note = "volume_range_match"
+            elif (
                 cand_vol_dbg is not None and orig_vol_dbg is not None
                 and cand_vol_dbg != orig_vol_dbg
             ):
