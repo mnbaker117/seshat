@@ -6,6 +6,7 @@ Per-library databases live under DATA_DIR with filenames like
 `set_active_library` and read by `get_db` so every endpoint operates
 against the right database without passing the slug explicitly.
 """
+import asyncio
 import logging
 import re
 from collections import defaultdict
@@ -1282,6 +1283,28 @@ async def _dedupe_intra_author_series(db) -> int:
     return collapsed
 
 
+async def _run_cover_phash_backfill_background(slug=None) -> None:
+    """Background task: open a fresh DB connection + run cover_phash backfill.
+
+    Spawned via `asyncio.create_task` from `init_db` so the lifespan
+    isn't blocked. Opens its own connection because the caller's `db`
+    handle goes out of scope when init_db returns. Logs progress at
+    INFO; failures degrade silently to lazy compute via
+    `cover_phash.ensure_cover_phash` at MAM-scan time.
+    """
+    try:
+        from app.discovery.cover_phash import (
+            backfill_cover_phashes_from_paths,
+        )
+        bdb = await get_db(slug)
+        try:
+            await backfill_cover_phashes_from_paths(bdb)
+        finally:
+            await bdb.close()
+    except Exception as e:
+        _db_logger.warning(f"cover_phash backfill (background) failed: {e}")
+
+
 async def init_db(slug=None):
     """Initialize schema and run migrations for a library database.
 
@@ -1393,22 +1416,27 @@ async def init_db(slug=None):
 
         # ── Step 4.45: Backfill cover_phash from cover_path ─────────
         # Part C cover-image MAM URL verification needs each book's
-        # local cover hashed and stored once. File-based hashing is
-        # fast (Pillow + DCT pHash, ~ms per cover), so eager backfill
-        # of every Calibre cover_path is fine on startup. Idempotent —
-        # only touches rows with NULL cover_phash. Remote-fetched
-        # covers (ABS / source-discovered cover_url) populate lazily
-        # via `cover_phash.ensure_cover_phash` at MAM-scan time.
+        # local cover hashed and stored once. File hashing is ~ms per
+        # cover but Mark's library has 2855 books → 90s+ for the full
+        # pass. Run as a fire-and-forget background task so init_db
+        # returns immediately and the lifespan can complete its other
+        # startup steps (uvicorn won't bind until lifespan finishes).
+        # Books not yet backfilled get lazy-computed via
+        # `ensure_cover_phash` at MAM-scan time, so the only cost of
+        # deferring is that the very first scans after a fresh restart
+        # do per-book hashing inline — strictly better than a 90s
+        # webpage blackout.
         try:
             from app.discovery.cover_phash import (
                 backfill_cover_phashes_from_paths,
             )
-            await backfill_cover_phashes_from_paths(db)
+            asyncio.create_task(
+                _run_cover_phash_backfill_background(slug)
+            )
         except Exception as e:
-            # Backfill failure must not block startup — production
-            # cover verification gracefully degrades to text-only
-            # behavior when cover_phash is NULL.
-            _db_logger.warning(f"cover_phash backfill failed: {e}")
+            # Scheduling failure must not block startup — graceful
+            # degrade via lazy compute at scan time.
+            _db_logger.warning(f"cover_phash backfill scheduling failed: {e}")
 
         # ── Step 4.5: Backfill authors.normalized_name ─────────────
         # Post-migration, ensure every existing author row has a
