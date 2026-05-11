@@ -463,6 +463,22 @@ def _strip_subtitle(title: str) -> Optional[str]:
     for delim in SUBTITLE_DELIMITERS:
         if delim in title:
             return title.split(delim)[0].strip()
+    # Fallback: strip trailing parenthetical (Calibre's standard
+    # "<Book Title> (<Series Name> #<N>)" convention). UAT canary
+    # 2026-05-11: "Tower Mage 2 (The Nine Magics #2)" by David Burke
+    # surfaced "Tower Mage 2: A LitRPG Isekai Fantasy" with ts=0.57
+    # because pass 4 never fired (no subtitle delimiter detected,
+    # so the full Calibre title with parenthetical was used in
+    # every pass). Stripping the trailing `(...)` lets pass 4 search
+    # just "Tower Mage 2" → ts=high → text-promote via the regular
+    # path. Conservative — only matches end-of-title parens, won't
+    # touch mid-title parens like "Foo (Updated) 2" or stylized
+    # titles where the paren is part of the name.
+    m = re.search(r"\s*\([^)]*\)\s*$", title)
+    if m and m.start() > 0:
+        stripped = title[:m.start()].strip()
+        if len(stripped) >= 3:
+            return stripped
     return None
 
 

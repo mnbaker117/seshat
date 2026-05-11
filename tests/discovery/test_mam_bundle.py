@@ -783,3 +783,59 @@ class TestDebugDecisionFixF:
             is_bundle=False,
         )
         assert "would_promote_via_strong_text_anchor" not in decisions
+
+
+# ─── _strip_subtitle trailing-parenthetical fallback ─────────────
+#
+# UAT canary 2026-05-11 round 3: "Tower Mage 2 (The Nine Magics
+# #2)" by David Burke surfaced "Tower Mage 2: A LitRPG Isekai
+# Fantasy" with ts=0.57 because pass 4 (short title) never fired.
+# The cascade pass-list builder calls `_strip_subtitle` to derive
+# the short form; without a `:` / ` - ` / `|` delimiter it returned
+# None and pass 4 was skipped, leaving only pass 1/5 to search the
+# full Calibre title (parenthetical and all). The trailing-paren
+# fallback handles Calibre's standard "<Book> (<Series> #<N>)"
+# convention.
+
+
+class TestStripSubtitleParenFallback:
+    def test_calibre_format_paren_stripped(self):
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle(
+            "Tower Mage 2 (The Nine Magics #2)"
+        ) == "Tower Mage 2"
+
+    def test_simple_paren_year_stripped(self):
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle("Foundation (1951)") == "Foundation"
+
+    def test_subtitle_delimiter_takes_precedence(self):
+        # When BOTH a delimiter and a paren are present, the delimiter
+        # branch wins (stable behavior — same as before this change).
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle(
+            "Foo: A Subtitle (Series #1)"
+        ) == "Foo"
+
+    def test_paren_with_no_text_before_returns_none(self):
+        # Pathological: title is JUST a parenthetical. The m.start() > 0
+        # gate ensures we don't return empty.
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle("(only parens)") is None
+
+    def test_short_remainder_after_strip_returns_none(self):
+        # If stripping leaves < 3 chars, treat as not-stripped (avoids
+        # surfacing useless one/two-char "titles" to the cascade).
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle("Hi (a long parenthetical)") is None
+
+    def test_mid_title_paren_left_alone(self):
+        # Only end-of-title parens trigger the fallback — mid-title
+        # parens shouldn't be touched. Without delimiters, returns None.
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle("Foo (Updated) Bar") is None
+
+    def test_no_delimiter_no_paren_returns_none(self):
+        # Plain title with no subtitle markers — None as before.
+        from app.discovery.sources.mam import _strip_subtitle
+        assert _strip_subtitle("Foundation") is None
