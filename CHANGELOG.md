@@ -7,6 +7,200 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.6.0] — 2026-05-11
+
+Incremental library sync, non-blocking startup, Dismiss tentative
+action. Most Seshat container restarts no longer trigger a full
+library re-scan — Calibre and Audiobookshelf both gain
+`last_modified`/`updatedAt`-filtered incremental modes driven by a
+new per-library `sync_state` shape (last_mtime, last_sync_ts,
+last_full_sync_ts). For Mark's 2862-book Calibre + 132-item ABS
+library this turns a 30-60s startup wall into a sub-second one on
+day-to-day restarts. A 7-day safety net forces periodic full syncs;
+a recorded failure resets the state so a partial incremental can't
+leave drift in place.
+
+The startup sync itself moved off the lifespan's critical path — it
+runs as a supervised background task while FastAPI accepts requests
+immediately, and the frontend renders a sticky progress banner (or
+full-screen splash on first-ever boot) gated by a new
+`startup_complete` field on `/scan-status`.
+
+Two scheduler/display bugs adjacent to the sync work got bundled in:
+the per-library interval gate's processing-time drift was making
+configured 120m cadence behave as ~240m effective, and the "Last
+Sync N min ago" indicator was counting skipped ticks as completions.
+
+Dismiss action lands on the tentative torrent queue. Useful when an
+uploader posts duplicate format variants (MP3 + M4B) and the user
+wants one specific torrent without making a call about the author,
+or when the offered book doesn't interest the user but the author's
+other work might. Distinct from Reject (which queues the author for
+weekly review) and Approve (which trains to allowed) — Dismiss
+touches zero author tables.
+
+CodeQL alert #35 (py/polynomial-redos in `_strip_subtitle`) closed
+with a one-character regex anchor change.
+
+### Added — Sync state machinery
+
+- **`app/discovery/sync_state.py`** — per-library sync state with
+  five helpers (`migrate_settings`, `get_state`, `record_completion`,
+  `record_mtime_unchanged`, `record_failure`) and `resolve_threshold`
+  for the incremental vs full decision. Four mode constants:
+  `MODE_FULL_FIRST`, `MODE_FULL_WEEKLY`, `MODE_FULL_RECOVERY`,
+  `MODE_INCREMENTAL`.
+- **Migration** folds legacy `library_mtimes` into `library_sync_state`
+  on startup (idempotent). Legacy `library_mtimes` continues to be
+  written as a mirror for one release so a downgrade still works.
+- **`record_failure`** zeros `last_sync_ts` on incremental crashes so
+  the next sync escalates to full — prevents drift from a
+  half-applied incremental.
+
+### Added — Calibre incremental sync
+
+- **`_read_calibre_db(last_modified_threshold=...)`** filters at the
+  SQLite level via `julianday()` on Calibre's `books.last_modified`.
+  `julianday()` normalizes Calibre's inconsistent timestamp formats
+  (`2026-05-11 15:13:27.887295+00:00` vs `2026-05-10 19:57:29.995709`
+  — both shapes observed in Mark's live library).
+- **`_read_calibre_ids`** — full-library ID-only read for delete
+  detection. Incremental's `last_modified > threshold` filter misses
+  deletes; this cheap read diffs against the discovery DB's known
+  `calibre_id` set.
+- **`_read_calibre_series_authors`** — shallow full read of
+  (book_id, authors\[id\], series\[id\]) for Pass 2's multi-author
+  series detection. Required because incremental's filtered book set
+  doesn't include every author of a shared Calibre series — without
+  this Halo books contributed by different authors would be
+  misclassified per-author.
+- **`sync_calibre` orchestration** — resolves mode, dual-reads in
+  incremental mode, pre-loads `author_map` from DB so authors only
+  on un-modified books are still resolvable, returns
+  `{"mode": "full" | "incremental", ...}`.
+
+### Added — ABS incremental sync
+
+- **`sync_audiobookshelf`** mirrors the Calibre flow with
+  client-side `updatedAt` filtering of the (small) ABS item set.
+  Pass 1+2 still iterate the full set (author / per-author series
+  upserts are cheap and idempotent); only Pass 3's book-row writes
+  are filtered.
+- **Pass 4 prune uses raw item-id set** instead of flattened books.
+  Closes a latent bug where items that fail `_flatten_item` (missing
+  title or author) used to vanish from the discovery DB on the next
+  sync even though they still existed in ABS.
+
+### Added — ABS edit detection (`newest_item_updatedAt`)
+
+- ABS `get_mtime` composite extended to
+  `f"{lastUpdate}:{itemCount}:{newestUpdatedAt}"`. The third
+  component catches metadata + cover edits that don't bump
+  `library.lastUpdate` (covers and metadata live in ABS's
+  `/metadata` folder, which the library watcher doesn't see) and
+  don't change `itemCount`. Without this signal Seshat's scheduled
+  sync silently missed every ABS metadata edit. Verified 2026-05-11
+  against Mark's live library: tag edit, cover replace, external
+  `calibredb set_metadata`, and KFX→EPUB conversion all bump the
+  relevant timestamps.
+- Single round trip via `list_items(limit=1, sort="updatedAt",
+  desc=True)` returns both `total` and the newest item's
+  `updatedAt`.
+- Self-heals across the v2.5 → v2.6 composite-shape boundary.
+
+### Added — Non-blocking startup + progress UI
+
+- **`_run_startup_sync` supervised task** in `app/main.py`. Lifespan
+  spawns the task and returns immediately; FastAPI accepts requests
+  while sync runs in the background. `state._startup_sync_complete`
+  flips True after the first pass through every library.
+- **`/api/discovery/scan-status`** gains `startup_complete: bool` and
+  `first_boot: bool`. `first_boot` is derived from the persisted
+  `library_sync_state` (any library with `last_full_sync_ts > 0`
+  means we've synced before), so the splash gate stays correct
+  across upgrade-restarts even though `_library_sync_progress` is
+  in-memory.
+- **`LibrarySyncBanner` component** — full-screen splash on
+  first-ever boot, sticky banner under the navbar on every
+  subsequent sync. Polls `/scan-status` every 3s, auto-stops when
+  nothing's running and startup is complete.
+
+### Added — Dismiss tentative action
+
+- **New `dismissed` status** in `tentative_storage` (distinct from
+  `rejected` for clean audit).
+- **`POST /api/v1/tentative/{id}/dismiss`** and
+  **`POST /api/v1/tentative/bulk/dismiss`**. Drop a tentative
+  torrent from the queue without touching any author table.
+- **Dismiss buttons** on both desktop `TentativePage` and
+  `MobileTentativePage`, per-row plus bulk-selected variants.
+
+### Added — Cross-list cleanup on approve/reject
+
+- **Approve** now removes the author from `authors_tentative_review`
+  after training to allowed. Previously an author who had been
+  rejected then later approved sat in BOTH lists, causing the
+  weekly review UI to keep prompting about a settled author.
+- **Reject** now skips adding to `authors_tentative_review` if the
+  author is already on `authors_allowed`. A one-off "no thanks to
+  this specific book" shouldn't drag a previously-validated author
+  back into review.
+
+### Added — mtime-skip backfill
+
+- New `record_mtime_unchanged` helper in `sync_state.py`. When an
+  mtime check confirms the library is current and the timestamps
+  are still zero from the migration, backfill both to NOW so the
+  next real sync goes incremental rather than falling back to
+  `MODE_FULL_FIRST`. Conservative — never overwrites existing
+  non-zero timestamps.
+
+### Changed — Scheduler / display
+
+- **Interval-gate drift slack** (5 min) in
+  `app/discovery/scheduled_jobs.py`. The per-library interval gate
+  used to compare `(now - last_at) < effective_interval` strictly,
+  but `last_at` stamps at *completion* (which lags the APScheduler
+  tick by processing time). Configured 120m therefore behaved as
+  ~240m effective when both intervals matched and a real sync ran
+  on the prior tick. Adding 5-min slack lets the gate honor the
+  configured cadence without weakening longer per-library
+  overrides.
+- **`Last Sync` indicator** now tracks real completions only.
+  Skipped ticks bump a separate `last_check_at` field; the
+  Command Center can show "scheduler alive, last checked X ago"
+  without lying about when a sync actually ran. Previously every
+  skip stamped `completed_at = now`, producing "Last Sync 3 min
+  ago" displays when the last real sync was 40 hours ago.
+
+### Fixed — Security
+
+- **CodeQL #35 — py/polynomial-redos** in
+  `app/discovery/sources/mam.py`'s `_strip_subtitle`. The trailing-
+  parenthetical regex `\s*\([^)]*\)\s*$` overlapped two greedy
+  quantifiers (whitespace can be matched by either the leading
+  `\s*` or `[^)]*`), giving the engine a polynomial-time
+  backtracking path on pathological input. Dropped the leading
+  `\s*`; output unchanged on every realistic input because the
+  follow-up `.strip()` already trimmed the gap.
+
+### Tests
+
+39+ new across:
+
+- `tests/discovery/test_sync_state.py` (20 tests — 17 helpers + 3
+  backfill)
+- `tests/discovery/test_calibre_sync_incremental.py` (8 tests)
+- `tests/discovery/test_abs_sync_incremental.py` (5 tests)
+- `tests/routers/test_tentative_endpoints.py` (8 tests — dismiss +
+  cross-list cleanup)
+- `tests/library_apps/test_audiobookshelf.py` (1 new + 2 updated
+  for the 3-field composite)
+
+Suite: **2014 passing, 7 skipped.** Up from 1996 / 7 at v2.5.0.
+
+---
+
 ## [2.5.0] — 2026-05-11
 
 MAM URL confidence — v2.4 follow-up arc. Across two days, ~458
