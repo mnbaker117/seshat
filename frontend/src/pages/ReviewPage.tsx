@@ -31,6 +31,13 @@ interface ReviewItem {
   staged_path: string;
   book_filename: string;
   book_format: string | null;
+  // v2.7.0 bundle awareness — siblings sharing bundle_group_id with
+  // bundle_total > 1 represent one bundle/collection torrent fanned
+  // out into N reviewable works. UI groups them under a wrapper card.
+  bundle_group_id?: string | null;
+  bundle_index?: number;
+  bundle_total?: number;
+  bundle_parent_grab_id?: number | null;
   metadata: Record<string, unknown> & {
     title?: string;
     author?: string;
@@ -268,19 +275,91 @@ function DesktopReviewPage() {
         </Section>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {items.map((item) => (
-            <ReviewCard
-              key={item.id}
-              item={item}
-              busy={busyId === item.id}
-              onApprove={(meta) => approve(item.id, meta)}
-              onSave={(meta) => saveEdits(item.id, meta)}
-              onReEnrich={(meta) => reEnrich(item.id, meta)}
-              onReject={() => reject(item.id)}
-            />
-          ))}
+          {groupBundles(items).map((group) =>
+            group.length === 1 ? (
+              <ReviewCard
+                key={group[0].id}
+                item={group[0]}
+                busy={busyId === group[0].id}
+                onApprove={(meta) => approve(group[0].id, meta)}
+                onSave={(meta) => saveEdits(group[0].id, meta)}
+                onReEnrich={(meta) => reEnrich(group[0].id, meta)}
+                onReject={() => reject(group[0].id)}
+              />
+            ) : (
+              <BundleWrapper key={group[0].bundle_group_id} items={group}>
+                {group.map((item) => (
+                  <ReviewCard
+                    key={item.id}
+                    item={item}
+                    busy={busyId === item.id}
+                    bundlePosition={{ index: (item.bundle_index ?? 0) + 1, total: item.bundle_total ?? group.length }}
+                    onApprove={(meta) => approve(item.id, meta)}
+                    onSave={(meta) => saveEdits(item.id, meta)}
+                    onReEnrich={(meta) => reEnrich(item.id, meta)}
+                    onReject={() => reject(item.id)}
+                  />
+                ))}
+              </BundleWrapper>
+            )
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Bundle grouping helpers ─────────────────────────────────
+//
+// Reviews from the same bundle/collection torrent come back from
+// the API ordered by `created_at, bundle_group_id, bundle_index` so
+// siblings are already adjacent. groupBundles() consolidates each
+// contiguous run with the same group id into a sub-array; single-
+// book rows (bundle_total <= 1 or no group id) end up in singleton
+// arrays. The render loop above branches on group length.
+
+function groupBundles(items: ReviewItem[]): ReviewItem[][] {
+  const out: ReviewItem[][] = [];
+  for (const item of items) {
+    const isBundleChild = (item.bundle_total ?? 1) > 1 && item.bundle_group_id;
+    if (isBundleChild && out.length > 0) {
+      const last = out[out.length - 1];
+      if (last[0].bundle_group_id === item.bundle_group_id) {
+        last.push(item);
+        continue;
+      }
+    }
+    out.push([item]);
+  }
+  return out;
+}
+
+function BundleWrapper({ items, children }: { items: ReviewItem[]; children: React.ReactNode }) {
+  const theme = useTheme();
+  const total = items[0].bundle_total ?? items.length;
+  return (
+    <div
+      style={{
+        border: `1px dashed ${theme.accent}55`,
+        borderRadius: 14,
+        padding: 12,
+        background: theme.accent + "08",
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10,
+        fontSize: 12, fontWeight: 700, color: theme.accent,
+        letterSpacing: 0.3, textTransform: "uppercase",
+      }}>
+        <span>📚 Bundle</span>
+        <span style={{ color: theme.textDim, fontWeight: 500, textTransform: "none", letterSpacing: 0 }}>
+          {total} books from one torrent — review or reject each independently
+        </span>
+      </div>
+      {children}
     </div>
   );
 }
@@ -292,6 +371,7 @@ function ReviewCard({
   onSave,
   onReEnrich,
   onReject,
+  bundlePosition,
 }: {
   item: ReviewItem;
   busy: boolean;
@@ -299,6 +379,7 @@ function ReviewCard({
   onSave: (metadata: Record<string, unknown>) => void;
   onReEnrich: (metadata: Record<string, unknown>) => Promise<boolean>;
   onReject: () => void;
+  bundlePosition?: { index: number; total: number };
 }) {
   const theme = useTheme();
   const m = item.metadata;
@@ -461,6 +542,17 @@ function ReviewCard({
             <h3 style={{ fontSize: 17, fontWeight: 700, color: theme.text, wordBreak: "break-word" }}>
               {title}
             </h3>
+          )}
+          {bundlePosition && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+              padding: "2px 7px", borderRadius: 99,
+              background: theme.accent + "22", color: theme.accent,
+              border: `1px solid ${theme.accent}55`,
+              letterSpacing: 0.4,
+            }}>
+              {bundlePosition.index}/{bundlePosition.total}
+            </span>
           )}
           {isAudiobookFormat && (
             <span style={{

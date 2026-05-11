@@ -44,6 +44,14 @@ class ReviewItem(BaseModel):
     created_at: str
     decided_at: Optional[str]
     decision_note: Optional[str]
+    # v2.7.0 bundle awareness. Single-book grabs come through with
+    # bundle_total=1 / bundle_index=0 / bundle_parent_grab_id=None
+    # — UI treats them as standalone cards. Bundles surface multiple
+    # rows sharing one bundle_group_id; the UI groups them visually.
+    bundle_group_id: Optional[str] = None
+    bundle_index: int = 0
+    bundle_total: int = 1
+    bundle_parent_grab_id: Optional[int] = None
 
 
 class ReviewListResponse(BaseModel):
@@ -97,6 +105,10 @@ def _to_item(row: review_storage.ReviewRow) -> ReviewItem:
         created_at=row.created_at,
         decided_at=row.decided_at,
         decision_note=row.decision_note,
+        bundle_group_id=row.bundle_group_id,
+        bundle_index=row.bundle_index,
+        bundle_total=row.bundle_total,
+        bundle_parent_grab_id=row.bundle_parent_grab_id,
     )
 
 

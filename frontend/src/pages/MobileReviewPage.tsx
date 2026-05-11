@@ -23,6 +23,13 @@ interface ReviewItem {
   staged_path: string;
   book_filename: string;
   book_format: string | null;
+  // v2.7.0 bundle awareness — see ReviewPage.tsx for the desktop
+  // grouping wrapper. On mobile each sibling is its own swipeable
+  // card with a 1/3-style badge; the user reviews them sequentially.
+  bundle_group_id?: string | null;
+  bundle_index?: number;
+  bundle_total?: number;
+  bundle_parent_grab_id?: number | null;
   metadata: Record<string, unknown> & {
     title?: string;
     author?: string;
@@ -321,6 +328,24 @@ function ReviewCard({
         borderRadius: 12,
       }}
     >
+      {/* Bundle indicator — only rendered for bundle children
+          (bundle_total >= 2). Single-book grabs (the common case)
+          show no extra chrome. */}
+      {(item.bundle_total ?? 1) > 1 && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "6px 10px",
+          background: t.accent + "15",
+          border: `1px solid ${t.accent}44`,
+          borderRadius: 8,
+          fontSize: 11, fontWeight: 600, color: t.accent,
+          letterSpacing: 0.3,
+        }}>
+          <span>📚</span>
+          <span>Bundle {(item.bundle_index ?? 0) + 1} of {item.bundle_total}</span>
+          <span style={{ color: t.tg, fontWeight: 400 }}>· grab #{item.grab_id}</span>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 12 }}>
         {/* Cover */}
         <div
