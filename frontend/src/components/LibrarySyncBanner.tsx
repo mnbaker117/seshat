@@ -26,6 +26,7 @@ import type { ScanProgress } from "../types";
 interface ScanStatusResponse {
   scans: ScanProgress[];
   startup_complete: boolean;
+  first_boot: boolean;
 }
 
 const POLL_MS = 3000;
@@ -70,10 +71,14 @@ export function LibrarySyncBanner() {
   if (!status) return null;
   const libraries = (status.scans || []).filter(s => s.kind === "library");
   const running = libraries.filter(s => s.running);
-  const anyEverCompleted = libraries.some(s => !!s.completed_at);
-  // Splash gate: pre-first-sync (startup_complete=false) with no
-  // library having ever finished a real sync.
-  const splashMode = !status.startup_complete && !anyEverCompleted;
+  // Splash gate: only fire when the backend confirms no library has
+  // ever completed a full sync. `_library_sync_progress` is in-memory
+  // and resets on container restart, so we can't rely on a
+  // `completed_at` check alone — that would falsely splash existing
+  // installs on every upgrade-restart until the first new sync
+  // finishes. Backend `first_boot` reads `last_full_sync_ts` from the
+  // persisted `library_sync_state` instead.
+  const splashMode = status.first_boot && !status.startup_complete;
   // Banner gate: something is actively running.
   if (!splashMode && running.length === 0) return null;
 

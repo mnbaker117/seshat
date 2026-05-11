@@ -498,15 +498,29 @@ async def scan_status():
         if proj.get("kind") != "library" and proj["status"] == "idle" and proj["type"] == "none":
             continue
         out.append(proj)
-    # `startup_complete` gates the frontend's first-boot splash. Flips
+    # `startup_complete` gates the frontend's progress banner. Flips
     # True once the supervised startup-sync task finishes its first
     # pass through every library (regardless of per-library outcome).
     # Stays False on libraries-less setups too — the lifespan never
     # spawns the task, so a freshly-installed Seshat shows the
     # SetupWizard rather than this splash anyway.
+    #
+    # `first_boot` is the splash-mode gate: True only when NO library
+    # has a non-zero `last_full_sync_ts` (i.e., we genuinely have no
+    # prior sync data). Persisted in `library_sync_state` so it
+    # survives container restarts — without this gate, the very first
+    # restart on a Seshat upgrade would erroneously trigger the
+    # full-screen splash because `_library_sync_progress` is in-memory
+    # state that resets at boot.
+    sync_state_dict = (load_settings().get("library_sync_state") or {})
+    first_boot = not any(
+        (entry or {}).get("last_full_sync_ts") or 0
+        for entry in sync_state_dict.values()
+    )
     return {
         "scans": out,
         "startup_complete": bool(state._startup_sync_complete),
+        "first_boot": first_boot,
     }
 
 
