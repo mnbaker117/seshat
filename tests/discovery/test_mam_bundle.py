@@ -494,17 +494,35 @@ class TestAuthorMatchPerAuthorSubset:
             "Pierce Scott", self._result(big),
         ) is False
 
-    def test_abbreviated_mam_author_via_reverse_subset(self):
-        # MAM upload sometimes lists only the surname or first name —
-        # the reverse-subset branch keeps these legitimate matches
-        # working (m_tok ⊆ cal_tok).
+    def test_surname_only_mam_author_via_reverse_subset(self):
+        # MAM upload sometimes lists only the SURNAME — reverse-subset
+        # branch accepts this legitimate match (m_tok ⊆ cal_tok AND
+        # cal_surname is in m_tok).
         from app.discovery.sources.mam import _author_match
         assert _author_match(
             "Pierce Scott", self._result(["Scott"]),
         ) is True
+
+    def test_surname_collision_first_name_no_match(self):
+        # UAT round 5 canary: "M J Scott" surfaced for "Scott Reintgen"
+        # because both share "scott" — but "scott" is the SURNAME of
+        # the MAM author and the FIRST NAME of the search author. The
+        # surname guard rejects this (search surname "reintgen" is
+        # NOT in m_tok={scott}).
+        from app.discovery.sources.mam import _author_match
+        assert _author_match(
+            "Scott Reintgen", self._result(["M J Scott"]),
+        ) is False
+
+    def test_first_name_only_mam_lost_to_surname_guard(self):
+        # Trade-off documented in the docstring: first-name-only MAM
+        # uploads no longer match via reverse-subset. Real fiction
+        # uploads almost always have the full author name; the
+        # surname-collision FP class is more common.
+        from app.discovery.sources.mam import _author_match
         assert _author_match(
             "John Smith", self._result(["John"]),
-        ) is True
+        ) is False
 
     def test_single_letter_initial_filtered(self):
         # "Michael R. Hicks" tokens (with periods stripped) are
@@ -545,13 +563,11 @@ class TestAuthorMatchPerAuthorSubset:
             "Pierce Scott", self._result(["Brandon Sanderson"]),
         ) is False
 
-    def test_first_name_only_match(self):
-        # Edge case: MAM upload has only the first name, search has
-        # full name. Reverse-subset catches it.
-        from app.discovery.sources.mam import _author_match
-        assert _author_match(
-            "Brandon Sanderson", self._result(["Brandon"]),
-        ) is True
+    # NOTE: a prior test_first_name_only_match (Brandon vs Brandon
+    # Sanderson) was removed in UAT round 5 — the surname guard
+    # added to reverse-subset matching now rejects first-name-only
+    # MAM uploads. See test_first_name_only_mam_lost_to_surname_guard
+    # above for the documented trade-off.
 
 
 # ─── _scoped_filename_search hyphen-digit normalization ────────────

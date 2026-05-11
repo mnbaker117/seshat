@@ -778,19 +778,37 @@ def _author_match(calibre_authors: str, mam_result: dict) -> bool:
 
     Per-author subset matching: at least ONE individual mam_author
     must contain ALL of our search-author tokens (or vice versa for
-    the abbreviated case). UAT 2026-05-11 canary: previously this
-    UNIONED tokens across every listed author before comparing, so
-    a 59-author mega-collection (e.g. "Fantasy-Scifi Authors Starting
-    With T") that happened to contain a "Tamora Pierce" would match
-    a search for "Pierce Scott" via the single shared token "pierce".
-    Per-author subset rules out the cross-author accidental overlap
-    while still accepting:
+    the abbreviated case, with a surname guard). UAT 2026-05-11
+    canary: previously UNIONED tokens across every listed author
+    before comparing, so a 59-author mega-collection (e.g. "Fantasy-
+    Scifi Authors Starting With T") that contained a "Tamora Pierce"
+    would match a search for "Pierce Scott" via the single shared
+    token "pierce". Per-author subset rules out the cross-author
+    accidental overlap.
+
+    REVERSE-SUBSET SURNAME GUARD: when the MAM author looks
+    abbreviated (m_tok ⊂ cal_tok), require the cal-side SURNAME
+    (last meaningful token) to be present in m_tok. UAT round 5
+    canary: "Blood Sworn" by "Scott Reintgen" matched MAM author
+    "M J Scott" because m_tok={scott} ⊂ cal_tok={scott, reintgen}
+    — first-name vs surname collision on a common name. The
+    surname guard rejects this (cal_surname="reintgen" not in
+    {scott}) while still accepting legitimate abbreviated cases
+    like "Scott" matching "Pierce Scott" (cal_surname="scott"
+    is in {scott}).
+
+    Accepts:
       - exact matches: "Pierce Scott" vs "Pierce Scott"
-      - abbreviated MAM uploads: "Pierce Scott" vs ["Scott"]
-        (reverse subset: m_tok ⊆ cal_tok)
-      - first-name-only MAM uploads: "John Smith" vs ["John"]
+      - surname-only MAM uploads: "Pierce Scott" vs ["Scott"]
       - middle-initial differences: "Michael R Hicks" vs
         "Michael Hicks" (single-letter "R" filtered)
+
+    Loses (rare, accepted trade-off):
+      - first-name-only MAM uploads: "Brandon Sanderson" vs
+        ["Brandon"] no longer matches via reverse-subset (cal
+        surname "sanderson" not in {brandon}). Real fiction MAM
+        uploads almost always have the full author name; the
+        surname-collision FP class is more common.
 
     Empty mam_authors → False (UAT 2026-05-11 round 2: previously
     defaulted to True as a permissive Cohort-C-style escape hatch
@@ -813,19 +831,27 @@ def _author_match(calibre_authors: str, mam_result: dict) -> bool:
     if not mam_authors:
         return False
 
-    def tokens(s: str) -> set:
+    def tokens_list(s: str) -> list:
+        # Order-preserving so we can identify the cal-side surname.
         s = re.sub(r'\.', '', s.lower())
-        return {t for t in re.findall(r'[a-z]+', s) if len(t) > 1}
+        return [t for t in re.findall(r'[a-z]+', s) if len(t) > 1]
 
-    cal_tok = tokens(calibre_authors)
+    cal_tok_list = tokens_list(calibre_authors)
+    cal_tok = set(cal_tok_list)
     if not cal_tok:
         return True
+    cal_surname = cal_tok_list[-1]  # last meaningful token
 
     for name in mam_authors:
-        m_tok = tokens(name)
+        m_tok = set(tokens_list(name))
         if not m_tok:
             continue
-        if cal_tok.issubset(m_tok) or m_tok.issubset(cal_tok):
+        # Forward subset: all cal tokens in m → exact-or-superset match.
+        if cal_tok.issubset(m_tok):
+            return True
+        # Reverse subset (abbreviated MAM): require cal surname in m
+        # to avoid first-name-vs-surname collisions on common names.
+        if m_tok.issubset(cal_tok) and cal_surname in m_tok:
             return True
     return False
 
