@@ -1011,11 +1011,19 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
 
     # Pre-fetch book rows + resolve scan settings BEFORE spawning the
     # task so we can return total count + reject early on missing IDs.
+    # series JOIN is required so check_book gets series_name → Fix E
+    # (series-bundle promote) can fire. UAT 2026-05-11 round 4 caught
+    # the gap: 17 of 27 expected promotes never fired because this
+    # path dropped series_name. Same fix needed in the other manual-
+    # scan callers (mam.py:scan-book, mam.py:scan-author,
+    # authors.py:scan-mam).
     db_pre = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
         rows = await (await db_pre.execute(
-            f"SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id "
+            f"SELECT b.id, b.title, a.name, s.name AS series_name "
+            f"FROM books b JOIN authors a ON b.author_id=a.id "
+            f"LEFT JOIN series s ON b.series_id = s.id "
             f"WHERE b.id IN ({placeholders})",
             book_ids,
         )).fetchall()
@@ -1023,7 +1031,10 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
             return {"error": "No matching books found"}
         # Snapshot the rows now so the background task doesn't need
         # to hold a DB handle across the whole scan.
-        book_rows = [(r["id"], r["title"], r["name"]) for r in rows]
+        book_rows = [
+            (r["id"], r["title"], r["name"], r["series_name"] or "")
+            for r in rows
+        ]
     finally:
         await db_pre.close()
 
@@ -1058,7 +1069,7 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
         from app.discovery.cover_phash import ensure_cover_phash
         bdb = await get_db(slug)
         try:
-            for bid, btitle, aname in book_rows:
+            for bid, btitle, aname, bseries in book_rows:
                 if not state._mam_scan_progress.get("running"):
                     state._mam_scan_progress.update({"status": "cancelled"})
                     break
@@ -1070,7 +1081,8 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
                     seshat_phash = await ensure_cover_phash(bdb, bid, token=token)
                     check = await mam_check_book(
                         token, btitle, aname, format_priority, delay,
-                        lang_ids=lang_ids, content_type=ct,
+                        lang_ids=lang_ids, series_name=bseries,
+                        content_type=ct,
                         seshat_cover_phash=seshat_phash,
                     )
                 except asyncio.CancelledError:

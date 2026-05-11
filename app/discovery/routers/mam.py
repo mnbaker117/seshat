@@ -735,13 +735,20 @@ async def mam_scan_single_book(book_id: int, slug: str | None = Query(None)):
 
     db = await get_db(slug)
     try:
+        # series JOIN required so series_name reaches check_book →
+        # Fix E (series-bundle promote) can fire. UAT 2026-05-11
+        # round 4 — see books.py:scan_books_mam comment for full
+        # rationale.
         rows = await db.execute_fetchall(
-            "SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id WHERE b.id=?",
+            "SELECT b.id, b.title, a.name, s.name AS series_name "
+            "FROM books b JOIN authors a ON b.author_id=a.id "
+            "LEFT JOIN series s ON b.series_id = s.id "
+            "WHERE b.id=?",
             (book_id,),
         )
         if not rows:
             return {"error": f"Book {book_id} not found"}
-        _, title, author = rows[0]
+        _, title, author, series = rows[0]
 
         # Prefer requested library's content_type when slug is set.
         if slug:
@@ -760,6 +767,7 @@ async def mam_scan_single_book(book_id: int, slug: str | None = Query(None)):
             format_priority=s.get("audiobook_format_priority" if ct == "audiobook" else "mam_format_priority"),
             delay=s.get("rate_mam", 2),
             lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
+            series_name=series or "",
             content_type=ct,
             seshat_cover_phash=seshat_phash,
         )
@@ -842,9 +850,15 @@ async def mam_scan_single_author(author_id: int, slug: str | None = None):
             raise HTTPException(404, f"Author {author_id} not found")
         author_name = rows[0][0]
 
+        # series JOIN required so series_name reaches check_book →
+        # Fix E (series-bundle promote) can fire. UAT 2026-05-11
+        # round 4 — see books.py:scan_books_mam comment.
+        from app.discovery.sources.mam import _NEEDS_SCAN_BASIC_ALIASED
         book_rows = await db.execute_fetchall(
-            f"SELECT id, title FROM books WHERE author_id=? AND {_NEEDS_SCAN_BASIC_BARE} "
-            "ORDER BY title",
+            f"SELECT b.id, b.title, s.name AS series_name "
+            f"FROM books b LEFT JOIN series s ON b.series_id = s.id "
+            f"WHERE b.author_id=? AND {_NEEDS_SCAN_BASIC_ALIASED} "
+            "ORDER BY b.title",
             (author_id,),
         )
     finally:
@@ -882,14 +896,14 @@ async def mam_scan_single_author(author_id: int, slug: str | None = None):
         bdb = await get_db()
         try:
             from app.discovery.cover_phash import ensure_cover_phash
-            for bid, btitle in book_rows:
+            for bid, btitle, bseries in book_rows:
                 # Surface the title BEFORE the network call so the
                 # widget shows what we're waiting on, not what we just
                 # finished.
                 state._mam_scan_progress["current_book"] = btitle
                 seshat_phash = await ensure_cover_phash(bdb, bid, token=token)
                 try:
-                    check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids, content_type=scan_ct, seshat_cover_phash=seshat_phash)
+                    check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids, series_name=bseries or "", content_type=scan_ct, seshat_cover_phash=seshat_phash)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

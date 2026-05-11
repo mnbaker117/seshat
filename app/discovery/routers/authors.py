@@ -1079,15 +1079,20 @@ async def scan_authors_mam(data: dict = Body(...)):
             if not lib_aids:
                 continue
             placeholders = ",".join(["?" for _ in lib_aids])
+            # series JOIN required so series_name reaches check_book →
+            # Fix E (series-bundle promote) can fire. UAT 2026-05-11
+            # round 4 — see books.py:scan_books_mam comment.
             rows = await lib_db.execute_fetchall(
-                f"SELECT b.id, b.title, a.name FROM books b "
+                f"SELECT b.id, b.title, a.name, s.name AS series_name "
+                f"FROM books b "
                 f"JOIN authors a ON b.author_id=a.id "
+                f"LEFT JOIN series s ON b.series_id = s.id "
                 f"WHERE b.author_id IN ({placeholders}) "
                 f"AND {_NEEDS_SCAN_BASIC_ALIASED} "
                 f"ORDER BY a.sort_name, b.title",
                 lib_aids,
             )
-            books = [(r[0], r[1], r[2]) for r in rows]
+            books = [(r[0], r[1], r[2], r[3] or "") for r in rows]
             if books:
                 per_lib.append((lib or {"slug": None, "content_type": "ebook"}, books))
         finally:
@@ -1129,7 +1134,7 @@ async def scan_authors_mam(data: dict = Body(...)):
                     continue
                 try:
                     from app.discovery.cover_phash import ensure_cover_phash
-                    for bid, btitle, aname in books:
+                    for bid, btitle, aname, bseries in books:
                         if not state._mam_scan_progress.get("running"):
                             state._mam_scan_progress.update({"status": "cancelled"})
                             break
@@ -1138,7 +1143,9 @@ async def scan_authors_mam(data: dict = Body(...)):
                             seshat_phash = await ensure_cover_phash(db2, bid, token=token)
                             check = await mam_check_book(
                                 token, btitle, aname, format_priority,
-                                delay, lang_ids=lang_ids, content_type=ct,
+                                delay, lang_ids=lang_ids,
+                                series_name=bseries,
+                                content_type=ct,
                                 seshat_cover_phash=seshat_phash,
                             )
                         except Exception as e:
