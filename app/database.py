@@ -237,7 +237,14 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_state ON pipeline_runs(state);
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_grab_id ON pipeline_runs(grab_id);
 CREATE INDEX IF NOT EXISTS idx_review_queue_status ON book_review_queue(status);
 CREATE INDEX IF NOT EXISTS idx_review_queue_created_at ON book_review_queue(created_at);
-CREATE INDEX IF NOT EXISTS idx_review_queue_bundle_group ON book_review_queue(bundle_group_id);
+-- NOTE: idx_review_queue_bundle_group is intentionally NOT declared
+-- in SCHEMA. SCHEMA runs before MIGRATIONS, and on legacy v2.6.x
+-- databases the bundle_group_id column doesn't exist yet — its
+-- CREATE INDEX would crash at startup with "no such column"
+-- (v2.7.0 regression). The index is created by the migration block
+-- BELOW after the corresponding ALTER TABLE adds the column. Fresh
+-- DBs reach the same end-state via the migration loop (user_version
+-- starts at 0, so every migration runs once).
 CREATE INDEX IF NOT EXISTS idx_tentative_status ON tentative_torrents(status);
 CREATE INDEX IF NOT EXISTS idx_tentative_torrent_id ON tentative_torrents(mam_torrent_id);
 CREATE INDEX IF NOT EXISTS idx_ignored_seen_at ON ignored_torrents_seen(seen_at);

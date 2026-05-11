@@ -7,6 +7,51 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.7.1] — 2026-05-11
+
+Same-day hotfix on v2.7.0. The v2.7.0 SCHEMA block declared a new
+`idx_review_queue_bundle_group` index on `book_review_queue
+(bundle_group_id)`, but `bundle_group_id` is added by an ALTER TABLE
+migration that runs AFTER the SCHEMA `executescript`. Fresh DBs
+survived because the SCHEMA's `CREATE TABLE` added the column before
+the index ran. Legacy v2.6.x DBs crashed because `CREATE TABLE IF
+NOT EXISTS` no-op'd on the pre-existing table — leaving the index
+to hit `sqlite3.OperationalError: no such column: bundle_group_id`
+during lifespan startup.
+
+### Fixed
+
+- **v2.7.0 startup crash on legacy databases.** Moved the
+  `idx_review_queue_bundle_group` index out of SCHEMA. The index is
+  still created on the same connection via the existing MIGRATIONS
+  entry (position 17), which runs AFTER the ALTER TABLE ADD COLUMN
+  migrations (positions 12-16) that add the column. Fresh DBs reach
+  the same end-state via the migration loop — `user_version` starts
+  at 0 so every migration runs once on first boot.
+
+### Added
+
+- **Two regression tests in `tests/test_legacy_db_upgrade.py`:**
+  - `test_init_db_survives_v26_to_v27_upgrade` simulates a real v2.6.1
+    legacy database (with the pre-bundle `book_review_queue` shape +
+    one pending row) and asserts `init_db()` completes without
+    raising, the bundle columns land, the bundle-group index gets
+    created, and the legacy row's `bundle_group_id` is backfilled to
+    `grab-1` by the UPDATE migration.
+  - `test_schema_indexes_reference_declared_columns` parses SCHEMA
+    for CREATE INDEX statements and verifies each referenced column
+    is declared in the same SCHEMA block's CREATE TABLE. Catches
+    typo'd column names in SCHEMA indexes (a weaker but
+    complementary guard to the runtime upgrade test above).
+
+When adding a new column to SCHEMA + an ALTER TABLE migration in
+the future, also add a new test to that file that pre-creates the
+prior-version shape and asserts `init_db()` lands cleanly.
+
+Suite: **2039 passing, 7 skipped** (up from 2037 / 7 at v2.7.0).
+
+---
+
 ## [2.7.0] — 2026-05-11
 
 Bundle/collection torrent support. When a single MAM grab contains
