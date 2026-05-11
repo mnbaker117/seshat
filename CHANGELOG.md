@@ -7,6 +7,193 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.5.0] — 2026-05-11
+
+MAM URL confidence — v2.4 follow-up arc. Across two days, ~458
+combined owned + unowned phantom Possibles dropped to **12 genuine
+Possibles** (~97% reduction) — UAT-pass declared on the remaining
+12 as "same author wrong book" hedges that need manual review.
+
+The arc landed Part D filename verification as the new primary
+verification signal, plus seven targeted scoring refinements, two
+new promote paths, the `_strip_subtitle` parenthetical fallback,
+the manual-scan-callers `series_name` plumbing fix, CWA push
+hardening (full-form replacement + post-POST verification),
+ebook-format-priority for primary-file selection on the ingest
+side, the bulk-scan async-task UX rewrite, and a security pass
+closing 9 CodeQL + 3 Dependabot alerts.
+
+### Added — Verification signals
+
+- **Part D — scoped filename verification** as the primary
+  verification signal. Wires MAM's inline `@(title,filenames) X
+  @author Y` operator into production scoring ahead of cover and
+  description verification (cheaper: 1 search vs N per-candidate
+  fetches; more reliable than description on prose-only bundle
+  layouts). Short-circuits cover + description fetches when
+  filename verifies. New `_FILENAME_VERIFICATION_ENABLED` gate
+  defaults True. Period-stripping in the `@author` segment
+  (MAM's author index drops periods after initials).
+- **Fix E — series-bundle promote**. New
+  `would_promote_via_series_bundle_match` decision in
+  `_try_evaluate`: when candidate is a bundle + author_matched +
+  search's `series_name` appears (case-insensitive substring)
+  in the bundle's mam_title, promote. Existing
+  `volume_range_mismatch` short-circuit protects against
+  search-Bk7-vs-bundle-Books-1-3 cases.
+- **Fix F — strong-text-anchor promote**. New
+  `would_promote_via_strong_text_anchor`: when ts >= 0.95 +
+  author_matched + conf >= 0.65 + not bundle-cap-blocked + not
+  volume_likely_mismatch, promote at the lower threshold. Catches
+  exact-title-match singletons sitting just below the regular
+  0.70 promote threshold.
+- **Vol-range +0.10 boost**. When candidate's
+  `_extract_volume_range` covers the searched vol, boost conf by
+  +0.10. Resolves the "Domestic Decay 2 - 5" canary regression
+  where the wrong-vol Bk1 sibling was outscoring the correct
+  range bundle.
+- **No-positive-signal demote** in `_try_evaluate` — the
+  `best_possible` assignment site now refuses pure text-overlap
+  candidates that have neither author confirmation nor any
+  verification signal. Catches subtitle-template false positives
+  (~20 from owned UAT) and Bk1-for-BkN false positives.
+- **ts<0.10 demote** for "right author totally wrong work"
+  pattern (DuBoff "Grand Theft Planet" surfacing "Fractured
+  Empire" from the same author's different series).
+- **`_strip_subtitle` parenthetical fallback** for Calibre's
+  standard `<Book Title> (<Series Name> #<N>)` format. When no
+  `:` / ` - ` / `|` delimiter exists, strips a trailing `(...)`
+  segment so pass 4 (short title) fires properly. UAT canary:
+  Tower Mage 2 (The Nine Magics #2).
+
+### Changed — Author matching (`_author_match`)
+
+Three tightenings to address overshoot in pre-arc author matching:
+
+- **Per-author subset** instead of UNION-token-overlap. UAT
+  canary: 59-author "Fantasy-Scifi Authors Starting With T"
+  mega-collection was matching "Pierce Scott" via "Tamora Pierce"
+  (single shared "pierce" token). Per-author subset means BOTH
+  search tokens must overlap with ONE individual MAM author.
+- **Empty `mam_authors` → False** (was True permissively).
+  Generic mega-collections like "Sci-Fi Master Collection M-Z"
+  with empty author_info no longer pass author_match. Real
+  Cohort C cases (legitimate book missing metadata) still have
+  cover-pHash + description-mention rescue paths upstream.
+- **Reverse-subset surname guard**. Reverse match (m_tok ⊆
+  cal_tok) requires the cal-side surname (last meaningful token)
+  to be in m_tok. Catches first-name-vs-surname collisions on
+  common names (UAT canary: "M J Scott" matching "Scott
+  Reintgen"). Trade-off: loses first-name-only MAM uploads
+  ("Brandon" matching "Brandon Sanderson") — accepted as rare.
+
+### Changed — Description parser (3 fixes for structured-list bundles)
+
+- Single-word title gate relaxed from `< 2 tokens` to `< 2 tokens
+  AND < 5 chars` (lets "Chainfire" through).
+- `_DESC_LEADING_RX` adds `\d+\s*[-–—]\s+` for `09 - Title`
+  numbering convention.
+- `_DESC_BLOCK_RX` adds `(?:&nbsp;|[ \t])\*(?:&nbsp;|[ \t])` for
+  inline asterisk-bullet lists.
+
+### Fixed — Production plumbing bugs surfaced by UAT
+
+- **Manual scan callers were dropping `series_name`** when calling
+  `mam_check_book`. Only the cascade scheduled scan passed it
+  correctly; bulk-by-ids, single-book Re-scan, single-author scan,
+  and authors-page bulk all silently dropped it — making Fix E's
+  `bool(series_name)` gate fail immediately. UAT round 4 caught
+  this when 17 of 27 expected Fix E promotes never fired. Fix:
+  add `LEFT JOIN series s ON b.series_id = s.id` + select
+  `s.name AS series_name` + pass through to `mam_check_book` in
+  all four call sites (`books.py`, `mam.py`, `authors.py`).
+- **Hyphen-digit normalization in scoped query** —
+  `_scoped_filename_search` replaces `\w-\d` with `\w \d` before
+  constructing the query. UAT canary: "The Redemption of
+  Maribeth-5" returned 0 from MAM scoped because `Maribeth-5`
+  tokenizes as a single token; `Maribeth 5` returns the bundle.
+- **`series_name` not tagged user-edited** when set via the
+  BookSidebar edit form. `TRACKED_FIELDS` omitted it AND the
+  dedicated series_name update branch never added to
+  `edited_now`. Combined with calibre_sync writing `series_id`
+  through unconditionally as "structural", every local series
+  edit got clobbered on next sync. Fix in
+  `app/discovery/routers/books.py:update_book`.
+- **CWA push silent failure**. Two compounding bugs: (1) CWA's
+  `/admin/book/<id>` endpoint expects a COMPLETE form
+  replacement, not a partial update — Seshat sent just the
+  changed field + csrf, CWA silently re-rendered the form with
+  validation errors and returned 200. (2) `CWAClient.push` only
+  checked HTTP status, treated 200-with-validation-errors as
+  success. Fix: `_parse_cwa_edit_form` (BeautifulSoup) scrapes
+  the full form, merges changes on top, POSTs complete payload
+  with `detail_view=on`, then re-fetches and verifies each
+  pushed field actually persisted.
+
+### Added — Pipeline UX
+
+- **Bulk scan async-task pattern**. `/books/scan-mam` refactored
+  from synchronous (blocked HTTP request for entire scan) to
+  async-task pattern matching `/authors/scan-mam`. Returns
+  `{status: "started", total: N}` immediately, registers in
+  `state._mam_scan_progress` so Command Center sees live
+  progress. `/scan/cancel` now works against bulk scans too.
+- **DiscBooksPage scan progress banner**. New page-level effect
+  polls `/discovery/mam/scan/status` every 3s; renders an
+  accent-bordered banner with X/Y progress + current_book +
+  found/possible/not_found counts when a scan is running. Lingers
+  4s after completion as a summary then auto-clears.
+- **Ebook format priority for primary-file selection** on the
+  ingest side. UAT canary: "Methodology of Secrets" torrent had
+  EPUB + PDF, file_copier picked PDF (largest-first) despite
+  `mam_format_priority` listing epub first. Mirrored existing
+  audiobook-priority plumbing for ebooks. New
+  `_apply_ebook_priority` + `_EBOOK_EXTENSIONS` in `file_copier`,
+  `ebook_format_priority` field on `DispatcherDeps`, threaded
+  through pipeline + budget_watcher, sourced from existing
+  `mam_format_priority` setting at startup.
+
+### Added — Diagnostic surface
+
+- **`?test_scoped=true` on `/api/v1/mam/debug-match`** runs five
+  scoped-operator probe variants (with/without periods,
+  with/without `@author`, broad vs narrow `srchIn`). Used
+  throughout this arc's UAT.
+- **`raw_error` surfacing** in debug-match trace. When MAM
+  returns `{"error": "..."}` we now surface the message —
+  previously couldn't distinguish "MAM rejected query" from
+  "no matches".
+
+### Security
+
+- **3 Dependabot npm transitives bumped**: `fast-uri` 3.1.0 →
+  3.1.2, `@babel/plugin-transform-modules-systemjs` 7.29.0 →
+  7.29.4. Both dev-only build-pipeline deps.
+- **6 CodeQL ReDoS warnings fixed** by bounding regex
+  quantifiers (`\s+` → `\s{1,8}`, `\d+` → `\d{1,4}`, etc.) in
+  scoring + author-parsing helpers.
+- **2 CodeQL URL-substring sanitization warnings fixed** via new
+  `_is_mam_url` helper using `urllib.parse.urlparse(url).hostname`
+  instead of substring match. `_do_get` itself host-locked to
+  MAM as defense-in-depth.
+- 1 CodeQL SSRF auto-resolved by the `_do_get` lock-down. 2
+  CodeQL SSRF dismissed (false-positive runtime sanitizer
+  + by-design admin-gated debug endpoint).
+
+### UAT outcomes
+
+- **Owned-Possible journey**: 71 → 50 → 8 → **0** over the arc.
+- **Unowned-Possible journey**: ~387 → 56 → 27 → 13 → **12**.
+- The 12 remaining are all genuine "same author wrong book"
+  hedges that need manual review — exactly what Possible status
+  is for. UAT-pass declared.
+
+### Suite
+
+1972 passing, 7 skipped (pre-existing).
+
+---
+
 ## [2.4.0] — 2026-05-09
 
 Part C — cover-image perceptual-hash MAM URL verification, end-to-end.
