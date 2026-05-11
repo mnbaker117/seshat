@@ -36,6 +36,14 @@ Sync your Calibre library and find every book you're missing across
 Books, MAM). Manage authors, series, and pen-name aliases. Search MAM
 for matches and see which titles are available.
 
+Container restarts run an **incremental sync** by default — Calibre's
+`last_modified` column and Audiobookshelf's `updatedAt` field drive a
+filtered read that only re-processes books that actually changed.
+Most restarts complete in under a second; the lifespan no longer
+blocks request handling, and a sticky progress banner (or full-screen
+splash on first-ever boot) surfaces status while sync runs in the
+background.
+
 ### Pipeline
 
 Monitor MAM's IRC announce channel in real time. Filter against your
@@ -127,7 +135,7 @@ state lives entirely on the `/app/data` volume.
 - **Auth:** bcrypt + itsdangerous signed cookies + Fernet-encrypted secrets
 - **Theme:** Egyptian goddess palette (gold, deep indigo, jade green)
 - **Docker:** two-stage build (node:22-alpine + python:3.12-slim)
-- **API routes:** 138 total (74 discovery + 53 pipeline + 11 shared)
+- **API routes:** 187 total (103 discovery + 84 pipeline)
 - **Library backends:** Calibre (file-based) + Audiobookshelf (API-based),
   composable — users can run multiple of either. Cross-library `works`
   linked via the pipeline DB.

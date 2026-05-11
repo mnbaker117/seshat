@@ -61,7 +61,7 @@ library works fine) before starting the backend.
 ## Tests
 
 ```bash
-# Backend — 625+ tests, should finish in under a minute
+# Backend — 2000+ tests, finishes in under a minute
 pytest
 
 # Frontend typecheck
@@ -79,17 +79,25 @@ quickly.
   that touches I/O. No new `print()` calls — use the `logging` module.
 - **TypeScript:** strict mode is on; don't disable it per-file. No new
   `@ts-nocheck` or `@ts-ignore` without a comment explaining why.
-- **SQL:** migrations live in `app/db/migrations/`. Every schema change
-  needs a migration; never edit an existing migration after it's
-  shipped.
+- **SQL:** migrations live in the `MIGRATIONS` list at the top of
+  `app/database.py` (global / pipeline schema) or
+  `app/discovery/database.py` (per-library discovery schema), with
+  schema version tracked via SQLite's `user_version` pragma. Append
+  new statements to the list; never edit one that's already shipped.
+  Complex one-time fixes that don't fit the statement-list shape
+  (e.g. table-recreate dances) live as inline `_migrate_*` helpers
+  called from `init_db()`.
 - **Comments:** only when the *why* is non-obvious. The *what* should
   be clear from the code.
 
 ## Commit messages
 
-One short imperative-mood line summarizing the change, optionally
-followed by a blank line and a paragraph of context. No emoji, no
-`feat:` / `fix:` prefixes.
+Conventional Commits style: a short imperative-mood subject line
+prefixed with the change type and optional scope, like
+`feat(discovery): ...`, `fix(mam): ...`, `chore: bump version`.
+Subject under ~70 chars when possible; follow with a blank line and
+a paragraph of context for anything non-trivial. No emoji in
+subjects.
 
 ## Pull requests
 

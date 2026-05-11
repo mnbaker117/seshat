@@ -34,6 +34,7 @@ Edit `docker-compose.yml` and set the volume mount paths for your system:
 | `/downloads` | Shared with your torrent client | `/mnt/downloads` |
 | `/cwa-ingest` | CWA auto-import folder (if using CWA sink) | `/path/to/cwa-import` |
 | `/calibre` | Calibre library (if using Calibre sink) | `/path/to/calibre/books` |
+| `/audiobooks` | Audiobookshelf library path (if using ABS) — same mount ABS sees, so Seshat can drop audiobook files where ABS will scan them | `/path/to/audiobooks` |
 | `/review-staging` | Books awaiting your review approval | `./review-staging` |
 | `/staging` | Temp workspace for metadata patching | `./staging` |
 
@@ -94,7 +95,25 @@ Go to **Settings** → **Download Client** section:
 **qBittorrent v5 note**: Seshat handles the v5 API renames
 (pause→stop, resume→start, setLocation→setSavePath) automatically.
 
-### 4. Configure Paths
+### 4. Configure Audiobookshelf (optional)
+
+If you want audiobook support alongside ebooks, mount your ABS
+library at `/audiobooks` in the compose file (see volume table
+above) and configure the API connection:
+
+- **ABS URL**: Your Audiobookshelf base URL (e.g.
+  `http://10.0.10.20:13378`). Settable via the `ABS_URL` env var
+  on first boot or under **Settings** → **Library** → **Audiobookshelf**.
+- **ABS API key**: Generated in ABS under **Settings** →
+  **Users** → *your-user* → **API Tokens**. Pasted into Seshat's
+  Settings UI; stored encrypted at rest.
+
+Once configured, ABS appears as a discovered library alongside
+Calibre on the Dashboard, and audiobook MAM grabs route through a
+dedicated sink that drops files into `/audiobooks` and triggers an
+ABS rescan.
+
+### 5. Configure Paths
 
 Go to **Settings** → **Pipeline** section:
 
@@ -105,7 +124,7 @@ Go to **Settings** → **Pipeline** section:
   translation pair (e.g. qBit sees `/data`, Seshat sees `/downloads`)
 - **Folder Structure**: Monthly `[YYYY-MM]`, yearly `[YYYY]`, or flat
 
-### 5. Verify
+### 6. Verify
 
 After saving, check the **Dashboard**:
 
