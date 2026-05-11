@@ -7,6 +7,30 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.6.1] — 2026-05-11
+
+Same-day patch closing the CodeQL alert that surfaced from v2.6.0's
+`_strip_subtitle` regex. The v2.6.0 fix for alert #35 dropped the
+leading `\s*` from `\s*\([^)]*\)\s*$`, but alert #36 was filed
+against a different worst-case input on the same line — many `(`
+characters with no closing `)` still backtrack O(n²) through
+`[^)]*`. Python's `re` doesn't support atomic groups, so the
+permanent fix is to drop the regex entirely.
+
+### Fixed
+
+- **CodeQL #36 — py/polynomial-redos** (sibling of #35, same line).
+  `_strip_subtitle`'s trailing-parenthetical fallback now uses a
+  linear `rstrip` / `endswith` / `rfind` scan instead of a regex.
+  Semantics preserved on every existing test case; no Python
+  ReDoS-prone construct in this path. Two new regression tests
+  (`test_many_open_parens_no_redos`,
+  `test_many_spaces_then_paren_no_redos`) pin the new behavior.
+
+Suite: **2016 passing, 7 skipped** (up from 2014 / 7 at v2.6.0).
+
+---
+
 ## [2.6.0] — 2026-05-11
 
 Incremental library sync, non-blocking startup, Dismiss tentative
