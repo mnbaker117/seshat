@@ -124,6 +124,13 @@ async def sync_all_libraries() -> None:
                     logger.debug(
                         f"Scheduled sync: '{lib['name']}' source unchanged, skipping"
                     )
+                    # Backfill timestamps if still zero from migration
+                    # so the next real sync goes incremental, not full.
+                    # See `sync_state.record_mtime_unchanged` docstring.
+                    _sync_state.record_mtime_unchanged(
+                        st, slug, mtime=current_mtime,
+                    )
+                    save_settings(st)
                     # Count the mtime-unchanged skip as a "checked"
                     # tick so the per-library interval gate doesn't
                     # re-check on every scheduler fire. Without this,

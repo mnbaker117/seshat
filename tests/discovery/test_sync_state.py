@@ -120,6 +120,74 @@ class TestRecordCompletion:
             sync_state.record_completion({}, "calibre", mtime=1.0, mode="bogus")
 
 
+class TestRecordMtimeUnchanged:
+    def test_backfills_zero_timestamps(self, monkeypatch):
+        """Post-migration entry has last_mtime but zero timestamps.
+        mtime-skip backfills both to NOW."""
+        monkeypatch.setattr(sync_state.time, "time", lambda: 5000.0)
+        settings = {
+            "library_sync_state": {
+                "calibre": {
+                    "last_mtime": 12345.6,
+                    "last_sync_ts": 0.0,
+                    "last_full_sync_ts": 0.0,
+                }
+            }
+        }
+        sync_state.record_mtime_unchanged(settings, "calibre", mtime=12345.6)
+        entry = settings["library_sync_state"]["calibre"]
+        assert entry["last_sync_ts"] == 5000.0
+        assert entry["last_full_sync_ts"] == 5000.0
+        assert entry["last_mtime"] == 12345.6
+        # Legacy mirror also updated for downgrade compat.
+        assert settings["library_mtimes"]["calibre"] == 12345.6
+
+    def test_preserves_existing_non_zero_timestamps(self, monkeypatch):
+        """Once real sync has stamped timestamps, mtime-skip is a no-op
+        for those fields. Only last_mtime gets refreshed (in case the
+        composite shape changed)."""
+        monkeypatch.setattr(sync_state.time, "time", lambda: 5000.0)
+        settings = {
+            "library_sync_state": {
+                "calibre": {
+                    "last_mtime": "old:shape",
+                    "last_sync_ts": 100.0,
+                    "last_full_sync_ts": 50.0,
+                }
+            }
+        }
+        sync_state.record_mtime_unchanged(
+            settings, "calibre", mtime="new:shape:123"
+        )
+        entry = settings["library_sync_state"]["calibre"]
+        assert entry["last_sync_ts"] == 100.0       # untouched
+        assert entry["last_full_sync_ts"] == 50.0   # untouched
+        assert entry["last_mtime"] == "new:shape:123"  # refreshed
+
+    def test_resolve_threshold_after_backfill_yields_incremental(
+        self, monkeypatch,
+    ):
+        """The whole point: post-backfill, the next resolve_threshold
+        call returns incremental (not MODE_FULL_FIRST)."""
+        monkeypatch.setattr(sync_state.time, "time", lambda: 5000.0)
+        settings: dict = {
+            "library_sync_state": {
+                "calibre": {
+                    "last_mtime": 12345.6,
+                    "last_sync_ts": 0.0,
+                    "last_full_sync_ts": 0.0,
+                }
+            }
+        }
+        sync_state.record_mtime_unchanged(settings, "calibre", mtime=12345.6)
+        threshold, reason = sync_state.resolve_threshold(
+            sync_state.get_state(settings, "calibre"),
+            now=5001.0,
+        )
+        assert reason == sync_state.MODE_INCREMENTAL
+        assert threshold == 5000.0 - sync_state.DRIFT_BIAS_SECONDS
+
+
 class TestRecordFailure:
     def test_resets_only_last_sync_ts(self):
         settings = {

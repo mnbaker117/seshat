@@ -792,6 +792,14 @@ async def lifespan(app: FastAPI):
                                 f"Library '{lib['name']}': source unchanged, "
                                 "skipping sync"
                             )
+                            # Backfill sync_state timestamps if missing
+                            # so the next real sync (e.g. after the
+                            # user adds a book) goes incremental
+                            # rather than falling back to MODE_FULL_FIRST.
+                            _sync_state.record_mtime_unchanged(
+                                inner_settings, slug, mtime=current_mtime,
+                            )
+                            save_settings(inner_settings)
                         else:
                             _log.info(f"Library '{lib['name']}': syncing...")
                             sync_result = (

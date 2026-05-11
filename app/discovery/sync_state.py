@@ -104,6 +104,48 @@ def record_completion(
     legacy[slug] = mtime
 
 
+def record_mtime_unchanged(
+    settings: dict[str, Any],
+    slug: str,
+    *,
+    mtime: Any,
+) -> None:
+    """Stamp sync state when an mtime check confirms the library is current.
+
+    Called from the mtime-skip fast path in the lifespan and scheduled
+    job. If `last_full_sync_ts` is still 0 (typical post-migration
+    state — the legacy `library_mtimes` shape never tracked
+    timestamps), this is our chance to anchor sync_state on a moment
+    when the library is *verified* current.
+
+    Without this backfill, a post-migration mtime-skip leaves the
+    timestamps at zero. When something *does* eventually change, the
+    next real sync hits `resolve_threshold` with `last_full_sync_ts=0`
+    → `MODE_FULL_FIRST` → forced full sync, even though we already
+    confirmed no work was needed back when mtime-skip fired. Mark hit
+    exactly this 2026-05-11: initial restart did mtime-skip (no
+    backfill, timestamps stayed zero), he added one ebook, second
+    restart's Calibre sync was full instead of incremental.
+
+    Conservative semantics — never overwrites existing non-zero
+    timestamps. Once a real sync has stamped them, mtime-skip is a
+    no-op for sync_state. Also refreshes `last_mtime` so a composite-
+    shape change (e.g., ABS's 2-field → 3-field migration in v2.6)
+    stamps the new shape into cache without forcing a sync.
+    """
+    now = time.time()
+    store = settings.setdefault("library_sync_state", {})
+    entry = dict(store.get(slug) or _empty_entry())
+    entry["last_mtime"] = mtime
+    if not entry.get("last_sync_ts"):
+        entry["last_sync_ts"] = now
+    if not entry.get("last_full_sync_ts"):
+        entry["last_full_sync_ts"] = now
+    store[slug] = entry
+    legacy = settings.setdefault("library_mtimes", {})
+    legacy[slug] = mtime
+
+
 def record_failure(settings: dict[str, Any], slug: str) -> None:
     """Force the next sync for `slug` to escalate to full.
 
