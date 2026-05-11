@@ -95,6 +95,7 @@ from app.discovery.routers.audiobookshelf import router as disc_abs_router
 from app.discovery.routers.import_export import router as disc_import_export_router
 from app.discovery.routers.config import router as disc_config_router
 from app.discovery.routers.pipeline_send import router as disc_pipeline_send_router
+from app.discovery.routers.reingest import router as disc_reingest_router
 
 # Configure logging once at import time. The verbose toggle gets re-applied
 # from settings.json after load_settings() runs in the lifespan.
@@ -1128,6 +1129,7 @@ app.include_router(disc_abs_router)
 app.include_router(disc_import_export_router)
 app.include_router(disc_config_router)
 app.include_router(disc_pipeline_send_router)
+app.include_router(disc_reingest_router)
 
 
 @app.get("/api/health")
