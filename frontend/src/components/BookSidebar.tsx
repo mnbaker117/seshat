@@ -120,6 +120,11 @@ interface ReingestProbeResponse {
   auto_started: boolean;
   grab_id: number | null;
   pipeline_run_id: number | null;
+  // v2.8.1: when auto-start fired but the pipeline failed
+  // mid-flight (qBit reported a file that wasn't on disk, sink
+  // unreachable, etc.) the server returns auto_started=false +
+  // error set. The UI shows the error instead of a success toast.
+  error?: string | null;
   searched: string[];
   mam_torrent_name: string | null;
 }
@@ -438,6 +443,13 @@ export function BookSidebar({
         );
         return;
       }
+      // v2.8.1: auto-start that ran but failed mid-pipeline returns
+      // auto_started=false + error set. Surface that instead of a
+      // misleading success toast.
+      if (r.error) {
+        setReingestError(r.error);
+        return;
+      }
       if (r.auto_started) {
         toast.success(
           `Reingest started: grab #${r.grab_id}, run #${r.pipeline_run_id}. Check the Review queue.`,
@@ -470,10 +482,20 @@ export function BookSidebar({
         ok: boolean;
         grab_id: number;
         pipeline_run_id: number;
+        error?: string | null;
       }>(
         `/discovery/books/${book.id}/reingest/start${slug}`,
         { candidate },
       );
+      // v2.8.1: surface mid-pipeline failures (qBit file moved,
+      // sink unreachable, etc.) instead of a misleading success
+      // toast. The grab/run rows still exist as audit trail.
+      if (!r.ok) {
+        setReingestError(
+          r.error || `Reingest pipeline_run #${r.pipeline_run_id} failed.`,
+        );
+        return;
+      }
       toast.success(
         `Reingest started: grab #${r.grab_id}, run #${r.pipeline_run_id}. Check the Review queue.`,
       );

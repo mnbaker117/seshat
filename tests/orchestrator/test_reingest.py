@@ -210,12 +210,17 @@ class TestFsCandidates:
 
 
 class TestQbitCandidates:
-    async def test_exact_name_match(self):
+    async def test_exact_name_match(self, tmp_path):
+        # v2.8.1: qBit candidates now require their book files to
+        # actually exist on disk under the (translated) save_path.
+        # Plant a real file so the candidate survives validation.
+        save_path = tmp_path / "downloads"
+        _make_epub(save_path / "A Tangle of Time" / "book.epub")
         qbit = _make_fake_qbit([
             {
                 "hash": "abc123",
                 "name": "A Tangle of Time",
-                "save_path": "/data/downloads/[mam-complete]",
+                "save_path": str(save_path),
                 "files": ["A Tangle of Time/book.epub"],
                 "size": 1024,
             },
@@ -229,23 +234,29 @@ class TestQbitCandidates:
         assert cs[0].qbit_hash == "abc123"
         assert cs[0].book_files == ["A Tangle of Time/book.epub"]
 
-    async def test_path_translation(self):
+    async def test_path_translation(self, tmp_path):
+        # Plant the file at the TRANSLATED path (where Seshat would
+        # see it), since the existence check runs after translation.
+        translated = tmp_path / "mnt-local" / "downloads"
+        _make_epub(translated / "book.epub")
         qbit = _make_fake_qbit([
             {
                 "hash": "abc123",
                 "name": "Tangle",
-                "save_path": "/data/downloads/[mam-complete]",
+                "save_path": str(tmp_path / "data" / "downloads"),
                 "files": ["book.epub"],
             },
         ])
         dispatcher = _make_dispatcher(
-            qbit, qbit_path_prefix="/data", local_path_prefix="/mnt/local",
+            qbit,
+            qbit_path_prefix=str(tmp_path / "data"),
+            local_path_prefix=str(tmp_path / "mnt-local"),
         )
         cs = await find_qbit_candidates(
             dispatcher, mam_torrent_name="Tangle",
         )
         assert len(cs) == 1
-        assert cs[0].save_path == "/mnt/local/downloads/[mam-complete]"
+        assert cs[0].save_path == str(translated)
 
     async def test_non_book_torrents_skipped(self):
         qbit = _make_fake_qbit([
@@ -274,8 +285,13 @@ class TestQbitCandidates:
 
 class TestCombinedFind:
     async def test_qbit_outranks_fs_at_equal_name_match(self, tmp_path, monkeypatch):
-        # Plant an fs candidate AND a matching qBit torrent.
+        # Plant an fs candidate AND a matching qBit torrent. The
+        # qBit torrent's save_path is different so the v2.8.1
+        # absolute-path dedup keeps both — we're testing the ranking
+        # tiebreak here, not the dedup.
         _make_epub(tmp_path / "downloads" / "Same Book.epub")
+        # v2.8.1: qBit candidate must point at a real file on disk.
+        _make_epub(tmp_path / "qbit-data" / "Same Book.epub")
         qbit = _make_fake_qbit([
             {
                 "hash": "h1", "name": "Same Book",
@@ -341,7 +357,7 @@ class TestStartReingest:
 
         db = await get_db()
         try:
-            grab_id, run_id = await start_reingest(
+            grab_id, run_id, ok = await start_reingest(
                 db,
                 dispatcher=dispatcher,
                 mam_torrent_id="9999",
@@ -352,6 +368,7 @@ class TestStartReingest:
             )
             assert grab_id > 0
             assert run_id > 0
+            assert ok is True
 
             # Grabs row carries is_reingest=1. State is `processing`
             # by this point because _stage_for_review already advanced
@@ -396,7 +413,7 @@ class TestStartReingest:
 
         db = await get_db()
         try:
-            grab_id, _ = await start_reingest(
+            grab_id, _, _ = await start_reingest(
                 db, dispatcher=dispatcher,
                 mam_torrent_id="1234", mam_torrent_name="Book",
                 category="ebooks fantasy", author_blob="A",
@@ -408,5 +425,166 @@ class TestStartReingest:
             )).fetchone()
             assert row["qbit_hash"] == "aabbcc112233"
             assert row["is_reingest"] == 1
+        finally:
+            await db.close()
+
+
+# ─── v2.8.1 regression tests ────────────────────────────────
+
+
+class TestV281QbitFileExistenceValidation:
+    """v2.8.1: qBit candidates whose book files don't actually exist
+    on disk must get filtered out at probe time. Pre-v2.8.1 they
+    would silently auto-start, create grab+pipeline_run rows, then
+    fail deep inside process_completion with a misleading "success"
+    toast already shown to the user."""
+
+    async def test_candidate_with_missing_files_filtered(self, tmp_path):
+        # qBit reports a torrent with a book file, but the file isn't
+        # actually on disk under the (translated) save_path. Simulates
+        # Mark's Test 8 scenario where the file was moved out while
+        # qBit retained the torrent metadata.
+        qbit = _make_fake_qbit([
+            {
+                "hash": "missing-files",
+                "name": "A Temperamental Enchantress",
+                "save_path": str(tmp_path / "downloads"),
+                "files": ["A Temperamental Enchantress/book.epub"],
+            },
+        ])
+        dispatcher = _make_dispatcher(qbit)
+        # Note: no _make_epub call — the file does NOT exist.
+        cs = await find_qbit_candidates(
+            dispatcher,
+            mam_torrent_name="A Temperamental Enchantress",
+        )
+        assert cs == []
+
+    async def test_partial_existence_narrows_book_files(self, tmp_path):
+        """When some files exist and others don't, the candidate is
+        kept but its book_files list is narrowed to the surviving
+        files. Pipeline gets to work with what's actually on disk."""
+        save_path = tmp_path / "downloads"
+        # Two files in the torrent metadata; only one actually exists.
+        _make_epub(save_path / "Bundle" / "alive.epub")
+        qbit = _make_fake_qbit([
+            {
+                "hash": "partial",
+                "name": "Bundle",
+                "save_path": str(save_path),
+                "files": ["Bundle/alive.epub", "Bundle/missing.epub"],
+            },
+        ])
+        dispatcher = _make_dispatcher(qbit)
+        cs = await find_qbit_candidates(
+            dispatcher, mam_torrent_name="Bundle",
+        )
+        assert len(cs) == 1
+        assert cs[0].book_files == ["Bundle/alive.epub"]
+
+
+class TestV281AbsolutePathDedup:
+    """v2.8.1: qBit and fs candidates pointing at the same physical
+    file should collapse to ONE entry in `find_candidates`, even when
+    their `save_path` values differ (qBit reports the parent dir,
+    fs walks the torrent's own dir). Pre-v2.8.1 the dedup keyed on
+    raw save_path and let both pass through, producing the duplicate
+    Mark saw in the v2.8.0 picker."""
+
+    async def test_qbit_parent_plus_fs_subdir_collapses(self, tmp_path, monkeypatch):
+        downloads = tmp_path / "downloads"
+        torrent_dir = downloads / "The Same Book"
+        _make_epub(torrent_dir / "book.epub", title="Same", author="A")
+
+        # qBit sees the parent dir + torrent-relative path.
+        qbit = _make_fake_qbit([
+            {
+                "hash": "h", "name": "The Same Book",
+                "save_path": str(downloads),
+                "files": ["The Same Book/book.epub"],
+            },
+        ])
+        dispatcher = _make_dispatcher(qbit)
+
+        # Force load_settings to point fs scan at the same downloads
+        # dir so both resolvers find the file.
+        from app import config as config_module
+        original = config_module.load_settings
+        monkeypatch.setattr(config_module, "load_settings", lambda: {
+            **original(),
+            "qbit_download_path": str(downloads),
+            "qbit_path_prefix": "",
+            "local_path_prefix": "",
+        })
+
+        cs = await find_candidates(
+            dispatcher, mam_torrent_name="The Same Book",
+        )
+        # Exactly one candidate — the qBit one (outranks fs at equal
+        # name-match, plus the fs dupe got filtered by the v2.8.1
+        # absolute-path comparison).
+        assert len(cs) == 1
+        assert cs[0].source == "qbit"
+
+
+class TestV281AutoStartFailurePropagation:
+    """v2.8.1: when `process_completion` fails during the auto-start
+    path (e.g. the candidate pointed at a file that's now missing
+    between probe and start), `start_reingest` must return ok=False
+    so the endpoint can surface a clear error instead of a misleading
+    success toast."""
+
+    async def test_missing_file_returns_ok_false(self, temp_db, tmp_path, monkeypatch):
+        # Candidate says the file lives at this path, but the file
+        # was never created → process_completion fails.
+        downloads = tmp_path / "downloads" / "Ghost Book"
+        downloads.mkdir(parents=True)
+        # NO _make_epub — the candidate points at a nonexistent file.
+        candidate = Candidate(
+            source="fs",
+            display_path=str(downloads),
+            save_path=str(downloads),
+            book_files=["ghost.epub"],
+            qbit_hash=None,
+            mtime=0.0, total_size=0,
+            score=100,
+        )
+
+        dispatcher = _make_dispatcher(
+            qbit=None, folder_sink_path=str(tmp_path / "library"),
+        )
+
+        # Configure review staging so the pipeline reaches the file-
+        # location step (and fails there, since the file is missing).
+        review_dir = tmp_path / "review-staging"
+        from app import config as config_module
+        original = config_module.load_settings
+        monkeypatch.setattr(config_module, "load_settings", lambda: {
+            **original(),
+            "review_queue_enabled": True,
+            "review_staging_path": str(review_dir),
+        })
+
+        db = await get_db()
+        try:
+            grab_id, run_id, ok = await start_reingest(
+                db,
+                dispatcher=dispatcher,
+                mam_torrent_id="6666",
+                mam_torrent_name="Ghost Book",
+                category="ebooks fantasy",
+                author_blob="A",
+                candidate=candidate,
+            )
+            # Pipeline failed → ok=False so the endpoint can surface
+            # the error to the user.
+            assert ok is False
+            # Grab + pipeline_run rows still exist as audit trail.
+            assert grab_id > 0
+            assert run_id > 0
+            # No review queue entry was created.
+            from app.storage import review_queue as review_storage
+            pending = await review_storage.list_pending(db)
+            assert pending == []
         finally:
             await db.close()

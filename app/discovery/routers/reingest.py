@@ -70,12 +70,17 @@ class CandidateModel(BaseModel):
 class ProbeResponse(BaseModel):
     found: bool
     candidates: list[CandidateModel] = []
-    # When the probe finds exactly one candidate, the endpoint
-    # populates `auto_started` with the grab_id so the UI knows the
-    # pipeline was kicked off and can skip the candidate-pick modal.
+    # When the probe finds exactly one candidate AND the pipeline
+    # ran cleanly, `auto_started=True` tells the UI to skip the
+    # picker and show a success toast. When the pipeline ran but
+    # failed mid-flight, `auto_started=False` + `error` is set so
+    # the UI can show a clear error toast (not a misleading
+    # success). The grab/run ids stay populated either way so the
+    # audit trail row is reachable from the UI.
     auto_started: bool = False
     grab_id: Optional[int] = None
     pipeline_run_id: Optional[int] = None
+    error: Optional[str] = None
     # When `found=False` the searched-sources list lets the UI explain
     # which paths were checked so the user can investigate (drive
     # unmounted, custom download dir, etc.).
@@ -91,6 +96,7 @@ class StartResponse(BaseModel):
     ok: bool
     grab_id: int
     pipeline_run_id: int
+    error: Optional[str] = None
 
 
 # ─── Helpers ─────────────────────────────────────────────────
@@ -252,7 +258,7 @@ async def probe_reingest(
         chosen = candidates[0]
         pdb = await get_pipeline_db()
         try:
-            grab_id, pipeline_run_id = await start_reingest(
+            grab_id, pipeline_run_id, ok = await start_reingest(
                 pdb,
                 dispatcher=state.dispatcher,
                 mam_torrent_id=mam_torrent_id,
@@ -263,12 +269,24 @@ async def probe_reingest(
             )
         finally:
             await pdb.close()
+        # v2.8.1: surface mid-pipeline failures from the auto-start
+        # path. Pre-v2.8.1 we returned `auto_started=True` regardless
+        # of `ok`, which made the UI show a misleading success toast
+        # when (for example) qBit reported a file that wasn't
+        # actually on disk and `process_completion` failed deep
+        # inside staging. The grab/run rows still exist (audit
+        # trail), but the user needs to know.
         return ProbeResponse(
             found=True,
             candidates=[_candidate_to_wire(chosen)],
-            auto_started=True,
+            auto_started=bool(ok),
             grab_id=grab_id,
             pipeline_run_id=pipeline_run_id,
+            error=None if ok else (
+                f"reingest auto-start failed: pipeline_run "
+                f"#{pipeline_run_id} did not complete — check "
+                f"the pipeline_runs table for the recorded error."
+            ),
             searched=searched,
             mam_torrent_name=torrent_name,
         )
@@ -313,7 +331,7 @@ async def start_reingest_endpoint(
 
     pdb = await get_pipeline_db()
     try:
-        grab_id, pipeline_run_id = await start_reingest(
+        grab_id, pipeline_run_id, ok = await start_reingest(
             pdb,
             dispatcher=state.dispatcher,
             mam_torrent_id=mam_torrent_id,
@@ -326,5 +344,12 @@ async def start_reingest_endpoint(
         await pdb.close()
 
     return StartResponse(
-        ok=True, grab_id=grab_id, pipeline_run_id=pipeline_run_id,
+        ok=bool(ok),
+        grab_id=grab_id,
+        pipeline_run_id=pipeline_run_id,
+        error=None if ok else (
+            f"reingest pipeline_run #{pipeline_run_id} did not "
+            "complete — check the pipeline_runs table for the "
+            "recorded error."
+        ),
     )

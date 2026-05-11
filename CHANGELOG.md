@@ -7,6 +7,77 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.8.1] — 2026-05-11
+
+Same-day polish + bugfix release on v2.8.0. Three issues surfaced
+during Mark's reingest UAT, all in `app/orchestrator/reingest.py`.
+
+### Fixed
+
+- **qBit candidates with missing files now drop out at probe time.**
+  Pre-v2.8.1 `find_qbit_candidates` trusted `list_torrent_files` as
+  the source of truth for which files exist — but qBit reports the
+  torrent's metadata-declared file list even when the user has
+  moved/deleted those files on disk. Mark's Test 8 scenario hit
+  this: file moved out of the download folder while qBit kept the
+  paused torrent → reingest auto-started → process_completion
+  failed inside staging → user saw a "Reingest started" success
+  toast with a "Pipeline Failed" ntfy notification arriving
+  seconds later. v2.8.1 fstat's each book file under the (translated)
+  save_path inside `find_qbit_candidates` and drops candidates with
+  zero existing files. Partial existence keeps the candidate with
+  its `book_files` narrowed to what's actually there.
+- **`process_completion`'s `ok` status now propagates through
+  `start_reingest`.** Pre-v2.8.1 `start_reingest` awaited
+  `process_completion`, captured its return value, then silently
+  discarded it — returning only `(grab_id, pipeline_run_id)`. The
+  endpoint thus claimed success for ANY auto-start, regardless of
+  whether the pipeline actually staged a review row. v2.8.1
+  changes the return shape to `(grab_id, pipeline_run_id, ok)`,
+  threads `ok` through both probe and start endpoints as a new
+  optional `error` field on `ProbeResponse` / `StartResponse`, and
+  has the BookSidebar UI show an error toast (not success) when
+  `error` is set. The grab + pipeline_run rows still exist as the
+  audit-trail record of the failed attempt.
+- **Tighter dedup in `find_candidates` collapses qBit + fs entries
+  for the same files on disk.** Pre-v2.8.1 the dedup keyed on raw
+  `save_path`. qBit reports the PARENT of a multi-file torrent
+  (e.g. `/downloads/[mam-complete]/[2025-09]`) with the torrent
+  dir prefixed onto each `book_files` entry, while fs walks the
+  torrent's OWN dir (e.g.
+  `/downloads/[mam-complete]/[2025-09]/A Tangle of Time (Josiah Bancroft)`)
+  with bare basenames. The two `save_path` strings differ, so the
+  old dedup kept both. Mark hit this on his "A Tangle of Time"
+  reingest — the picker showed two functionally identical entries.
+  v2.8.1 keys dedup on the SET of resolved absolute file paths
+  each candidate produces; same physical file → same candidate.
+  When one qBit and one fs entry overlap, the qBit candidate
+  survives (authoritative file list + hash).
+
+### Added
+
+- 3 v2.8.1 regression test classes in
+  `tests/orchestrator/test_reingest.py` covering the three fixes
+  end-to-end: missing-files-filtered, partial-existence-narrows,
+  qbit-parent-plus-fs-subdir-collapses, missing-file-returns-ok-false.
+- New optional `error: str | None` field on `ProbeResponse` and
+  `StartResponse` in `app/discovery/routers/reingest.py`. The
+  frontend reads it as the source of truth for mid-pipeline
+  failures and renders the same red banner the "not found
+  anywhere" path uses.
+
+### Backwards compat
+
+- The `Candidate` dataclass shape is unchanged — only consumers of
+  `start_reingest`'s tuple need to unpack 3 values instead of 2.
+  The only internal caller is `app/discovery/routers/reingest.py`,
+  updated in lockstep. Test code that constructed candidates
+  manually is unchanged.
+
+Suite: **2063 passing, 7 skipped** (up from 2059 / 7 at v2.8.0).
+
+---
+
 ## [2.8.0] — 2026-05-11
 
 Reingest already-snatched torrents from disk. The standard "Send to

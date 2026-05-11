@@ -172,6 +172,31 @@ async def find_qbit_candidates(
             # to share a name fragment.
             continue
         translated = translate_path(t.save_path, qbit_prefix, local_prefix)
+        # v2.8.1: verify the book files actually exist on disk before
+        # accepting the candidate. qBit's `list_torrent_files` returns
+        # paths it BELIEVES exist (from the torrent metadata), but a
+        # paused torrent with its files moved/deleted still reports
+        # the full file list. Without this check the auto-start path
+        # would create a grab + pipeline_run and then fail deep
+        # inside `process_completion` when staging tried to read a
+        # missing file — surfacing as a "Pipeline Failed" ntfy AFTER
+        # the UI already showed a success toast. We fstat each file
+        # under the translated save_path and drop candidates that
+        # have zero existing book files. Partial existence (some
+        # files present, others missing) keeps the candidate but
+        # narrows its book_files list to what's actually there.
+        existing_files = [
+            f for f in book_files
+            if (Path(translated) / f).is_file()
+        ]
+        if not existing_files:
+            _log.info(
+                "reingest: qBit candidate %r filtered — %d book files "
+                "in torrent metadata but none exist under %s",
+                t.name, len(book_files), translated,
+            )
+            continue
+        book_files = existing_files
         # qBit candidates rank above fs by +100 so a tie on name-score
         # always picks qBit (it has authoritative file list + hash).
         candidates.append(Candidate(
@@ -407,13 +432,39 @@ async def find_candidates(
     fs = find_fs_candidates(
         local_root, mam_torrent_name=mam_torrent_name,
     )
-    # Dedupe: if a qBit candidate's save_path is the same dir as an
-    # fs candidate, drop the fs duplicate.
-    qbit_paths = {c.save_path for c in qbit}
-    fs_unique = [c for c in fs if c.save_path not in qbit_paths]
+    # v2.8.1 dedup by resolved absolute file paths, not raw save_path.
+    # qBit reports the PARENT dir of a multi-file torrent as save_path
+    # with book_files holding torrent-relative paths
+    # (e.g. save_path=/downloads/[mam-complete]/[2025-09],
+    #       book_files=["Torrent Name/<file>.epub"]).
+    # The fs walk reports the torrent's OWN dir as save_path with
+    # bare basenames in book_files
+    # (e.g. save_path=/downloads/[mam-complete]/[2025-09]/Torrent Name,
+    #       book_files=["<file>.epub"]).
+    # Both resolve to the SAME absolute file path on disk. Comparing
+    # the resolved-path sets collapses the duplicate while a raw
+    # save_path comparison did not. Reported by Mark during v2.8.0
+    # UAT — "A Tangle of Time" appeared twice (qbit + fs).
+    qbit_file_sets = [_absolute_files(c) for c in qbit]
+    fs_unique = [
+        c for c in fs
+        if not any(_absolute_files(c) & qf for qf in qbit_file_sets)
+    ]
     combined = qbit + fs_unique
     combined.sort(key=lambda c: -c.score)
     return combined[:_MAX_CANDIDATES]
+
+
+def _absolute_files(c: Candidate) -> set[Path]:
+    """Resolved set of absolute file paths this candidate points at.
+
+    Used by the v2.8.1 dedup in `find_candidates` so a qBit candidate
+    (parent dir + torrent-relative paths) and an fs candidate (torrent
+    dir + bare basenames) for the same files on disk collapse to one
+    entry.
+    """
+    base = Path(c.save_path)
+    return {base / f for f in c.book_files}
 
 
 async def start_reingest(
@@ -425,12 +476,19 @@ async def start_reingest(
     category: str,
     author_blob: str,
     candidate: Candidate,
-) -> tuple[int, int]:
+) -> tuple[int, int, bool]:
     """Create the grab + pipeline_run rows and kick off the pipeline.
 
-    Returns `(grab_id, pipeline_run_id)`. The caller (the HTTP
-    endpoint) typically returns those so the UI can poll the
-    pipeline status if it wants to.
+    Returns `(grab_id, pipeline_run_id, ok)` where `ok` is the
+    return value of `process_completion` (True = staged to review
+    queue / delivered to sink, False = pipeline failed for any
+    reason — missing file, sink unreachable, etc.). The caller is
+    responsible for surfacing `ok=False` to the user since the grab
+    + pipeline_run rows already exist at that point as audit-trail
+    artifacts. Pre-v2.8.1 this function returned only the two ids
+    and discarded `ok`, which let auto-start mid-pipeline failures
+    show a "success" toast to the user even when no review row was
+    actually created.
 
     Side effects:
       - Inserts a `grabs` row with `state=STATE_DOWNLOADED`,
@@ -514,4 +572,4 @@ async def start_reingest(
         grab_id, pipeline_run_id, ok, candidate.source,
         len(candidate.book_files), mam_torrent_id,
     )
-    return grab_id, pipeline_run_id
+    return grab_id, pipeline_run_id, bool(ok)
