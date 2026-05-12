@@ -429,6 +429,69 @@ def _read_calibre_series_authors(calibre_path: str) -> list[dict]:
     return list(by_book.values())
 
 
+async def _heal_legacy_duplicates(db, pipeline_db, slug):
+    """End-of-sync sweep across every Calibre row in the discovery DB.
+
+    Catches duplicates the per-UPDATE sweep would miss — typically
+    legacy pairs whose title was fixed in Calibre BEFORE v2.10.0
+    shipped, where the corresponding UPDATE event already fired
+    (without sweeping) and the next sync runs incrementally with
+    nothing to UPDATE. The query shape mirrors the per-UPDATE
+    sweep and the INSERT-path merge: exact-title match with
+    article-stripping for "The X" vs "X", same author, only when
+    EXACTLY one unowned non-Calibre candidate exists.
+
+    Idempotent — a re-run after all candidates have been merged
+    finds nothing and is a no-op.
+
+    Returns the count of merges performed so the sync's summary
+    line + progress dict can surface it.
+    """
+    from app.discovery.book_merge import merge_books, MergeError
+
+    cal_rows = await (await db.execute(
+        "SELECT id, author_id, title FROM books "
+        "WHERE source = 'calibre' AND calibre_id IS NOT NULL",
+    )).fetchall()
+    healed = 0
+    for row in cal_rows:
+        candidates = await (await db.execute("""
+            SELECT id FROM books
+            WHERE author_id = ? AND calibre_id IS NULL AND source != 'calibre'
+            AND id != ?
+            AND (
+                LOWER(TRIM(title)) = LOWER(TRIM(?))
+                OR REPLACE(LOWER(TRIM(title)), 'the ', '') =
+                   REPLACE(LOWER(TRIM(?)), 'the ', '')
+            )
+        """, (row["author_id"], row["id"], row["title"], row["title"]))
+        ).fetchall()
+        if len(candidates) != 1:
+            continue
+        loser_id = candidates[0]["id"]
+        try:
+            await merge_books(
+                db, pipeline_db,
+                library_slug=slug,
+                winner_id=row["id"],
+                loser_id=loser_id,
+                reason="calibre_sync_legacy_heal",
+            )
+        except MergeError as exc:
+            logger.warning(
+                "calibre_sync: legacy heal skipped winner=%d (%r): %s",
+                row["id"], (row["title"] or "")[:60], exc,
+            )
+            continue
+        healed += 1
+        logger.info(
+            "calibre_sync: legacy heal merged unowned id=%d into "
+            "Calibre row id=%d (%r)",
+            loser_id, row["id"], (row["title"] or "")[:60],
+        )
+    return healed
+
+
 async def _post_update_merge_sweep(
     db, pipeline_db, slug, our_author_id, calibre_title, calibre_row_id,
 ):
@@ -1045,6 +1108,20 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
 
         await db.commit()
 
+        # v2.10.1 end-of-sync legacy-duplicate heal pass. The per-UPDATE
+        # sweep added in v2.10.0 only fires for books Calibre touched
+        # in THIS sync run. In incremental mode (or whenever the user
+        # fixed Calibre metadata BEFORE deploying v2.10.0), an
+        # outstanding duplicate can survive: the calibre row's title
+        # already matches an unowned discovery row, but no UPDATE
+        # event fires because nothing in Calibre changed. This pass
+        # scans every Calibre row at end-of-sync and re-runs the
+        # exact same merge query the per-UPDATE sweep uses. Same
+        # conservative semantics — only fires when exactly one
+        # unambiguous candidate matches.
+        books_healed = await _heal_legacy_duplicates(db, pipeline_db, slug)
+        progress["books_merged_legacy_heal"] = books_healed
+
         await db.execute("""
             UPDATE sync_log SET finished_at=?, status='complete',
             books_found=?, books_new=? WHERE id=?
@@ -1053,7 +1130,8 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
 
         logger.info(
             f"Calibre sync complete ({mode}): {books_found} books, "
-            f"{books_new} new, {books_pruned} pruned"
+            f"{books_new} new, {books_pruned} pruned, "
+            f"{books_healed} legacy-duplicates healed"
         )
         progress.update({
             "running": False,

@@ -246,6 +246,84 @@ class TestPostUpdateMergeSweep:
         audits = await _audit_rows()
         assert audits == []
 
+    async def test_legacy_heal_pass_runs_in_incremental_mode(
+        self, discovery_db, monkeypatch,
+    ):
+        """v2.10.1 regression — the per-UPDATE sweep only fires for
+        books Calibre touched. If a duplicate's titles already match
+        but no UPDATE event fires (incremental mode with no changes
+        since last sync), the per-UPDATE sweep is a no-op. The
+        end-of-sync legacy heal pass catches these. Mark's
+        2026-05-12 case: he fixed Calibre titles BEFORE v2.10.0
+        deployed, so the resync after deploy was incremental and
+        skipped the sweep — the pairs stayed duplicated despite
+        having matching titles. The heal pass closes that gap.
+        """
+        from app.discovery import calibre_sync
+
+        # Pre-stage the duplicate state the way it ended up in
+        # Mark's library: a calibre row with the right title
+        # already present, plus an unowned discovery row with the
+        # matching title, both for the same author. The calibre
+        # row's calibre_id is in Calibre's books table so prune
+        # leaves it alone.
+        author_id = await _insert_author(
+            "William D. Arand", calibre_id=1,
+        )
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO books (title, author_id, source, owned, "
+                "calibre_id) VALUES (?, ?, 'calibre', 1, 3901)",
+                ("Dungeon Deposed 2", author_id),
+            )
+            await db.execute(
+                "INSERT INTO books (title, author_id, source, owned, "
+                "mam_torrent_id, goodreads_id) "
+                "VALUES (?, ?, 'goodreads', 1, '501690', '44164269')",
+                ("Dungeon Deposed 2", author_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Sync runs but Calibre returns NO modified books (incremental
+        # mode with last_mtime up to date — what happens on every
+        # routine sync between user edits). The per-UPDATE sweep has
+        # nothing to act on; the heal pass is the only thing that can
+        # fix this.
+        monkeypatch.setattr(
+            calibre_sync, "_read_calibre_db",
+            lambda *a, **kw: {"books": []},
+        )
+        # Prune phase needs to see 3901 in Calibre's id list so it
+        # doesn't delete the calibre row as "no longer in metadata.db".
+        monkeypatch.setattr(
+            calibre_sync, "_read_calibre_ids",
+            lambda *a, **kw: [3901],
+        )
+        await calibre_sync.sync_calibre("x", "y")
+
+        # Pair healed → one row left, an audit row exists with the
+        # legacy_heal reason.
+        db = await get_db()
+        try:
+            count = await (await db.execute(
+                "SELECT COUNT(*) AS n FROM books WHERE author_id = ?",
+                (author_id,),
+            )).fetchone()
+        finally:
+            await db.close()
+        assert count["n"] == 1, (
+            "end-of-sync heal pass should have folded the unowned "
+            "discovery row into the Calibre row"
+        )
+        audits = await _audit_rows()
+        legacy_heals = [a for a in audits
+                        if a["reason"] == "calibre_sync_legacy_heal"]
+        assert len(legacy_heals) >= 1
+
     async def test_no_merge_when_multiple_candidates_match(
         self, discovery_db, monkeypatch,
     ):

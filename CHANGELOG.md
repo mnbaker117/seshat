@@ -7,6 +7,40 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.1] — 2026-05-12
+
+End-of-sync legacy-duplicate heal pass — closes a v2.10.0 gap
+that surfaced during Mark's UAT.
+
+### Fixed — Per-UPDATE sweep silently no-ops when Calibre is quiet
+
+- **`app/discovery/calibre_sync.py:_heal_legacy_duplicates`** —
+  new pass that runs at end-of-sync regardless of mode and scans
+  every existing Calibre row for an unowned non-Calibre row with
+  an exact-title match (same article-stripping rule as the
+  INSERT-path merge and per-UPDATE sweep). When exactly one
+  match exists, it's folded in via `merge_books` with
+  `reason="calibre_sync_legacy_heal"`.
+
+  Why this is needed: the v2.10.0 per-UPDATE sweep only fires
+  for books Calibre touched in the current sync run. Mark's
+  2026-05-12 case: he fixed Calibre titles BEFORE v2.10.0
+  deployed, so the post-deploy resync ran in incremental mode
+  with `0 books, 0 new, 0 pruned` — every duplicate pair he
+  expected to heal stayed stuck because no UPDATE event fired.
+  The legacy heal pass closes that gap. Idempotent — re-running
+  after every duplicate has been folded finds nothing.
+
+### Tests
+
+- **`tests/discovery/test_calibre_sync_merge_sweep.py`** — one
+  new test (`test_legacy_heal_pass_runs_in_incremental_mode`)
+  that pre-stages the duplicate state Mark hit, then runs a sync
+  with `_read_calibre_db` mocked to return 0 books (the exact
+  incremental-quiet scenario), and asserts the pair heals.
+
+---
+
 ## [2.10.0] — 2026-05-12
 
 Duplicate-row resolution: manual merge UI + automatic post-UPDATE
