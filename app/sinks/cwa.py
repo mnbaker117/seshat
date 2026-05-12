@@ -24,6 +24,7 @@ import shutil
 from pathlib import Path
 
 from app.metadata.extract import BookMetadata
+from app.sinks._cwa_throttle import throttle
 from app.sinks.base import SinkResult
 
 _log = logging.getLogger("seshat.sinks")
@@ -34,8 +35,9 @@ class CWASink:
 
     name = "cwa"
 
-    def __init__(self, ingest_path: str):
+    def __init__(self, ingest_path: str, min_gap_seconds: float = 10.0):
         self.ingest_path = ingest_path
+        self.min_gap_seconds = min_gap_seconds
 
     async def deliver(
         self,
@@ -63,38 +65,42 @@ class CWASink:
             )
 
         target_dir = Path(self.ingest_path)
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / src.name
+        # Throttle the write so consecutive deliveries to the same CWA
+        # ingest path don't overlap and wedge cps's HTTP listener — see
+        # _cwa_throttle.py for the full failure-mode write-up.
+        async with throttle(self.ingest_path, self.min_gap_seconds):
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                dest = target_dir / src.name
 
-            # Avoid overwriting if a file with the same name is pending.
-            if dest.exists():
-                stem = dest.stem
-                suffix = dest.suffix
-                counter = 1
-                while dest.exists():
-                    dest = target_dir / f"{stem}_{counter}{suffix}"
-                    counter += 1
+                # Avoid overwriting if a file with the same name is pending.
+                if dest.exists():
+                    stem = dest.stem
+                    suffix = dest.suffix
+                    counter = 1
+                    while dest.exists():
+                        dest = target_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
 
-            # Atomic write: copy to a hidden temp file in the same dir,
-            # then rename to the final name. CWA's inotify watcher only
-            # fires on the rename (close_write event on the final name),
-            # so it never sees a partial file. The temp filename starts
-            # with a dot so CWA's "ignored/temporary file" filter skips it.
-            tmp_dest = target_dir / f".seshat-tmp-{dest.name}"
-            shutil.copy2(str(src), str(tmp_dest))
-            tmp_dest.replace(dest)  # atomic rename on the same filesystem
+                # Atomic write: copy to a hidden temp file in the same dir,
+                # then rename to the final name. CWA's inotify watcher only
+                # fires on the rename (close_write event on the final name),
+                # so it never sees a partial file. The temp filename starts
+                # with a dot so CWA's "ignored/temporary file" filter skips it.
+                tmp_dest = target_dir / f".seshat-tmp-{dest.name}"
+                shutil.copy2(str(src), str(tmp_dest))
+                tmp_dest.replace(dest)  # atomic rename on the same filesystem
 
-            _log.info("cwa sink: dropped %s → %s", src.name, dest)
-            return SinkResult(
-                success=True,
-                sink_name=self.name,
-                detail=str(dest),
-            )
-        except Exception as e:
-            _log.exception("cwa sink copy failed")
-            return SinkResult(
-                success=False,
-                sink_name=self.name,
-                error=f"{type(e).__name__}: {e}",
-            )
+                _log.info("cwa sink: dropped %s → %s", src.name, dest)
+                return SinkResult(
+                    success=True,
+                    sink_name=self.name,
+                    detail=str(dest),
+                )
+            except Exception as e:
+                _log.exception("cwa sink copy failed")
+                return SinkResult(
+                    success=False,
+                    sink_name=self.name,
+                    error=f"{type(e).__name__}: {e}",
+                )

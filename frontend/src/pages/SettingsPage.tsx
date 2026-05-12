@@ -758,6 +758,12 @@ function DesktopSettingsPage() {
               <SF label="CWA Ingest Path" desc="Folder CWA watches for auto-import. Ebooks dropped here flow through CWA's conversion + ingest pipeline.">
                 <input value={(s.cwa_ingest_path as string) || ""} onChange={e => upd("cwa_ingest_path", e.target.value)} placeholder="/cwa-ingest" style={{ ...ist, width: 260 }} />
               </SF>
+              <SF label="CWA Inter-Book Delay" desc="Minimum gap between successive book drops into the CWA ingest folder. CWA's post-import duplicate scan runs inside its single-threaded web process; overlapping ingests can wedge it until the container restarts. Default 10s covers CWA's stock 5s import-debounce with margin. Set to 0 if you've turned off CWA's 'Enable automatic duplicate scans' (it's then unnecessary). Raise above 10 if you've increased CWA's import-debounce setting.">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="number" min={0} max={120} step={1} value={(s.cwa_min_inter_book_seconds as number) ?? 10} onChange={e => upd("cwa_min_inter_book_seconds", Math.max(0, Math.min(120, Number(e.target.value) || 0)))} style={{ ...nist, width: 80 }} />
+                  <span style={{ fontSize: 13, color: t.textDim }}>seconds</span>
+                </div>
+              </SF>
               <SF label="Folder Sink Path" desc="Destination when Default Sink is set to Folder.">
                 <input value={(s.folder_sink_path as string) || ""} onChange={e => upd("folder_sink_path", e.target.value)} placeholder="/books" style={{ ...ist, width: 260 }} />
               </SF>
@@ -1385,6 +1391,23 @@ function DiscMamSection({ s, upd, ist, nist }: { s: S; upd: (k: string, v: unkno
             m4b = chapterized single-file · m4a = single-file no chapters · mp3 = multi-part legacy
           </div>
         </div>
+      </div>
+    </SF>
+    <SF label="Format Dedup Hold Window" desc="How long to hold a lower-priority format announce waiting for a higher-priority sibling to arrive. Disabled formats above are held this long; if a higher-priority sibling arrives within the window, the lower-priority hold is dropped. If nothing higher-priority arrives, the held format grabs anyway. Default 10 minutes.">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="number"
+          min={1}
+          max={60}
+          step={1}
+          value={Math.max(1, Math.min(60, Math.round(((s.format_dedup_hold_seconds as number) ?? 600) / 60)))}
+          onChange={e => {
+            const mins = Math.max(1, Math.min(60, parseInt(e.target.value) || 10));
+            upd("format_dedup_hold_seconds", mins * 60);
+          }}
+          style={nist}
+        />
+        <span style={{ fontSize: 13, color: t.textDim }}>minutes</span>
       </div>
     </SF>
     <SF label="Test Scan" desc="Run a quick test scan on 10 books to verify MAM integration.">

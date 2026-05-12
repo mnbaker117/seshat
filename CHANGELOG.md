@@ -7,6 +7,78 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.3] — 2026-05-12
+
+CWA delivery throttle to work around a CWA cps wedge, plus a UI
+control for the v2.9.0 format-dedup hold window that was added to
+the backend defaults but never exposed in Settings.
+
+### Fixed — Overlapping CWA ingests wedge cps's HTTP listener
+
+- **`app/sinks/_cwa_throttle.py`** (new) — per-ingest-path async
+  lock + minimum-gap-since-last-release. CWA's post-import
+  duplicate scan runs inside the single-threaded cps web process
+  on a 5s default debounce; when Seshat dropped a second book
+  into the watched ingest folder while that scan was pending or
+  running, the second book's ingest-processor → cps web-API
+  callbacks (`session_refresh`, `cache_invalidate`,
+  `schedule_scan`) all hit a 5s read timeout and cps stopped
+  accepting any HTTP at all until the container was restarted.
+  Reproduced 2026-05-11 ~22:40 with a two-book approve-all from
+  Seshat. The throttle serializes deliveries to a given CWA path
+  and ensures consecutive drops are at least N seconds apart;
+  multi-CWA setups with different ingest paths don't contend.
+  Single deliveries pay zero wait (no prior release to gate
+  against).
+
+- **`app/sinks/cwa.py:CWASink`** — wraps the file copy/rename in
+  the throttle context manager. New `min_gap_seconds` constructor
+  arg (default 10s).
+
+- **`app/orchestrator/dispatch.py:PipelineDeps`,
+  `app/main.py`, `app/orchestrator/pipeline.py`,
+  `app/orchestrator/budget_watcher.py`,
+  `app/orchestrator/review_timeout.py`,
+  `app/orchestrator/reingest.py`, `app/routers/review.py`** —
+  threaded `cwa_min_inter_book_seconds` through the same
+  topology as `cwa_ingest_path` so every entry-point that
+  delivers to CWA (download-complete, review approval, review
+  timeout, reingest) carries the user's setting through.
+
+- **`app/config.py:cwa_min_inter_book_seconds`** — new setting,
+  default 10. 0 disables (safe if you've turned off CWA's
+  "Enable automatic duplicate scans"). Raise above 10 if you've
+  increased CWA's `After import debounce` setting.
+
+- **`frontend/src/pages/SettingsPage.tsx`** — new "CWA Inter-Book
+  Delay" input in Sinks → Advanced paths. Numeric, 0–120
+  seconds, with help text covering both the "disable" and
+  "raise" cases.
+
+### Fixed — v2.9.0 format-dedup hold window had no UI control
+
+- **`frontend/src/pages/SettingsPage.tsx`** — new "Format Dedup
+  Hold Window" input in Discovery → MAM, right after the Format
+  Priorities row. Integer minutes, 1–60 range, persists as
+  seconds (`format_dedup_hold_seconds`). The FiltersPage
+  description text already pointed users at "Settings" for this
+  knob — wiring it makes that hint true.
+
+### Tests
+
+- `tests/sinks/test_cwa_throttle.py` (new, 10 cases) — first
+  delivery passes through, second within window waits the
+  remainder of the gap, partial-elapsed subtracts, past-window
+  no wait, different paths independent, gap=0 disables, negative
+  gap treated as disabled, concurrent deliveries serialize.
+- Two CWASink integration cases for the throttle wired into the
+  sink's deliver path (gap=0 → no wait; gap > 0 → second
+  delivery pays it).
+
+Suite: **2174 passing, 7 skipped** (up from 2164 at v2.10.2).
+
+---
+
 ## [2.10.2] — 2026-05-12
 
 `_resolve_position_collision` now routes through `merge_books`

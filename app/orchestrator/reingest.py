@@ -591,6 +591,7 @@ async def start_reingest(
         abs_api_key=getattr(deps, "abs_api_key", ""),
         abs_library_id=getattr(deps, "abs_library_id", ""),
         cwa_ingest_path=getattr(deps, "cwa_ingest_path", ""),
+        cwa_min_inter_book_seconds=getattr(deps, "cwa_min_inter_book_seconds", 10.0),
         category_routing=getattr(deps, "category_routing", None) or {},
         ntfy_url=getattr(deps, "ntfy_url", ""),
         ntfy_topic=getattr(deps, "ntfy_topic", ""),

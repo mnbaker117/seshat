@@ -388,6 +388,9 @@ async def _build_dispatcher(settings: dict, resolved_secrets: dict = None) -> Di
         abs_api_key=(resolved_secrets or {}).get("abs_api_key", "") or "",
         abs_library_id=settings.get("abs_sink_library_id", ""),
         cwa_ingest_path=settings.get("cwa_ingest_path", ""),
+        cwa_min_inter_book_seconds=float(
+            settings.get("cwa_min_inter_book_seconds", 10) or 0
+        ),
         category_routing=settings.get("category_routing", {}),
         ntfy_url=settings.get("ntfy_url", ""),
         ntfy_topic=settings.get("ntfy_topic", "seshat"),

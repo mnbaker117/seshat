@@ -207,6 +207,11 @@ class DispatcherDeps:
     abs_api_key: str = ""
     abs_library_id: str = ""
     cwa_ingest_path: str = ""
+    # Minimum gap (seconds) between successive deliveries to the same
+    # CWA ingest path — works around a CWA cps wedge when overlapping
+    # imports trigger the post-import duplicate scan. See
+    # `app/sinks/_cwa_throttle.py`. 0 disables the throttle.
+    cwa_min_inter_book_seconds: float = 10.0
     category_routing: dict = field(default_factory=dict)
     ntfy_url: str = ""
     ntfy_topic: str = "seshat"

@@ -310,6 +310,18 @@ DEFAULT_SETTINGS = {
     # folder and auto-imports any book files dropped here. Safest
     # Calibre integration — no direct metadata.db writes.
     "cwa_ingest_path": "",
+    # Minimum gap (seconds) between successive book drops into the CWA
+    # ingest folder. CWA's post-import duplicate scan runs inside the
+    # single-threaded cps web process on a 5s debounce by default; when
+    # two ingests overlap, the second's web-API callbacks time out and
+    # cps loses its HTTP listener until the container is restarted
+    # (reproduced 2026-05-11 with a 2-book approve-all). A 10s default
+    # gap covers the 5s debounce + scan duration with margin. Per-
+    # ingest-path lock — multi-CWA setups don't contend. Set to 0 to
+    # disable (safe if you've turned off CWA's "Enable automatic
+    # duplicate scans"); raise above 10 if you've increased CWA's
+    # import-debounce setting.
+    "cwa_min_inter_book_seconds": 10,
     # CWA push-back (v2.3.5) — when slim users want metadata edits to
     # land in their CWA-managed Calibre library. Seshat drives CWA's
     # `/admin/book/<id>` form POST handler (the one its own SPA uses).

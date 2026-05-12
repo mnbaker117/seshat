@@ -283,6 +283,7 @@ async def process_completion(
     abs_api_key: str = "",
     abs_library_id: str = "",
     cwa_ingest_path: str = "",
+    cwa_min_inter_book_seconds: float = 10.0,
     category_routing: dict[str, str] = None,
     ntfy_url: str,
     ntfy_topic: str,
@@ -365,6 +366,7 @@ async def process_completion(
                     abs_api_key=abs_api_key,
                     abs_library_id=abs_library_id,
                     cwa_ingest_path=cwa_ingest_path,
+                    cwa_min_inter_book_seconds=cwa_min_inter_book_seconds,
                     ntfy_url=ntfy_url,
                     ntfy_topic=ntfy_topic,
                     auto_train_enabled=auto_train_enabled,
@@ -1150,6 +1152,7 @@ async def _deliver_prepared(
     folder_sink_path: str,
     audiobookshelf_library_path: str,
     cwa_ingest_path: str,
+    cwa_min_inter_book_seconds: float,
     ntfy_url: str,
     ntfy_topic: str,
     auto_train_enabled: bool,
@@ -1171,6 +1174,7 @@ async def _deliver_prepared(
         abs_api_key=abs_api_key,
         abs_library_id=abs_library_id,
         book_format=prep.book_format,
+        cwa_min_inter_book_seconds=cwa_min_inter_book_seconds,
     )
 
     try:
@@ -1261,6 +1265,7 @@ async def deliver_reviewed(
     abs_api_key: str = "",
     abs_library_id: str = "",
     cwa_ingest_path: str = "",
+    cwa_min_inter_book_seconds: float = 10.0,
     ntfy_url: str = "",
     ntfy_topic: str = "",
     auto_train_enabled: bool = True,
@@ -1426,6 +1431,7 @@ async def deliver_reviewed(
         abs_api_key=abs_api_key,
         abs_library_id=abs_library_id,
         cwa_ingest_path=cwa_ingest_path,
+        cwa_min_inter_book_seconds=cwa_min_inter_book_seconds,
         ntfy_url=ntfy_url,
         ntfy_topic=ntfy_topic,
         auto_train_enabled=auto_train_enabled,
@@ -1513,6 +1519,7 @@ def _pick_sink(
     abs_library_id: str = "",
     book_format: str = "",
     category: str = "",
+    cwa_min_inter_book_seconds: float = 10.0,
 ):
     """Select the sink for a delivered book.
 
@@ -1533,7 +1540,7 @@ def _pick_sink(
     if default_sink == "calibre":
         return CalibreSink(calibre_library_path)
     if default_sink == "cwa":
-        return CWASink(cwa_ingest_path)
+        return CWASink(cwa_ingest_path, cwa_min_inter_book_seconds)
     if default_sink == "audiobookshelf":
         return AudiobookshelfSink(
             audiobookshelf_library_path,

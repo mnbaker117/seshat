@@ -213,6 +213,7 @@ async def _tick_inner(deps: DispatcherDeps, db) -> TickResult:
                         abs_api_key=deps.abs_api_key,
                         abs_library_id=deps.abs_library_id,
                         cwa_ingest_path=deps.cwa_ingest_path,
+                        cwa_min_inter_book_seconds=deps.cwa_min_inter_book_seconds,
                         category_routing=deps.category_routing,
                         ntfy_url=deps.ntfy_url,
                         ntfy_topic=deps.ntfy_topic,
