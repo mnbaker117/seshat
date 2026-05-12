@@ -59,6 +59,7 @@ from app.notify.digests import DigestContext
 from app.notify.ntfy import aclose as ntfy_aclose
 from app.auth_db import init_auth_db
 from app.auth_sessions import SESSION_COOKIE_NAME, verify_session_token
+from app.routers.announces import router as announces_router
 from app.routers.grabs import router as grabs_router
 from app.routers.auth import router as auth_router
 from app.routers.authors import router as authors_router
@@ -1129,6 +1130,7 @@ app.add_middleware(AuthMiddleware)
 # Auth router is registered first by convention since it gates
 # everything else. The other routers are protected by the middleware.
 app.include_router(grabs_router)
+app.include_router(announces_router)
 app.include_router(auth_router)
 app.include_router(authors_router)
 app.include_router(covers_router)

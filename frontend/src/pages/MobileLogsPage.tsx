@@ -25,6 +25,27 @@ interface LogsResponse {
   total_buffered: number;
 }
 
+// v2.9.0 — structured announces audit row.
+interface AnnounceRow {
+  id: number;
+  seen_at: string;
+  torrent_name: string;
+  author_blob: string;
+  category: string;
+  filetype: string;
+  decision: string;
+  decision_reason: string;
+  matched_author: string;
+}
+
+interface AnnouncesResponse {
+  rows: AnnounceRow[];
+  total_matched: number;
+  decision_counts: Record<string, number>;
+}
+
+type DecisionFilter = "all" | "allow" | "skip" | "hold";
+
 type Tab = "all" | "announces" | "application" | "irc" | "scans";
 
 const TABS: { v: Tab; label: string }[] = [
@@ -45,13 +66,29 @@ export default function MobileLogsPage() {
   const [filter, setFilter] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  const [announces, setAnnounces] = useState<AnnouncesResponse | null>(null);
+  const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
+
   const load = async () => {
     try {
+      if (tab === "announces") {
+        const params = new URLSearchParams({ limit: "500" });
+        if (decisionFilter !== "all") params.set("decision", decisionFilter);
+        if (filter.trim()) params.set("q", filter.trim());
+        const r = await api.get<AnnouncesResponse>(
+          `/v1/announces?${params}`,
+        );
+        setAnnounces(r);
+        setEntries([]);
+        setTotal(r.total_matched);
+        setError(null);
+        return;
+      }
       const params = new URLSearchParams({ lines: "2000" });
-      if (tab === "announces") params.set("filter", "announces");
-      else if (tab !== "all") params.set("category", tab);
+      if (tab !== "all") params.set("category", tab);
       const r = await api.get<LogsResponse>(`/v1/logs?${params}`);
       setEntries(r.entries);
+      setAnnounces(null);
       setTotal(r.total_buffered);
       setError(null);
     } catch (e) {
@@ -62,7 +99,13 @@ export default function MobileLogsPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, decisionFilter]);
+  useEffect(() => {
+    if (tab !== "announces") return;
+    const t = setTimeout(load, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, tab]);
   useVisibleInterval(() => {
     if (autoScroll) load();
   }, 5000);
@@ -194,7 +237,123 @@ export default function MobileLogsPage() {
         </div>
       )}
 
-      {/* Log list */}
+      {/* v2.9.0 Announces tab: decision filter chips */}
+      {tab === "announces" && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {(["all", "allow", "skip", "hold"] as DecisionFilter[]).map((d) => {
+            const n = d === "all"
+              ? (announces?.decision_counts.allow ?? 0)
+                + (announces?.decision_counts.skip ?? 0)
+                + (announces?.decision_counts.hold ?? 0)
+              : announces?.decision_counts[d] ?? 0;
+            return (
+              <MobileChip
+                key={d}
+                active={decisionFilter === d}
+                onClick={() => setDecisionFilter(d)}
+              >
+                {d === "all" ? "All" : d[0].toUpperCase() + d.slice(1)} ({n})
+              </MobileChip>
+            );
+          })}
+        </div>
+      )}
+
+      {/* v2.9.0 Announces tab: structured row list */}
+      {tab === "announces" ? (
+        <div
+          style={{
+            background: t.bg2,
+            border: `1px solid ${t.border}`,
+            borderRadius: 12,
+            maxHeight: "60vh",
+            overflowY: "auto",
+            fontSize: 12,
+          }}
+        >
+          {announces === null ? (
+            <div style={{ padding: 16, color: t.tg }}>Loading…</div>
+          ) : announces.rows.length === 0 ? (
+            <div style={{ padding: 16, color: t.tg }}>
+              No announces match the current filters.
+            </div>
+          ) : (
+            announces.rows.map((row) => {
+              const tone =
+                row.decision === "allow" ? t.grn
+                : row.decision === "skip" ? t.red
+                : row.decision === "hold" ? t.warn
+                : t.text2;
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    padding: "8px 10px",
+                    borderBottom: `1px solid ${t.borderL}`,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 4,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <span
+                      style={{
+                        background: tone + "22",
+                        color: tone,
+                        padding: "1px 6px",
+                        borderRadius: 4,
+                        fontWeight: 700,
+                        fontSize: 10,
+                        textTransform: "uppercase",
+                        letterSpacing: 0.4,
+                      }}
+                    >
+                      {row.decision}
+                    </span>
+                    {row.filetype && (
+                      <span
+                        style={{
+                          color: t.tg,
+                          fontFamily: "ui-monospace",
+                          textTransform: "uppercase",
+                          fontSize: 10,
+                        }}
+                      >
+                        {row.filetype}
+                      </span>
+                    )}
+                    <span style={{ color: t.text, fontWeight: 600 }}>
+                      {row.torrent_name || "(no name)"}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      flexWrap: "wrap",
+                      color: t.tg,
+                      fontSize: 11,
+                    }}
+                  >
+                    {row.author_blob && <span>{row.author_blob}</span>}
+                    <span style={{ fontFamily: "ui-monospace" }}>
+                      {row.decision_reason}
+                    </span>
+                    <span style={{ marginLeft: "auto" }}>{row.seen_at}</span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      ) : (
       <div
         style={{
           background: t.bg2,
@@ -250,6 +409,7 @@ export default function MobileLogsPage() {
         )}
         <div ref={bottomRef} />
       </div>
+      )}
     </div>
   );
 }
