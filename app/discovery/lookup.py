@@ -36,6 +36,7 @@ import aiosqlite
 from app.config import load_settings
 from app.discovery.database import get_db
 from app.discovery.sources.hardcover import HardcoverSource
+from app.discovery.sources.openlibrary import OpenLibrarySource
 from app.discovery.sources.goodreads import GoodreadsSource
 from app.discovery.sources.kobo import KoboSource
 from app.discovery.sources.amazon import AmazonSource
@@ -170,6 +171,7 @@ kobo = KoboSource()
 amazon = AmazonSource()
 ibdb = IbdbSource()
 google_books = GoogleBooksSource()
+openlibrary = OpenLibrarySource()
 audible = AudibleDiscoverySource()
 
 
@@ -183,7 +185,7 @@ def reload_sources():
     setting is missing so upgrade paths keep working before the
     panel is touched.
     """
-    global hardcover, goodreads, kobo, amazon, ibdb, google_books, audible
+    global hardcover, goodreads, kobo, amazon, ibdb, google_books, openlibrary, audible
     from app.metadata.source_config import get_source_rate_limit
     s = load_settings()
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
@@ -192,6 +194,7 @@ def reload_sources():
     amazon = AmazonSource(rate_limit=get_source_rate_limit(s, "amazon"))
     ibdb = IbdbSource(rate_limit=get_source_rate_limit(s, "ibdb"))
     google_books = GoogleBooksSource(rate_limit=get_source_rate_limit(s, "google_books"))
+    openlibrary = OpenLibrarySource(rate_limit=get_source_rate_limit(s, "openlibrary"))
     audible = AudibleDiscoverySource(
         region=s.get("audible_region", "us"),
         rate_limit=get_source_rate_limit(s, "audible"),
@@ -235,6 +238,7 @@ def _src_kobo():         return kobo
 def _src_amazon():       return amazon
 def _src_ibdb():         return ibdb
 def _src_google_books(): return google_books
+def _src_openlibrary():  return openlibrary
 def _src_audible():      return audible
 
 
@@ -248,6 +252,7 @@ SOURCES: list[SourceSpec] = [
     SourceSpec("amazon",       "secondary",     180.0, _src_amazon,       False),
     SourceSpec("ibdb",         "supplementary",  90.0, _src_ibdb,         False),
     SourceSpec("google_books", "supplementary",  60.0, _src_google_books, False),
+    SourceSpec("openlibrary",  "supplementary", 120.0, _src_openlibrary,  False),
 ]
 
 
@@ -260,8 +265,9 @@ SOURCES: list[SourceSpec] = [
 # surface audiobook-specific metadata and the catalog coverage
 # heavily overlaps Audible.
 AUDIOBOOK_SOURCES: list[SourceSpec] = [
-    SourceSpec("audible",   "primary",   300.0, _src_audible,   True),
-    SourceSpec("hardcover", "secondary", 180.0, _src_hardcover, True),
+    SourceSpec("audible",     "primary",       300.0, _src_audible,     True),
+    SourceSpec("hardcover",   "secondary",     180.0, _src_hardcover,   True),
+    SourceSpec("openlibrary", "supplementary", 120.0, _src_openlibrary, False),
 ]
 
 

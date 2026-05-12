@@ -7,6 +7,124 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.6] — 2026-05-13
+
+Three discovery-source improvements bundled together: Open Library
+joins as a free no-key supplementary source (Phase 2 of the v2.11.0
+metadata-source overhaul), the Kobo author-match gate gets the same
+v2.10.5 punctuation-insensitivity fix Hardcover received, and
+Amazon's `_fetch` learns to detect CAPTCHA / robot-check responses
+explicitly with jittered rate-limiting (Phase 4).
+
+Google Books API-key wiring (Phase 3) lands in a follow-on once
+Mark provisions the key per the runbook at
+`/home/mbaker/Documents/Projects/files/google-books-api-setup.md`.
+
+### Added — Open Library discovery source
+
+`app/discovery/sources/openlibrary.py` (new) — sanctioned REST API
+(no auth required), two-phase shape mirroring the v2.10.5
+HardcoverSource pattern:
+
+  1. `_resolve_author_key`: search authors by name via
+     `/search/authors.json`, disambiguate by strict normalized-name
+     match + `work_count` tiebreaker. Falls back to the top-ranked
+     OL hit when no candidate passes the strict gate.
+  2. `_fetch_all_author_works`: paginated walk of
+     `/authors/{key}/works.json` (100 entries/page, 30-page max).
+
+Series extraction is best-effort from title patterns
+("Title (Series Name, #N)") with a reject-list for common edition
+decorations ("Annotated", "Illustrated", "Nth Edition", "Boxed Set"
+— exact-name lookup PLUS regex for ordinal-edition variants).
+
+Live coverage check across the 14-author validation set:
+- **Strong**: Brandon Sanderson 192, Jim Butcher 129, Corey 91,
+  J. N. Chaney 95, Karen Traviss 80, Sabaa Tahir 43
+- **Weak**: indie/non-Latin (Marcus Sloss 10, Hasekura 5)
+
+Registered in `app/metadata/source_config.py` as supplementary
+tier (`mandatory: false`, default-enabled). Slotted into the
+default ebook + audiobook priority lists at position 8 / 8.
+
+### Fixed — Kobo author-match drops books on space/period mismatch
+
+Same root cause we fixed in HardcoverSource at v2.10.5: when the
+queried author name's punctuation doesn't exactly match Kobo's
+canonical spelling, every book gets silently dropped. Reproduced
+during the v2.10.5 UAT scan: every "J.N. Chaney" Kobo result was
+rejected because the queried name was "J. N. Chaney" (with spaces).
+
+The matcher's previous tiers — exact, period-strip, parts-set —
+all fail this case because period-strip alone leaves "j n chaney"
+vs "jn chaney", which don't compare equal. Added a third tier
+that strips punctuation AND whitespace; both forms now collapse
+to "jnchaney" for comparison.
+
+Refactored the previously-closure'd matcher into a module-level
+`_kobo_author_matches(card_author, queried, linked)` so it's
+unit-testable independently of the surrounding `get_author_books`
+plumbing.
+
+### Fixed — Amazon `_fetch` silently swallows CAPTCHA / robot-check responses
+
+The Phase 0 baseline harness showed Amazon CAPTCHA-blocking
+mid-batch (5 of 14 authors worked, then everything else returned
+None with no clear log signal). Pre-fix `_fetch` returned None on
+any non-200 with no distinction between "genuine miss" and "blocked
+at the gate," and lacked jitter on the rate-limit which is itself
+a fingerprint trigger.
+
+`app/discovery/sources/amazon.py:_fetch`:
+
+- **CAPTCHA detection** on 200 responses (`_is_captcha_page`).
+  Amazon serves `/errors/validateCaptcha` interstitials with HTTP
+  200, so a status-only check accepted them. Detected pages log
+  distinctly ("CAPTCHA challenge detected ... soft-blocked") and
+  return None without retry (retrying just hits the same gate).
+- **Robot-check 503 detection** (`_is_robot_check_503`). 503s
+  with "Robot Check" or "automated access" in the body are soft-
+  blocks, not upstream errors — single attempt, no retry.
+- **Genuine 5xx retry** with one 8s backoff. Network / upstream-
+  transient failures retry once; persistent 5xx degrades to None.
+- **Jittered rate-limit**: `rate_limit + uniform(0, 0.5)` so
+  request cadence isn't perfectly periodic.
+- **CAPTCHA re-check on retry path** — Amazon sometimes flips
+  from 503 to a 200-CAPTCHA between calls.
+
+### Tests
+
+- `tests/discovery/sources/test_openlibrary.py` (new, 20 cases) —
+  series-extraction edge cases, author-key resolution
+  (single/multi/tiebreak/no-strict-match/period-normalization),
+  pagination, end-to-end assembly, format-decoration rejection
+  (Annotated, Nth Edition, Boxed Set, etc.).
+- `tests/discovery/sources/test_kobo_author_matches.py` (new, 12
+  cases) — every match tier including the v2.10.6 punct+ws regression
+  case, pen-name aliases, partial-match rejection.
+- `tests/discovery/sources/test_amazon_hardening.py` (new, 19
+  cases) — pure helpers for CAPTCHA / robot-check detection, plus
+  `_fetch` behavior tests (normal 200, CAPTCHA-no-retry, robot-503-
+  no-retry, genuine 5xx with backoff, retry-CAPTCHA, 4xx-no-retry,
+  jitter applied to rate-limit, network error).
+
+Suite: **2252 passing, 7 skipped** (+51 from v2.10.5's 2201).
+
+### Implications for v2.11.0
+
+- Open Library is now a real participating source with sanctioned
+  API access, no rate-limit risk, and meaningful trad-pub coverage.
+  Adds a useful safety net when Hardcover misses a book and
+  Goodreads is Cloudflare-blocked.
+- The Kobo punctuation fix retroactively closes a coverage gap
+  that's been silently dropping books for any author with
+  initials. Worth a re-scan of any author with "X. Y." style names.
+- Amazon hardening doesn't increase coverage but should reduce
+  the noise when Amazon does block — distinct logs make
+  diagnosing future blocks much faster.
+
+---
+
 ## [2.10.5] — 2026-05-13
 
 Rewrites `HardcoverSource` to use a direct two-phase author-id

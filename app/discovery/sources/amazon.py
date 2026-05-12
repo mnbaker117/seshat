@@ -24,6 +24,7 @@ Key anti-bot measures:
 """
 import asyncio
 import logging
+import random
 import re
 from datetime import datetime
 from typing import Optional
@@ -78,6 +79,42 @@ _RX_JUNK_TITLE = re.compile(
 # and show "Audible Audiobook" in the format area.
 _AUDIO_FORMAT_KEYWORDS = {"audible", "audiobook", "audio cd", "listening length"}
 
+# CAPTCHA page detection. Amazon serves a `/errors/validateCaptcha`
+# interstitial under load; the response is HTTP 200 (not an error
+# code) so a naive 200-only check accepts it as a real page. The
+# page body has very stable markers we look for.
+_CAPTCHA_MARKERS = (
+    "Enter the characters you see below",
+    "Sorry, we just need to make sure you're not a robot",
+    "/errors/validateCaptcha",
+    "Type the characters you see in this image",
+)
+
+# Robot-check / soft-block markers in 503 bodies. Amazon's edge
+# protections sometimes return 503 with a similar interstitial body;
+# distinguish from genuine upstream 503s so we don't retry-storm.
+_ROBOT_CHECK_MARKERS = (
+    "Robot Check",
+    "automated access to Amazon data",
+    "captcha",
+)
+
+
+def _is_captcha_page(body: str) -> bool:
+    """Detect Amazon's CAPTCHA / robot-check interstitial in a 200 body."""
+    if not body:
+        return False
+    return any(m in body for m in _CAPTCHA_MARKERS)
+
+
+def _is_robot_check_503(status: int, body: str) -> bool:
+    """Detect a 503 that's actually an Amazon soft-block (not a genuine
+    upstream error). Used to suppress backoff-retry storms on a block."""
+    if status != 503 or not body:
+        return False
+    lower = body.lower()
+    return any(m.lower() in lower for m in _ROBOT_CHECK_MARKERS)
+
 
 class AmazonSource(BaseSource):
     """Amazon Kindle Store metadata source.
@@ -103,21 +140,89 @@ class AmazonSource(BaseSource):
         super().__init__(rate_limit=rate_limit)
 
     async def _fetch(self, url: str, params: dict = None) -> Optional[str]:
-        """HTTP GET with rate limiting, no retries.
+        """HTTP GET with jittered rate limiting + selective retry.
 
-        Amazon blocks aggressive retry patterns, so we degrade
-        gracefully: one shot, return None on failure.
+        v2.10.6 Amazon hardening:
+          - **Jitter** added to rate-limit (`+ uniform(0, 0.5)`) so
+            request cadence isn't perfectly periodic — periodicity is
+            an obvious bot fingerprint.
+          - **CAPTCHA detection** on 200 responses. Amazon serves
+            `/errors/validateCaptcha` interstitials with HTTP 200, so
+            a naive status-only check accepts them as real pages.
+            Detected pages are logged distinctly and return None
+            without retry (retrying would just hit the same gate
+            again).
+          - **Robot-check 503 detection**: a 503 with "Robot Check"
+            in the body is a soft-block, not an upstream error.
+            Single attempt, no retry — retry-storms make the gate
+            stickier.
+          - **Genuine 5xx retry** with one backoff (8s). Network /
+            upstream-transient failures retry once; harder failures
+            degrade to None.
         """
-        await asyncio.sleep(self.rate_limit)
+        # Jittered sleep — periodicity is fingerprint-y. ±25% of base
+        # rate gives meaningful variance without slowing the scan.
+        await asyncio.sleep(self.rate_limit + random.uniform(0, 0.5))
+
+        # First attempt
         try:
             resp = await self.client.get(url, params=params)
-            if resp.status_code == 200:
-                return resp.text
-            logger.info(f"  amazon: HTTP {resp.status_code} for {url}")
-            return None
         except Exception as e:
             logger.debug(f"  amazon: fetch error for {url}: {e}")
             return None
+
+        status = resp.status_code
+        body = resp.text if status >= 200 else ""
+
+        # CAPTCHA on a 200 — soft-block, no retry.
+        if status == 200 and _is_captcha_page(body):
+            logger.info(
+                f"  amazon: CAPTCHA challenge detected at {url} "
+                "(soft-blocked) — no retry, returning None"
+            )
+            return None
+
+        if status == 200:
+            return body
+
+        # Robot-check 503 — soft-block, no retry.
+        if _is_robot_check_503(status, body):
+            logger.info(
+                f"  amazon: 503 robot-check at {url} (soft-blocked) "
+                "— no retry, returning None"
+            )
+            return None
+
+        # Genuine 5xx → one backoff retry. Other non-200 (404, 403,
+        # 410) → log and bail; not retryable.
+        if 500 <= status < 600:
+            logger.info(
+                f"  amazon: HTTP {status} for {url} — retrying once after 8s"
+            )
+            await asyncio.sleep(8.0)
+            try:
+                resp = await self.client.get(url, params=params)
+            except Exception as e:
+                logger.debug(f"  amazon: retry error for {url}: {e}")
+                return None
+            if resp.status_code == 200:
+                # Re-check for CAPTCHA on the retry too — Amazon
+                # sometimes flips from 503 to a 200 CAPTCHA page on
+                # the second hit.
+                if _is_captcha_page(resp.text):
+                    logger.info(
+                        f"  amazon: CAPTCHA challenge on retry at {url} "
+                        "(soft-blocked) — returning None"
+                    )
+                    return None
+                return resp.text
+            logger.info(
+                f"  amazon: retry returned HTTP {resp.status_code} for {url}"
+            )
+            return None
+
+        logger.info(f"  amazon: HTTP {status} for {url}")
+        return None
 
     async def search_author(self, author_name: str) -> Optional[AuthorResult]:
         """Search Amazon for an author. Returns minimal AuthorResult.

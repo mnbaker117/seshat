@@ -61,6 +61,55 @@ def _parse_kobo_date(text: str) -> Optional[str]:
     return None
 
 
+def _strip_punct_ws(s: str) -> str:
+    """Lowercase + strip everything except [a-z0-9]. Used for the
+    most-aggressive author-name comparison tier — collapses
+    "J. N. Chaney" and "J.N. Chaney" both to "jnchaney"."""
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _kobo_author_matches(
+    card_author: str, queried: str, linked: list[str],
+) -> bool:
+    """Decide whether `card_author` (Kobo's per-result author byline)
+    matches the queried author or one of their pen-name aliases.
+
+    Four match tiers, tried in order. Lowest-friction first:
+
+      1. Exact lowercased equality
+      2. Period-strip equality ("J. K. Rowling" / "JK Rowling")
+      3. Punctuation + whitespace strip equality (v2.10.6 fix —
+         "J. N. Chaney" vs "J.N. Chaney" both → "jnchaney"; the
+         period-strip alone leaves "j n chaney" vs "jn chaney" which
+         don't compare equal). Same root cause we fixed in
+         HardcoverSource at v2.10.5.
+      4. Parts-set equality for word-order shuffles ("Rowling J K")
+
+    Extracted to module level so the matcher is unit-testable
+    independently of the surrounding `get_author_books` plumbing.
+    """
+    if not card_author:
+        return False
+    cn = card_author.lower().strip()
+    accepted = {queried.lower().strip()}
+    for ln in linked or []:
+        if ln:
+            accepted.add(ln.lower().strip())
+
+    if cn in accepted:
+        return True
+    cn_no_dot = cn.replace(".", "")
+    if cn_no_dot in {a.replace(".", "") for a in accepted}:
+        return True
+    if _strip_punct_ws(cn) in {_strip_punct_ws(a) for a in accepted}:
+        return True
+    queried_parts = set(queried.lower().replace(".", "").split())
+    cn_parts = set(cn_no_dot.split())
+    if cn_parts and cn_parts == queried_parts:
+        return True
+    return False
+
+
 def _create_scraper():
     try:
         import cloudscraper
@@ -398,28 +447,13 @@ class KoboSource(BaseSource):
             # ancestor and pull the displayed author for per-book filter
             # before queuing the slow detail fetch.
             #
-            # Matching mirrors hardcover.py's `_check_contributor`:
-            # exact, period-strip, and parts-set comparison so "J. K.
-            # Rowling" / "JK Rowling" / "Rowling J K" all collapse.
-            # Linked author names (pen names + co-authors that the user
-            # set up) are accepted too — set on the source instance via
+            # Linked author names (pen names + co-authors set up by the
+            # user) are accepted too — set on the source instance via
             # `_linked_author_names` before the call.
-            queried_lc = author_name.lower().strip()
-            queried_parts = set(queried_lc.replace(".", "").split())
-            accepted_names = {queried_lc}
-            for ln in (getattr(self, "_linked_author_names", None) or []):
-                accepted_names.add(ln.lower().strip())
+            linked = list(getattr(self, "_linked_author_names", None) or [])
 
             def _author_matches(card_author: str) -> bool:
-                cn = card_author.lower().strip()
-                if cn in accepted_names:
-                    return True
-                if cn.replace(".", "") in {a.replace(".", "") for a in accepted_names}:
-                    return True
-                cn_parts = set(cn.replace(".", "").split())
-                if cn_parts and cn_parts == queried_parts:
-                    return True
-                return False
+                return _kobo_author_matches(card_author, author_name, linked)
 
             # Pass 1: collect raw search results (title, href, cover
             # thumbnail). Dedupe by kobo_id because the XPath

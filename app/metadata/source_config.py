@@ -76,6 +76,7 @@ KNOWN_SOURCES: dict[str, dict[str, Any]] = {
     "kobo":        {"display": "Kobo",          "available_for": ("ebook",),             "default_rate": 3.0},
     "ibdb":        {"display": "IBDB",          "available_for": ("ebook",),             "default_rate": 1.0},
     "google_books": {"display": "Google Books", "available_for": ("ebook", "audiobook"), "default_rate": 1.5},
+    "openlibrary": {"display": "Open Library",  "available_for": ("ebook", "audiobook"), "default_rate": 1.0},
     "audible":     {"display": "Audible",       "available_for": ("audiobook",),         "default_rate": 0.5},
 }
 
@@ -104,6 +105,10 @@ _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, bool]] = {
     # and carries no audiobook-specific fields (narrator, duration,
     # ASIN). Keeps firing for ebook grabs where it's useful.
     "google_books": {"ebook_enrich": True, "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
+    # Open Library — free, no key. Coverage strongest for older /
+    # well-cataloged books, sparse for indie/self-pub. Useful as a
+    # secondary metadata source; not promoted to mandatory tier.
+    "openlibrary": {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": False},
     "audible":     {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
 }
 
@@ -113,11 +118,11 @@ _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, bool]] = {
 # first, specialized-last" ordering per content type.
 _DEFAULT_EBOOK_PRIORITY: list[str] = [
     "mam", "goodreads", "amazon", "hardcover", "kobo", "ibdb",
-    "google_books", "audible",
+    "google_books", "openlibrary", "audible",
 ]
 _DEFAULT_AUDIOBOOK_PRIORITY: list[str] = [
     "mam", "audible", "goodreads", "hardcover",
-    "google_books", "amazon", "kobo", "ibdb",
+    "google_books", "amazon", "kobo", "openlibrary", "ibdb",
 ]
 
 
