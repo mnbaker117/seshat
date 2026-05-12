@@ -7,6 +7,118 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.4] — 2026-05-13
+
+Phase 1 + 1.5 (tier 1+3) of the v2.11.0 metadata-source overhaul,
+shipped as a standalone patch. Drops Goodreads' `/search` endpoint
+(robots-disallowed for `*` user-agents) from every scraper path,
+adds explicit Cloudflare-202 soft-block detection, and lands the
+ethical `goodreads_book_id` resolver module ready for v2.11.0
+wiring. No user-visible behavior change beyond clearer logs and
+better error UX on the manual paste-URL import path.
+
+### Fixed — Goodreads `/search` calls violate robots.txt
+
+Goodreads' robots.txt explicitly contains `Disallow: /search` for
+the `*` user-agent. Pre-v2.10.4 the enricher hit
+`/search?q=…&search_type=books` for free-text title+author lookup,
+and the discovery scanner hit the same endpoint to resolve
+author-id from a name. Both paths are out-of-policy. Holding a
+higher standard than Calibre's kiwidude plugin (which rotates a
+fake browser UA to bypass `/search`), we removed both:
+
+- **`app/metadata/sources/goodreads.py:search_book`** — returns
+  None with an informational log instead of hitting `/search`.
+  The `_merge_detail_page` parser for `/book/show/{id}` (the
+  robots-permitted endpoint) is kept for v2.11.0 wiring. Dead
+  helpers (`_parse_search_results`, `_strip_parentheticals`,
+  `_upgrade_cover_url`) removed.
+- **`app/discovery/sources/goodreads.py:search_author`** — same
+  treatment. Returns None with a log pointing future ops at the
+  v2.11.0 reverse-lookup path (extract `goodreads_author_id` from
+  any owned book's JSON-LD). `_pick_author_from_book_search` and
+  the variant-retry loop deleted.
+- **`app/discovery/routers/import_export.py:_fetch_goodreads_book`**
+  — the user-initiated paste-URL import is preserved (it uses
+  `/book/show/{id}`, which IS robots-permitted). Added explicit
+  Cloudflare-gate detection that surfaces a 503 with a clear
+  "Goodreads is currently soft-blocking this server's IP — try
+  Hardcover instead" error rather than silently returning an
+  empty record.
+
+### Added — Cloudflare soft-block detection helpers
+
+`_is_cloudflare_soft_block(resp)` in both the enricher and
+discovery Goodreads sources distinguishes Cloudflare's
+202-with-empty-body interstitial from genuine "Goodreads doesn't
+have this content" responses. Future cookie-refresh diagnostics
+(v2.11.0 Phase 5.5) rely on this signal being clean.
+
+### Added — Ethical `goodreads_book_id` resolver module
+
+`app/metadata/goodreads_id_resolver.py` (new) implements the
+three-tier ethical resolution chain documented in
+`memory/project_seshat_metadata_overhaul.md` Phase 1.5:
+
+1. **Tier 1** — `/book/auto_complete?format=json&q={isbn_or_asin}`
+   (Goodreads' undocumented JSON endpoint, NOT in any Disallow
+   block; identifier-based, not free-text)
+2. **Tier 2** — Hardcover GraphQL `book_mappings` (stub; deferred
+   to v2.11.0 once the Hardcover discovery client is mature)
+3. **Tier 3** — Open Library `?bibkeys=ISBN:…&jscmd=data` →
+   `identifiers.goodreads`
+
+Module ships available-but-unused in v2.10.4 — wiring into the
+enricher's dispatcher requires extending `search_book(title,
+author)` to also pass ISBN/ASIN, which is part of the broader
+v2.11.0 source-interface refactor. Resolver carries its own
+Cloudflare 202 detection (`soft_blocked` flag on the
+`ResolveResult`) so callers can distinguish "Goodreads doesn't
+know this book" from "Goodreads gated us."
+
+### Added — Phase 0 validation harness
+
+`scripts/validate_sources.py` (new) runs each discovery source
+against a fixed set of 14 benchmark authors (10 from the initial
+v2.11.0 plan + Robyn Bee, K.D. Robertson, Asato Asato, Isuna
+Hasekura for newer/non-Latin coverage). Outputs a Markdown
+report to `docs/validation/sources-<timestamp>.md`. Run manually
+to capture baseline + measure delta after each phase. Not part
+of pytest. Optional `hardcover_api_key` is read from the secrets
+store automatically when run inside the Seshat container.
+
+Baseline pre-v2.10.4 captured at
+`docs/validation/baseline-pre-v2.10.4-20260512.md`.
+
+### Tests
+
+- `tests/metadata/test_goodreads_id_resolver.py` (new, 12 cases) —
+  per-tier hit/miss, soft-block detection, no-`/search`-regression
+  proof.
+- `tests/metadata/sources/test_goodreads.py` — replaced
+  `TestParseSearchResults` with `TestSearchBookDisabled` (verifies
+  zero HTTP from `search_book`) and `TestCloudflareSoftBlockDetection`.
+- `tests/discovery/sources/test_goodreads_search.py` — replaced
+  `_pick_author_from_book_search` parser tests with policy-
+  regression tests asserting no `goodreads.com/search` URL ever
+  appears in mock-transport call lists.
+
+Suite: **2187 passing, 7 skipped** (up from 2174 at v2.10.3
+→ +13 new tests).
+
+### Deferred to v2.11.0
+
+- Wiring the resolver into the enricher dispatcher (requires
+  extending `search_book` signature to pass ISBN/ASIN)
+- Hardcover `book_mappings` Tier 2 implementation (needs mature
+  Hardcover discovery client)
+- Goodreads author-id reverse-lookup via `/book/show/{id}`
+  JSON-LD (the ethical alternative to the dropped
+  `search_author` `/search` pivot)
+- Cloudflare workaround via `curl_cffi` + cookie reuse (Phase 5.5)
+
+---
+
 ## [2.10.3] — 2026-05-12
 
 CWA delivery throttle to work around a CWA cps wedge, plus a UI

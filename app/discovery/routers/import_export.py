@@ -114,10 +114,33 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
 
 # ─── Fetch helpers (used by import routes) ──────────────────
 async def _fetch_goodreads_book(book_id: str) -> dict:
-    """Fetch book details from Goodreads by book ID."""
+    """Fetch book details from Goodreads by book ID.
+
+    The `/book/show/{id}` endpoint is robots-permitted (it's the
+    `/search` endpoint that's disallowed for `*` user-agents) so
+    this user-initiated paste-URL import path is policy-clean.
+
+    Detects Cloudflare's 202-with-empty-body soft-block and surfaces
+    a 503 with a clear message pointing the user at Hardcover —
+    avoids the silent "no metadata extracted" failure mode where
+    the page parsing chugs through empty markup and returns an
+    empty record.
+    """
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}
     async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as client:
         r = await client.get(f"https://www.goodreads.com/book/show/{book_id}")
+        if r.status_code == 202 or (200 <= r.status_code < 300 and not (r.content or b"")):
+            logger.info(
+                "Goodreads paste-URL import: soft-blocked at network layer "
+                "(status=%d, empty=%s) for book_id=%s",
+                r.status_code, not bool(r.content), book_id,
+            )
+            raise HTTPException(
+                503,
+                "Goodreads is currently soft-blocking this server's IP "
+                "(Cloudflare gate). Try again in a few minutes, or paste "
+                "a Hardcover URL instead.",
+            )
         r.raise_for_status()
     soup = BeautifulSoup(r.text, "lxml")
     result = {"goodreads_id": book_id, "source": "goodreads", "source_url": json.dumps({"goodreads": f"https://www.goodreads.com/book/show/{book_id}"})}

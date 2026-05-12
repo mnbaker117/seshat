@@ -1,67 +1,79 @@
 """
-Goodreads HTML parser tests.
+Goodreads enricher source tests.
 
-Drives `_parse_search_results` and `_merge_detail_page` directly with
-inline HTML fixtures so we don't need real Goodreads or an httpx
-fake transport. The fixtures are small on purpose — the point is
-pinning the CSS selectors, not reproducing the full page.
+Drives `_merge_detail_page` directly with inline HTML fixtures so we
+don't need real Goodreads. Also pins the v2.10.4 policy: the source
+must no longer hit `/search` (robots-disallowed) and must detect
+Cloudflare's 202 soft-block.
 
-If Goodreads changes their markup, one of these tests will fail and
-tell us exactly which selector to update.
+If Goodreads changes their `/book/show/{id}` markup, one of the
+`_merge_detail_page` tests will fail and tell us which selector to
+update — that endpoint remains robots-permitted and in scope.
 """
-from bs4 import BeautifulSoup
+import httpx
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.goodreads import (
+    GoodreadsSource,
+    _is_cloudflare_soft_block,
     _merge_detail_page,
-    _parse_search_results,
     _parse_series_string,
 )
 
 
-_SEARCH_HTML = """
-<html><body>
-<table>
-  <tr itemtype="http://schema.org/Book">
-    <td>
-      <a class="bookTitle" href="/book/show/7235533.The_Way_of_Kings">
-        <span>The Way of Kings</span>
-      </a>
-      <a class="authorName" href="/author/show/38550.Brandon_Sanderson">
-        <span>Brandon Sanderson</span>
-      </a>
-      <img class="bookCover" src="https://i.gr-assets.com/images/S/way.jpg" />
-    </td>
-  </tr>
-  <tr itemtype="http://schema.org/Book">
-    <td>
-      <a class="bookTitle" href="/book/show/9999999">
-        <span>An Unrelated Book</span>
-      </a>
-      <a class="authorName"><span>Other Author</span></a>
-      <img class="bookCover" src="https://example.com/nophoto.png" />
-    </td>
-  </tr>
-</table>
-</body></html>
-"""
+class TestSearchBookDisabled:
+    """v2.10.4 — `/search` is robots-disallowed for `*` user-agents.
+    Free-text title+author search no longer fires that endpoint; it
+    returns None gracefully and lets the dispatcher move on."""
+
+    async def test_search_book_returns_none_without_hitting_network(self):
+        calls: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(str(req.url))
+            return httpx.Response(200, content=b"<html></html>")
+
+        src = GoodreadsSource()
+        src.set_client(httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), timeout=5.0,
+        ))
+
+        result = await src.search_book("The Way of Kings", "Brandon Sanderson")
+
+        assert result is None
+        # The whole point: zero HTTP traffic from search_book.
+        assert calls == []
+        await src.close()
+
+    async def test_search_book_empty_title_returns_none(self):
+        src = GoodreadsSource()
+        assert await src.search_book("", "any author") is None
+        await src.close()
 
 
-class TestParseSearchResults:
-    def test_extracts_primary_row(self):
-        soup = BeautifulSoup(_SEARCH_HTML, "lxml")
-        results = _parse_search_results(soup)
-        assert len(results) == 2
-        first = results[0]
-        assert first["book_id"] == "7235533"
-        assert first["title"] == "The Way of Kings"
-        assert first["author"] == "Brandon Sanderson"
-        assert first["cover_url"] == "https://i.gr-assets.com/images/S/way.jpg"
+class TestCloudflareSoftBlockDetection:
+    """Distinguish "Goodreads doesn't know this book" (silent miss)
+    from "Cloudflare is blocking us" (202 / empty body). Future
+    diagnostics rely on this signal."""
 
-    def test_nophoto_cover_dropped(self):
-        soup = BeautifulSoup(_SEARCH_HTML, "lxml")
-        results = _parse_search_results(soup)
-        assert results[1]["cover_url"] is None
+    def test_202_status_is_soft_block(self):
+        resp = httpx.Response(202, content=b"")
+        assert _is_cloudflare_soft_block(resp) is True
+
+    def test_200_with_empty_body_is_soft_block(self):
+        resp = httpx.Response(200, content=b"")
+        assert _is_cloudflare_soft_block(resp) is True
+
+    def test_200_with_real_body_is_not_soft_block(self):
+        resp = httpx.Response(200, content=b"<html>real content</html>")
+        assert _is_cloudflare_soft_block(resp) is False
+
+    def test_404_is_not_soft_block(self):
+        resp = httpx.Response(404, content=b"not found")
+        assert _is_cloudflare_soft_block(resp) is False
+
+    def test_none_response_not_soft_block(self):
+        assert _is_cloudflare_soft_block(None) is False
 
 
 _LONG_DESC = (

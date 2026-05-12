@@ -1,24 +1,31 @@
 """
 Goodreads metadata source.
 
-Book-centric scraper. Two-pass flow:
+Book-centric scraper. Historically two-pass:
 
-  1. `/search?q={title author}&search_type=books` — get candidate book
-     IDs + list-page titles + author names. Iterate in rank order,
-     pick the first candidate whose title + author credibly match
-     the search request. Matching here is a loose similarity check
-     — the enricher will assign the real confidence score after we
-     return.
-  2. `/book/show/{book_id}` — visit the chosen book's detail page and
-     parse JSON-LD (`datePublished`, `inLanguage`, `image`,
-     `numberOfPages`, `publisher`) plus HTML fallbacks for series
-     information and description.
+  1. `/search?q={title author}&search_type=books` — find a candidate
+     book id by title + author.
+  2. `/book/show/{book_id}` — fetch the detail page for rich fields.
 
-No API key needed — Goodreads deprecated their public API in 2020
-and the only option left is scraping HTML. A handful of CSS selectors
-break every few years; when they do, the failing test case in
-`tests/metadata/sources/test_goodreads.py` tells us exactly which
-selector needs updating.
+**v2.10.4 — `/search` calls dropped.** Goodreads' robots.txt
+explicitly disallows `/search` for the `*` user-agent. This source
+no longer hits it. Free-text `search_book(title, author)` calls
+now return None with an informational log; the enricher's
+dispatcher just moves to the next source.
+
+The `/book/show/{id}` path (which IS robots-permitted) remains
+functional — see `_merge_detail_page()` and the manual paste-URL
+import path at `app/discovery/routers/import_export.py`.
+
+v2.11.0 will wire the ethical `goodreads_id_resolver` chain
+(`/book/auto_complete` → Hardcover `book_mappings` → Open Library
+`identifiers.goodreads`) so this source can recover its enrichment
+role for books where we can resolve a goodreads_id from sanctioned
+APIs without ever hitting `/search`.
+
+This source also detects Cloudflare's 202-with-empty-body soft-
+block and logs distinctly (so future "Goodreads cookies expired"
+vs "Goodreads doesn't have this book" diagnostics aren't muddled).
 """
 from __future__ import annotations
 
@@ -30,7 +37,6 @@ from typing import Optional
 from bs4 import BeautifulSoup
 
 from app.metadata.record import MetaRecord
-from app.metadata.scoring import score_match
 from app.metadata.sources.base import MetaSource
 
 _log = logging.getLogger("seshat.metadata.goodreads")
@@ -48,9 +54,20 @@ _DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Search results include a per-row author link we can use to filter
-# false positives before paying for a detail-page fetch.
-_SEARCH_MIN_CONFIDENCE = 0.35
+def _is_cloudflare_soft_block(resp) -> bool:
+    """Detect Goodreads' Cloudflare 202-with-empty-body interstitial.
+
+    The cps gate returns `HTTP 202 Accepted` with a 0-byte body when
+    it wants the client to solve a JS challenge. Browsers do; httpx
+    doesn't. Either status 202 OR a 2xx with empty body counts.
+    """
+    if resp is None:
+        return False
+    if resp.status_code == 202:
+        return True
+    if 200 <= resp.status_code < 300 and not (resp.content or b""):
+        return True
+    return False
 
 
 class GoodreadsSource(MetaSource):
@@ -59,116 +76,37 @@ class GoodreadsSource(MetaSource):
     default_timeout = 45.0
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str  # noqa: ARG002 — required by MetaSource interface
     ) -> Optional[MetaRecord]:
+        """Free-text title+author search — DISABLED in v2.10.4.
+
+        Goodreads' robots.txt explicitly disallows `/search` for the
+        `*` user-agent. This method previously hit that endpoint to
+        find a candidate book_id, then enriched via `/book/show`.
+        Holding a higher standard than Calibre's kiwidude plugin
+        (which scrapes `/search` anyway with a rotated browser UA),
+        we now skip cleanly and let the enricher's dispatcher move
+        on to the next source in the priority chain.
+
+        The ethical resolver chain at
+        `app/metadata/goodreads_id_resolver.py` (Tier 1
+        `/book/auto_complete` + Tier 3 Open Library) is available
+        for callers that have an ISBN/ASIN, but wiring it into the
+        enricher requires extending the source interface to pass
+        identifiers, which is v2.11.0 scope.
+        """
         if not title:
             return None
-        query = f"{title} {author}".strip()
-
-        try:
-            resp = await self._get(
-                f"{_BASE}/search",
-                params={"q": query, "search_type": "books"},
-            )
-        except Exception:
-            return None
-
-        soup = BeautifulSoup(resp.text, "lxml")
-        candidates = _parse_search_results(soup)
-        if not candidates:
-            return None
-
-        # Filter + rank candidates by title/author similarity. The
-        # enricher will compute the final confidence on the full
-        # MetaRecord we return, but we do a cheap pre-filter here
-        # so we don't spend a detail-page GET on obvious mismatches.
-        best = None
-        best_score = 0.0
-        for cand in candidates:
-            score = score_match(
-                record_title=cand["title"],
-                record_authors=[cand["author"]] if cand["author"] else [],
-                search_title=title,
-                search_authors=author,
-            )
-            if score > best_score:
-                best = cand
-                best_score = score
-
-        if best is None or best_score < _SEARCH_MIN_CONFIDENCE:
-            return None
-
-        book_id = best["book_id"]
-        record = MetaRecord(
-            title=best["title"],
-            authors=[best["author"]] if best["author"] else [],
-            cover_url=best.get("cover_url"),
-            source=self.name,
-            external_id=book_id,
-            source_url=f"{_BASE}/book/show/{book_id}",
+        _log.info(
+            "goodreads: search_book skipped — /search is robots-disallowed; "
+            "v2.11.0 will wire goodreads_id_resolver (auto_complete / "
+            "Open Library) to recover this path ethically (title=%r)",
+            title,
         )
-
-        try:
-            detail_resp = await self._get(f"{_BASE}/book/show/{book_id}")
-            _merge_detail_page(record, detail_resp.text)
-        except Exception:
-            _log.debug("goodreads: detail page fetch failed for id=%s", book_id)
-
-        return record
+        return None
 
 
-# ─── HTML parsers (module-level so tests can exercise them directly) ──
-
-
-def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
-    """Extract {book_id, title, author, cover_url} from a search page.
-
-    The search results use the `tr[itemtype='http://schema.org/Book']`
-    microdata rows. Each row has:
-      - a `a.bookTitle` anchor with the book URL
-      - a `a.authorName` anchor (possibly multiple for co-authors;
-        we keep the first only — the record's full author list comes
-        from the detail page)
-      - a cover `img.bookCover` or `img[alt^='Cover']`
-    """
-    rows = soup.select("tr[itemtype='http://schema.org/Book']")
-    out: list[dict] = []
-    for row in rows:
-        title_link = row.select_one("a.bookTitle")
-        if not title_link:
-            continue
-        href = title_link.get("href", "")
-        m = re.search(r"/book/show/(\d+)", href)
-        if not m:
-            continue
-        title_el = title_link.select_one("span") or title_link
-        title_text = _squeeze(title_el.get_text(" ", strip=True))
-        # Goodreads search rows append "(Series Name, #N)" to the
-        # title string. Leaving it in would pollute the Jaccard
-        # similarity score and make "Book Prime" (a draft) outrank
-        # "Book (Series, #1)" (the real book) — the tokens from the
-        # series suffix dilute the intersection. Strip before scoring.
-        title_text = _strip_parentheticals(title_text)
-
-        author_el = row.select_one("a.authorName span") or row.select_one("a.authorName")
-        author_text = _squeeze(author_el.get_text(" ", strip=True)) if author_el else ""
-
-        img_el = row.select_one("img.bookCover, img[src*='books.google'], img[alt]")
-        cover_url = img_el.get("src") if img_el else None
-        if cover_url and "nophoto" in cover_url:
-            cover_url = None
-        elif cover_url:
-            cover_url = _upgrade_cover_url(cover_url)
-
-        out.append(
-            {
-                "book_id": m.group(1),
-                "title": title_text,
-                "author": author_text,
-                "cover_url": cover_url,
-            }
-        )
-    return out
+# ─── HTML parser for /book/show/{id} (robots-permitted) ────────
 
 
 def _merge_detail_page(record: MetaRecord, html: str) -> None:
@@ -315,24 +253,10 @@ def _merge_detail_page(record: MetaRecord, html: str) -> None:
 
 
 _WS_RX = re.compile(r"\s+")
-_PAREN_RX = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 def _squeeze(text: str) -> str:
     return _WS_RX.sub(" ", text or "").strip()
-
-
-def _strip_parentheticals(text: str) -> str:
-    """Drop a trailing `(...)` suffix from a title string.
-
-    Goodreads wraps the series info in parens at the end:
-    "The Way of Kings (The Stormlight Archive, #1)". We want the
-    base title for similarity scoring; the series info is captured
-    separately from the detail page.
-    """
-    if not text:
-        return text
-    return _PAREN_RX.sub("", text).strip()
 
 
 # "First published January 1, 2020" → "2020-01-01"
@@ -371,20 +295,6 @@ def _parse_pub_date_text(text: str) -> Optional[str]:
         except ValueError:
             continue
     return None
-
-
-def _upgrade_cover_url(url: str) -> str:
-    """Upgrade a thumbnail URL to the full-size cover.
-
-    Goodreads serves size-suffixed images like `..._SY75_.jpg`
-    (75px tall) in search and list pages. Stripping the suffix
-    returns the original-size image — much better for the review
-    queue UI. Safe to call on URLs that don't have the suffix:
-    the regex only matches the exact pattern.
-    """
-    if not url:
-        return url
-    return re.sub(r"\._S[XY]\d+_\.", ".", url)
 
 
 def _parse_series_string(text: str) -> tuple[Optional[str], Optional[float]]:

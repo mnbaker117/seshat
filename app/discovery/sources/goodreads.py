@@ -28,12 +28,10 @@ widget never flickers through "skipped translator", "skipped foreign",
 etc.
 """
 import asyncio, logging, re, json
-from collections import Counter
 from datetime import datetime
 from typing import Optional
 from bs4 import BeautifulSoup
 from app.discovery.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
-from app.metadata.author_names import author_name_variants, authors_match
 
 logger = logging.getLogger("seshat.discovery.goodreads")
 BASE = "https://www.goodreads.com"
@@ -105,59 +103,21 @@ def _series_from_title_paren(title: str) -> tuple[Optional[str], Optional[float]
     return (name or None), idx
 
 
-def _pick_author_from_book_search(
-    html: str, query_name: str
-) -> Optional[AuthorResult]:
-    """Extract the most plausible author from a Goodreads book-search page.
+def _is_cloudflare_soft_block(resp) -> bool:
+    """Detect Cloudflare's 202-with-empty-body interstitial on Goodreads.
 
-    Counts `(author_name, author_id)` pairs across the `a.authorName`
-    anchors on the page, ranks by frequency, and returns the top-ranked
-    pair that passes `authors_match` against `query_name`. Returns
-    `None` when there are no anchors or when no top-ranked pair is a
-    plausible name match.
-
-    Author-page image is best-effort: scan the anchor's row for an
-    `img` with a non-`nophoto` src. If the page layout hides it, the
-    result still returns with `image_url=None`.
+    Distinguishes "Goodreads doesn't have this content" (404 / proper
+    HTML) from "Cloudflare is gating us" (202 / empty 2xx). Used by
+    the `/author/list/{id}` and `/book/show/{id}` fetches in this
+    source so future cookie-refresh diagnostics aren't muddled.
     """
-    soup = BeautifulSoup(html, "lxml")
-    anchors = soup.select("a.authorName")
-    if not anchors:
-        return None
-
-    counts: Counter[tuple[str, str]] = Counter()
-    images: dict[tuple[str, str], str] = {}
-    for a in anchors:
-        nm = a.get_text(strip=True)
-        href = a.get("href") or ""
-        m = re.search(r"/author/show/(\d+)", href)
-        if not m or not nm:
-            continue
-        key = (nm, m.group(1))
-        counts[key] += 1
-        if key not in images:
-            parent = a.find_parent("tr") or a.find_parent("div")
-            if parent:
-                img_el = parent.select_one("img")
-                if img_el:
-                    src = img_el.get("src") or ""
-                    if src and "nophoto" not in src:
-                        images[key] = src
-
-    if not counts:
-        return None
-
-    # Walk most-common first; accept the first that passes the
-    # name-match gate. If none do, there's no confident result on this
-    # page — return None so the caller can try the next variant.
-    for (name, author_id), _count in counts.most_common():
-        if authors_match(name, query_name):
-            return AuthorResult(
-                name=name,
-                external_id=author_id,
-                image_url=images.get((name, author_id)),
-            )
-    return None
+    if resp is None:
+        return False
+    if resp.status_code == 202:
+        return True
+    if 200 <= resp.status_code < 300 and not (resp.content or b""):
+        return True
+    return False
 
 
 class GoodreadsSource(BaseSource):
@@ -369,49 +329,35 @@ class GoodreadsSource(BaseSource):
         return details
 
     async def search_author(self, author_name: str) -> Optional[AuthorResult]:
-        """Find an author's Goodreads ID via the book-search endpoint.
+        """Find an author's Goodreads ID — DISABLED in v2.10.4.
 
-        Goodreads migrated `/search?search_type=authors` to client-side
-        React rendering in early 2026. Scraping that page now yields an
-        empty result shell (nav chrome + title tag only; author rows
-        load via AJAX). We pivot to the book-search endpoint, which
-        remains server-rendered:
+        Pre-v2.10.4 this method pivoted to `/search?search_type=books`
+        and counted `a.authorName` anchors across the result page to
+        infer the author's `/author/show/{id}` ID. The `/search`
+        endpoint is explicitly disallowed for `*` user-agents per
+        Goodreads' robots.txt — this method is no longer compliant.
 
-          1. Query `/search?search_type=books&q=<name>`.
-          2. Each result row carries an `a.authorName` anchor linking
-             to `/author/show/{id}`. Count (name, id) pairs across the
-             page; the author that wrote the books the query matched
-             dominates the distribution.
-          3. Gate the most-common pair through `authors_match` so we
-             don't confidently return the wrong author when Goodreads'
-             ranker returns adjacent-namespace results.
+        Holding a higher standard than Calibre's kiwidude plugin
+        (which scrapes `/search` anyway with a rotated browser UA),
+        we now skip cleanly. Callers receive None and the discovery
+        dispatcher moves on. Authors whose `goodreads_id` is already
+        stored on the authors row continue to work via
+        `get_author_books(author_id, ...)` (the `/author/list/{id}`
+        endpoint IS robots-permitted).
 
-        If the first query returns no match (Goodreads' ranker is
-        punctuation-sensitive — `"A K Duboff"` returns Amy DuBoff,
-        `"A.K. Duboff"` returns A.K. DuBoff), retry with up to three
-        punctuation variants from `author_name_variants`. Variant
-        retries only fire when the first query already failed, so the
-        common case stays one HTTP request.
+        v2.11.0 will add ethical author-id resolution via:
+          - Reverse-lookup from any owned book's `goodreads_id`
+            (fetch `/book/show/{book_id}`, extract author from JSON-LD)
+          - Hardcover author cross-reference (when the discovery
+            Hardcover client is mature)
+          - Optional sitemap-mirror lookup (Phase 1.7 opt-in)
         """
-        for variant in author_name_variants(author_name):
-            try:
-                r = await self._get(
-                    f"{BASE}/search",
-                    params={"q": variant, "search_type": "books"},
-                )
-            except Exception as e:
-                logger.error(f"Goodreads search error for variant '{variant}': {e}")
-                continue
-
-            result = _pick_author_from_book_search(r.text, author_name)
-            if result is not None:
-                if variant != author_name:
-                    logger.info(
-                        f"  Goodreads: matched '{author_name}' via variant '{variant}' "
-                        f"→ '{result.name}' (id={result.external_id})"
-                    )
-                return result
-
+        logger.info(
+            "Goodreads: search_author('%s') skipped — /search is "
+            "robots-disallowed; resolve author_id via reverse-lookup "
+            "from an owned book in v2.11.0 or set goodreads_id manually",
+            author_name,
+        )
         return None
 
     async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None, owned_only: bool = False, start_at: int = 0) -> Optional[AuthorResult]:
