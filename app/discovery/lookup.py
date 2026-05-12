@@ -1591,6 +1591,12 @@ async def _title_to_series_pass(author_id: int):
     loser rows auto-clean their suggestions.
     """
     db = await get_db()
+    # v2.10.2 — collision dedup folds through `merge_books`, which
+    # writes to the global pipeline DB (book_grab_links redirect).
+    from app.database import get_db as _get_pipeline_db
+    from app.discovery.database import get_active_library as _get_slug
+    pipeline_db = await _get_pipeline_db()
+    library_slug = _get_slug() or ""
     try:
         # Get series the author's books are linked to.
         #
@@ -1619,7 +1625,7 @@ async def _title_to_series_pass(author_id: int):
         # entry and shouldn't be re-linked into a series by a later
         # source-driven pass.
         standalone = await (await db.execute(
-            "SELECT id, title FROM books WHERE author_id = ? AND series_id IS NULL AND hidden = 0",
+            "SELECT id, title, owned FROM books WHERE author_id = ? AND series_id IS NULL AND hidden = 0",
             (author_id,),
         )).fetchall()
         if not standalone:
@@ -1663,53 +1669,29 @@ async def _title_to_series_pass(author_id: int):
                 # index 2 — but "Remnant II" (OWNED from Calibre) is
                 # already at index 2. Without this dedup the UI shows
                 # two books for the same series position.
+                #
+                # v2.10.2: route through `_resolve_position_collision`
+                # which folds via `merge_books` so loser identity
+                # fields (mam_torrent_id, goodreads_id, isbn, etc.)
+                # coalesce into the winner and an audit row is
+                # written. Behavior is identical from the loop's POV
+                # — same winner-policy, same flow afterwards.
                 if idx is not None:
-                    existing = await (await db.execute(
-                        "SELECT id, title, owned FROM books "
-                        "WHERE author_id = ? AND series_id = ? "
-                        "AND series_index = ? AND id != ?",
-                        (author_id, series["id"], idx, book["id"]),
-                    )).fetchone()
-                    if existing is not None:
-                        ex_owned = int(existing["owned"] or 0)
-                        ex_has_book_n = bool(
-                            _RX_BOOK_N_SUFFIX.search(existing["title"] or "")
-                        )
-                        incoming_has_book_n = bool(
-                            _RX_BOOK_N_SUFFIX.search(title or "")
-                        )
-                        # Compute winner: (owned, non-Book-N title, lowest id).
-                        # Higher tuple wins.
-                        ex_score = (ex_owned, 0 if ex_has_book_n else 1, -existing["id"])
-                        in_score = (0, 0 if incoming_has_book_n else 1, -book["id"])
-                        if ex_score >= in_score:
-                            # Existing wins — delete the incoming standalone.
-                            await db.execute(
-                                "DELETE FROM books WHERE id = ?", (book["id"],)
-                            )
-                            deduped += 1
-                            logger.info(
-                                f"    TITLE→SERIES DEDUP: dropped "
-                                f"'{title}' (id={book['id']}) — position "
-                                f"already held by '{existing['title']}' "
-                                f"(id={existing['id']}, owned={ex_owned}) "
-                                f"in series '{sname}' #{idx}"
-                            )
-                        else:
-                            # Incoming wins — delete the existing row,
-                            # then fall through to the UPDATE that links
-                            # the incoming standalone into the series.
-                            await db.execute(
-                                "DELETE FROM books WHERE id = ?", (existing["id"],)
-                            )
-                            deduped += 1
-                            logger.info(
-                                f"    TITLE→SERIES DEDUP: '{title}' "
-                                f"(id={book['id']}) replaces "
-                                f"'{existing['title']}' "
-                                f"(id={existing['id']}) at series "
-                                f"'{sname}' #{idx}"
-                            )
+                    incoming_wins, dedup_n = await _resolve_position_collision(
+                        db, pipeline_db, library_slug,
+                        author_id, series["id"], idx,
+                        book["id"], title,
+                        incoming_owned=int(book["owned"] or 0),
+                    )
+                    if dedup_n:
+                        deduped += dedup_n
+                        if incoming_wins:
+                            # The merge already carried over the
+                            # loser's series_id+series_index to
+                            # the winner (the incoming row), but
+                            # be explicit so the standalone is
+                            # firmly anchored to the target series
+                            # slot regardless of what the loser had.
                             await db.execute(
                                 "UPDATE books SET series_id = ?, "
                                 "series_index = ? WHERE id = ?",
@@ -1745,6 +1727,7 @@ async def _title_to_series_pass(author_id: int):
             )
         return linked
     finally:
+        await pipeline_db.close()
         await db.close()
 
 
@@ -1914,22 +1897,43 @@ def _extract_series_signal(title: str) -> tuple[str, float | None] | None:
 
 
 async def _resolve_position_collision(
-    db, author_id: int, sid: int, idx: float, incoming_id: int, incoming_title: str
+    db, pipeline_db, library_slug,
+    author_id: int, sid: int, idx: float, incoming_id: int, incoming_title: str,
+    *, incoming_owned: int | None = None,
 ) -> tuple[bool, int]:
     """Shared dedup helper for series-position collisions.
 
-    Used by both `_title_to_series_pass` (existing inline implementation
-    duplicated here for `_orphan_series_promotion_pass`). Compares the
-    incoming book against any existing book at (sid, idx) and decides
-    a winner using (owned, non-Book-N title, lowest id).
+    Used by both `_title_to_series_pass` and
+    `_orphan_series_promotion_pass`. Compares the incoming book
+    against any existing book at (sid, idx) and decides a winner
+    using (owned, non-Book-N title, lowest id), then routes the
+    fold through `merge_books` so identity fields coalesce and an
+    audit row is written.
+
+    Prior to v2.10.2 this helper hard-DELETEd the loser. That
+    silently discarded identity fields the loser carried
+    (mam_torrent_id, goodreads_id, isbn, etc.) when the winner
+    didn't already have them — the unowned discovery row in a
+    typical pair held the only Goodreads ID for that work. The
+    v2.10.0 `merge_books` engine coalesces those fields, so this
+    helper now reuses it; behavior is identical from the caller's
+    POV, only the loser's data is preserved.
+
+    `incoming_owned` is the owned bit of the incoming row when the
+    caller already has it (in `_orphan_series_promotion_pass` the
+    caller fetched it from the same row). If omitted, the helper
+    treats the incoming as unowned (matches v2.10.1- behavior in
+    the orphan-promotion caller).
 
     Returns (incoming_wins, deduped_count).
-      - incoming_wins=True  → caller should link incoming at idx (the
-        existing row was deleted).
-      - incoming_wins=False → caller should drop incoming (existing
-        row already deleted nothing; incoming was deleted here).
-      - deduped_count is 1 when a row was deleted, else 0.
+      - incoming_wins=True  → caller should link incoming at idx
+        (the existing row was folded INTO the incoming).
+      - incoming_wins=False → caller should drop further work on
+        incoming (the incoming was folded INTO the existing).
+      - deduped_count is 1 when a merge happened, else 0.
     """
+    from app.discovery.book_merge import MergeError, merge_books
+
     existing = await (await db.execute(
         "SELECT id, title, owned FROM books "
         "WHERE author_id = ? AND series_id = ? "
@@ -1940,28 +1944,42 @@ async def _resolve_position_collision(
         return (True, 0)
 
     ex_owned = int(existing["owned"] or 0)
+    in_owned = int(incoming_owned or 0)
     ex_has_book_n = bool(_RX_BOOK_N_SUFFIX.search(existing["title"] or ""))
     in_has_book_n = bool(_RX_BOOK_N_SUFFIX.search(incoming_title or ""))
     ex_score = (ex_owned, 0 if ex_has_book_n else 1, -existing["id"])
-    in_score = (0, 0 if in_has_book_n else 1, -incoming_id)
+    in_score = (in_owned, 0 if in_has_book_n else 1, -incoming_id)
 
     if ex_score >= in_score:
-        await db.execute("DELETE FROM books WHERE id = ?", (incoming_id,))
-        logger.info(
-            f"    ORPHAN→SERIES DEDUP: dropped '{incoming_title}' "
-            f"(id={incoming_id}) — position already held by "
-            f"'{existing['title']}' (id={existing['id']}, owned={ex_owned}) "
-            f"in series_id={sid} #{idx}"
-        )
-        return (False, 1)
+        winner_id, loser_id = existing["id"], incoming_id
+        log_verb = "dropped"
+        result = (False, 1)
     else:
-        await db.execute("DELETE FROM books WHERE id = ?", (existing["id"],))
-        logger.info(
-            f"    ORPHAN→SERIES DEDUP: '{incoming_title}' "
-            f"(id={incoming_id}) replaces '{existing['title']}' "
-            f"(id={existing['id']}) at series_id={sid} #{idx}"
+        winner_id, loser_id = incoming_id, existing["id"]
+        log_verb = "replaces"
+        result = (True, 1)
+
+    try:
+        await merge_books(
+            db, pipeline_db,
+            library_slug=library_slug,
+            winner_id=winner_id,
+            loser_id=loser_id,
+            reason="series_position_collision",
         )
-        return (True, 1)
+    except MergeError as exc:
+        logger.warning(
+            "ORPHAN→SERIES DEDUP skipped (id=%d vs id=%d, series_id=%d "
+            "#%s): %s",
+            incoming_id, existing["id"], sid, idx, exc,
+        )
+        return (False, 0)
+    logger.info(
+        f"    ORPHAN→SERIES DEDUP: '{incoming_title}' (id={incoming_id}) "
+        f"{log_verb} '{existing['title']}' (id={existing['id']}, "
+        f"owned={ex_owned}) at series_id={sid} #{idx}"
+    )
+    return result
 
 
 async def _ensure_series_for_author(
@@ -2030,6 +2048,13 @@ async def _orphan_series_promotion_pass(author_id: int) -> int:
     (Cressman/Savarovsky "The Last Paladin" case).
     """
     db = await get_db()
+    # v2.10.2 — `_resolve_position_collision` now folds through
+    # `merge_books`, which needs the global pipeline DB to redirect
+    # `book_grab_links` rows. Open it once per pass; close in finally.
+    from app.database import get_db as _get_pipeline_db
+    from app.discovery.database import get_active_library as _get_slug
+    pipeline_db = await _get_pipeline_db()
+    library_slug = _get_slug() or ""
     try:
         rows = await (await db.execute(
             "SELECT id, title FROM books "
@@ -2076,7 +2101,8 @@ async def _orphan_series_promotion_pass(author_id: int) -> int:
             for book_id, title, _, idx in members:
                 final_idx = idx if idx is not None else 1.0
                 incoming_wins, dedup_n = await _resolve_position_collision(
-                    db, author_id, sid, final_idx, book_id, title
+                    db, pipeline_db, library_slug,
+                    author_id, sid, final_idx, book_id, title,
                 )
                 deduped += dedup_n
                 if incoming_wins:
@@ -2100,6 +2126,7 @@ async def _orphan_series_promotion_pass(author_id: int) -> int:
             )
         return promoted
     finally:
+        await pipeline_db.close()
         await db.close()
 
 

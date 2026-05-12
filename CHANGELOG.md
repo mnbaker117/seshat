@@ -7,6 +7,50 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.2] — 2026-05-12
+
+`_resolve_position_collision` now routes through `merge_books`
+so the existing source-scan series-slot dedup carries over the
+loser's identity fields and writes an audit row.
+
+### Fixed — Pre-existing series-position dedup silently dropped loser identity fields
+
+- **`app/discovery/lookup.py:_resolve_position_collision`** —
+  pre-v2.10.2 this helper hard-DELETEd the loser when two books
+  collided at the same `(author_id, series_id, series_index)`.
+  Any identity fields the loser uniquely carried
+  (`mam_torrent_id`, `goodreads_id`, `isbn`, `hardcover_id`, etc.)
+  were silently discarded. The helper now folds via the v2.10.0
+  `merge_books` engine — same winner policy (owned, non-Book-N
+  title, lowest id), but the loser's data coalesces into the
+  winner and a `book_merges` audit row is written with
+  `reason="series_position_collision"`.
+
+- **`app/discovery/lookup.py:_title_to_series_pass`** — second
+  call site (previously had its own inline copy of the dedup
+  logic) now also routes through `_resolve_position_collision`,
+  eliminating the duplicate implementation.
+
+  This was the path that silently cleaned up 5 of Mark's
+  duplicate pairs on 2026-05-12 (the structural-mismatch ones —
+  Right of Retribution 3 with `(Series #N)`, Super Sales 4 with
+  `(Series #N)`, Swing Shift 2/3, Mickey7) — no harm done in his
+  case because the calibre rows already had matching
+  `mam_torrent_id` from `acquisition_linkback`, but the sharp
+  edge could bite a future case where the loser holds the only
+  copy of an external ID.
+
+### Tests
+
+- **`tests/discovery/test_series_collision_merge.py`** — 2 new
+  tests covering both call sites: identity coalesce on a
+  title→series collision (calibre winner) and on an
+  orphan-promotion collision (lowest-id winner). Both assert
+  the `book_merges` audit row with `series_position_collision`
+  reason.
+
+---
+
 ## [2.10.1] — 2026-05-12
 
 End-of-sync legacy-duplicate heal pass — closes a v2.10.0 gap
