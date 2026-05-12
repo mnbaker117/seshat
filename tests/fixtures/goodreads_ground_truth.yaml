@@ -1,0 +1,568 @@
+# Goodreads "ground truth" fixture for the v2.11.0 metadata-source
+# overhaul acceptance criteria.
+#
+# Mark hand-collects this dataset from his browser (where Cloudflare
+# doesn't gate him) and we use it to verify that v2.11.0's automated
+# pipeline reaches at-least-equivalent coverage without any code path
+# touching the robots-disallowed /search endpoint.
+#
+# Source for IDs already filled in: Seshat's per-library authors
+# table (seshat_calibre-library.db). 3 authors with `goodreads_author_id: ~`
+# need fresh lookup from your browser — visit their Goodreads
+# search page and grab the canonical /author/show/{id}.
+#
+# ── Per-author fields ─────────────────────────────────────────
+# canonical_name              — exact spelling as Goodreads displays it
+# goodreads_author_id         — int from /author/show/{id}.{slug}
+# author_url                  — full URL; redundant with the id but
+#                               handy for the slug (gives us the name
+#                               in Goodreads' canonical underscore form)
+# total_books_on_goodreads    — approximate; from the author page banner.
+#                               "146 books" → 146. Don't sweat the
+#                               counts of editions / translations.
+# notes                       — optional. Pen names, weird pseudonyms,
+#                               "this author's page is weird because…"
+#                               anything that would surprise a future
+#                               investigator.
+#
+# ── sample_books (3-5 per author) ─────────────────────────────
+# Pick a representative mix per author, ideally including:
+#   - one most-popular / best-rated
+#   - one mid-series entry (validates series_position extraction)
+#   - one recent release (validates latest-N pagination)
+#   - one standalone if any (validates non-series handling)
+#   - one older / less-popular (validates depth)
+# Fewer is fine — even 3 per author is enough for the acceptance
+# checks. The harness will assert that v2.11.0's pipeline surfaces
+# at least each of these book_ids from the author's bibliography.
+#
+# Per-book fields:
+#   goodreads_book_id  — int from /book/show/{id}.{slug}
+#   title              — exact title as Goodreads displays
+#   series_name        — null if standalone (use `~` in YAML)
+#   series_position    — string ("1", "1.5", "2.75"); null if N/A
+#   pub_year           — int; from "First published" line
+
+
+authors:
+
+  # ── 1. J. N. Chaney (indie sci-fi, prolific) ────────────────
+  - canonical_name: "J. N. Chaney"
+    goodreads_author_id: 13828892
+    author_url: "https://www.goodreads.com/author/show/13828892"
+    total_books_on_goodreads: 493
+    notes: |
+      Massive indie sci-fi catalog (think hundreds of books across
+      multiple shared universes). Test case for prolific-author
+      pagination.
+    sample_books:
+      - goodreads_book_id: 205430687
+        title: "Star Scrapper"
+        series_name: "Star Scrapper"
+        series_position: 1
+        pub_year: 2024
+      - goodreads_book_id: 38208480
+        title: "Renegade Lost"
+        series_name: "Renegade Star"
+        series_position: 4
+        pub_year: 2018
+      - goodreads_book_id: 60504019
+        title: "Bonds of Blood"
+        series_name: "The Last Hunter"
+        series_position: 2
+        pub_year: 2022
+      - goodreads_book_id: 57175104
+        title: "Sentenced to War"
+        series_name: "Sentenced to War"
+        series_position: 1
+        pub_year: 2021
+      - goodreads_book_id: 59638368
+        title: "Legacy of Stars"
+        series_name: "Backyard Starship"
+        series_position: 4
+        pub_year: 2022
+
+  # ── 2. Marcus Sloss (indie RH romance, prolific) ────────────
+  - canonical_name: "Marcus Sloss"
+    goodreads_author_id: 19596066
+    author_url: "https://www.goodreads.com/author/show/19596066"
+    total_books_on_goodreads: 189
+    notes: |
+      Indie reverse-harem romance, prolific. We just had two
+      "Princess or Three in Distress" books flow through the
+      review queue on 2026-05-12 — good UAT cross-reference.
+    sample_books:
+      - goodreads_book_id: 202974495
+        title: "Behemoth Hunter"
+        series_name: ~
+        series_position: ~
+        pub_year: 2023
+      - goodreads_book_id: 77948665
+        title: "A Man's Word"
+        series_name: "Princess or Three in Distress"
+        series_position: 1
+        pub_year: 2023
+      - goodreads_book_id: 214781702
+        title: "The Arcane Lord"
+        series_name: "Noble Magic"
+        series_position: 1
+        pub_year: 2024
+      - goodreads_book_id: 48710995
+        title: "Gryff the Griffin Rider"
+        series_name: "Gryff the Griffin Rider"
+        series_position: 2
+        pub_year: 2019
+      - goodreads_book_id: 216588898
+        title: "Master of Swords: A LitRPG Progression Fantasy"
+        series_name: ~
+        series_position: ~
+        pub_year: 2024
+
+  # ── 3. Sabaa Tahir (trad-pub YA fantasy) ───────────────────
+  - canonical_name: "Sabaa Tahir"
+    goodreads_author_id: 7770873
+    author_url: "https://www.goodreads.com/author/show/7770873"
+    total_books_on_goodreads: 23
+    notes: |
+      Ember in the Ashes series (4 main books) + recent
+      contemporary YA (All My Rage). Trad-pub baseline.
+    sample_books:
+      - goodreads_book_id: 213075476
+        title: "An Ember in the Ashes"
+        series_name: "An Ember in the Ashes"
+        series_position: 1
+        pub_year: 2015
+      - goodreads_book_id: 57899793
+        title: "All My Rage"
+        series_name: ~
+        series_position: ~
+        pub_year: 2022
+      - goodreads_book_id: 52758336
+        title: "A Thief Among the Trees"
+        series_name: "An Ember in the Ashes Graphic Novel Prequel"
+        series_position: 1
+        pub_year: 2020
+      - goodreads_book_id: 206780522
+        title: "Heir"
+        series_name: "Heir Duology"
+        series_position: 1
+        pub_year: 2024
+      - goodreads_book_id: 213075365
+        title: "A Reaper at the Gates"
+        series_name: "An Ember in the Ashes"
+        series_position: 3
+        pub_year: 2018
+
+  # ── 4. James S. A. Corey (pen-name duo) ────────────────────
+  - canonical_name: "James S.A. Corey"
+    goodreads_author_id: 4192148
+    author_url: "https://www.goodreads.com/author/show/4192148"
+    total_books_on_goodreads: 87
+    notes: |
+      The Expanse — pen name for Daniel Abraham + Ty Franck.
+      Edge case for v2.11.0 author-id resolution: Goodreads
+      treats the pen name as the canonical author, but Hardcover/
+      OL may credit the individual authors. Worth flagging if
+      our reverse-lookup ever surfaces Abraham/Franck instead.
+    sample_books:
+      - goodreads_book_id: 151908910
+        title: "How It Unfolds"
+        series_name: "The Far Reaches"
+        series_position: 1
+        pub_year: 2023
+      - goodreads_book_id: 28335699
+        title: "Leviathan Falls"
+        series_name: "The Expanse"
+        series_position: 9
+        pub_year: 2021
+      - goodreads_book_id: 36131928
+        title: "The Expanse: Origins"
+        series_name: "The Expanse graphic novels"
+        series_position: ~
+        pub_year: 2018
+      - goodreads_book_id: 201930181
+        title: "The Mercy of Gods"
+        series_name: "The Captive's War"
+        series_position: 1
+        pub_year: 2024
+      - goodreads_book_id: 16131032
+        title: "Abaddon's Gate"
+        series_name: "The Expanse"
+        series_position: 3
+        pub_year: 2013
+
+  # ── 5. Jim Butcher (trad-pub fantasy) ──────────────────────
+  - canonical_name: "Jim Butcher"
+    goodreads_author_id: 10746
+    author_url: "https://www.goodreads.com/author/show/10746"
+    total_books_on_goodreads: 200 # 146 was from Hardcover.app
+    notes: |
+      Dresden Files (18+ books) + Codex Alera (6) + Cinder
+      Spires (3) + side projects. Mark already verified 146
+      books visible on hardcover.app/authors/jim-butcher.
+      Critical regression test for the HardcoverSource bug
+      (currently returns 0 books for Butcher).
+    sample_books:
+      - goodreads_book_id: 12183815
+        title: "Brief Cases"
+        series_name: "The Dresden Files"
+        series_position: 15.6
+        pub_year: 2018
+      - goodreads_book_id: 136342745
+        title: "The Aeronaut's Windlass"
+        series_name: "The Cinder Spires"
+        series_position: 1
+        pub_year: 2015
+      - goodreads_book_id: 2637138
+        title: "Welcome to the Jungle"
+        series_name: "The Dresden Files Graphic Novels"
+        series_position: 0.5
+        pub_year: 2008
+      - goodreads_book_id: 133664
+        title: "Academ's Fury"
+        series_name: "Codex Alera"
+        series_position: 2
+        pub_year: 2005
+      - goodreads_book_id: 91479
+        title: "Death Masks"
+        series_name: "The Dresden Files"
+        series_position: 5
+        pub_year: 2003
+
+  # ── 6. Brandon Sanderson (mega-bibliography) ───────────────
+  - canonical_name: "Brandon Sanderson"
+    goodreads_author_id: 38550
+    author_url: "https://www.goodreads.com/author/show/38550"
+    total_books_on_goodreads: 400
+    notes: |
+      Cosmere universe (Stormlight Archive, Mistborn, Warbreaker,
+      Elantris, Wax & Wayne) + non-Cosmere (Reckoners, Skyward).
+      Hundreds of editions across translations. Test case for the
+      most-prolific-known author the pipeline can handle.
+    sample_books:
+      - goodreads_book_id: 15704486
+        title: "Calamity"
+        series_name: "The Reckoners"
+        series_position: 3
+        pub_year: 2016
+      - goodreads_book_id: 60531406
+        title: "Tress of the Emerald Sea"
+        series_name: "Hoid's Travails"
+        series_position: 1
+        pub_year: 2023
+      - goodreads_book_id: 34002132
+        title: "Oathbringer"
+        series_name: "The Stormlight Archive"
+        series_position: 3
+        pub_year: 2017
+      - goodreads_book_id: 68429
+        title: "The Well of Ascension"
+        series_name: "The Mistborn Saga"
+        series_position: 2
+        pub_year: 2007
+      - goodreads_book_id: 13552643
+        title: "Defending Elysium"
+        series_name: "Skyward"
+        series_position: 0.5
+        pub_year: 2008
+
+  # ── 7. William D. Arand (indie LitRPG) ─────────────────────
+  - canonical_name: "William D. Arand"
+    goodreads_author_id: 14905104
+    author_url: "https://www.goodreads.com/author/show/14905104"
+    total_books_on_goodreads: 52
+    notes: |
+      LitRPG / progression fantasy. Otherlife, Super Sales on
+      Super Heroes. MAM-popular niche.
+    sample_books:
+      - goodreads_book_id: 199140220
+        title: "Turncoat's Truth"
+        series_name: "Turncoat's Truth"
+        series_position: 1
+        pub_year: 2023
+      - goodreads_book_id: 140343710
+        title: "Cultivating Chaos 4"
+        series_name: "VeilVerse: Cultivating Chaos"
+        series_position: 4
+        pub_year: 2023
+      - goodreads_book_id: 42601513
+        title: "Super Sales on Super Heroes 3"
+        series_name: "Super Sales on Super Heroes"
+        series_position: 3
+        pub_year: 2018
+      - goodreads_book_id: 45428248
+        title: "Swing Shift"
+        series_name: "Swing Shift"
+        series_position: 1
+        pub_year: 2019
+      - goodreads_book_id: 30725034
+        title: "Otherlife Nightmares"
+        series_name: "The Selfless Hero Trilogy"
+        series_position: 2
+        pub_year: 2016
+
+  # ── 8. Logan Jacobs (indie LitRPG) ─────────────────────────
+  - canonical_name: "Logan Jacobs"
+    goodreads_author_id: 15944630
+    author_url: "https://www.goodreads.com/author/show/15944630"
+    total_books_on_goodreads: 326
+    notes: |
+      Indie LitRPG / men's adventure. Very prolific.
+    sample_books:
+      - goodreads_book_id: 48501038
+        title: "Stealing Spaceships: For Fun and Profit"
+        series_name: "Stealing Spaceships: For Fun and Profit"
+        series_position: 1
+        pub_year: 2019
+      - goodreads_book_id: 64276734
+        title: "Dream Master"
+        series_name: ~
+        series_position: ~
+        pub_year: 2022
+      - goodreads_book_id: 93031296
+        title: "Welcome to Heathen Row"
+        series_name: ~
+        series_position: ~
+        pub_year: 2023
+      - goodreads_book_id: 53110671
+        title: "Scholomance"
+        series_name: "Scholomance"
+        series_position: 1
+        pub_year: 2020
+      - goodreads_book_id: 60283139
+        title: "Backyard Dungeon 2"
+        series_name: "Backyard Dungeon"
+        series_position: 2
+        pub_year: 2022
+
+  # ── 9. Jon Messenger (indie sci-fi/military) ───────────────
+  - canonical_name: "Jon Messenger"
+    goodreads_author_id: 4156441
+    author_url: "https://www.goodreads.com/author/show/4156441"
+    total_books_on_goodreads: 28
+    notes: ""
+    sample_books:
+      - goodreads_book_id: 19303782
+        title: "Rage"
+        series_name: ~
+        series_position: ~
+        pub_year: 2012
+      - goodreads_book_id: 18846654
+        title: "Wind Warrior"
+        series_name: "World Aflame"
+        series_position: 1
+        pub_year: 2013
+      - goodreads_book_id: 24773817
+        title: "Wolves of the Northern Rift"
+        series_name: "Magic & Machinery"
+        series_position: 1
+        pub_year: 2015
+      - goodreads_book_id: 25184937
+        title: "Earth God"
+        series_name: "World Aflame"
+        series_position: 4
+        pub_year: 2015
+      - goodreads_book_id: 15764879
+        title: "Purge of Prometheus"
+        series_name: "Brink of Distinction"
+        series_position: 3
+        pub_year: 2012
+
+  # ── 10. Karen Traviss (trad-pub mil-SF + Star Wars EU) ─────
+  - canonical_name: "Karen Traviss"
+    goodreads_author_id: 12672
+    author_url: "https://www.goodreads.com/author/show/12672"
+    total_books_on_goodreads: 131
+    notes: |
+      Star Wars EU (Republic Commando) + original mil-SF
+      (Wess'har Wars). Edge case: licensed/franchise authorship
+      where Goodreads may credit the franchise property
+      separately.
+    sample_books:
+      - goodreads_book_id: 22201
+        title: "Star Wars: Triple Zero"
+        series_name: "Star Wars: Republic Commando"
+        series_position: 2
+        pub_year: 2006
+      - goodreads_book_id: 13575318
+        title: "Halo: The Thursday War"
+        series_name: "Halo"
+        series_position: 12
+        pub_year: 2012
+      - goodreads_book_id: 11915781
+        title: "Halo: Glasslands"
+        series_name: "Halo"
+        series_position: 11
+        pub_year: 2011
+      - goodreads_book_id: 349733
+        title: "Matriarch"
+        series_name: "The Wess'har Wars"
+        series_position: 4
+        pub_year: 2006
+      - goodreads_book_id: 171729940
+        title: "The Best of Us"
+        series_name: "Nomad"
+        series_position: 1
+        pub_year: 2019
+
+  # ── 11. Robyn Bee (newer non-LitRPG) ───────────────────────
+  - canonical_name: "Robyn Bee"
+    goodreads_author_id: 51306907
+    author_url: "https://www.goodreads.com/author/show/51306907"
+    total_books_on_goodreads: 3
+    notes: |
+      Newer indie author (no LitRPG). Tests "recently-launched
+      author with small but growing bibliography."
+    sample_books:
+      - goodreads_book_id: 235101459
+        title: "Tomb Divers"
+        series_name: ~ 
+        series_position: ~
+        pub_year: 2025
+      - goodreads_book_id: 250438925
+        title: "Rhenna: A Men's Adventure Romance"
+        series_name: ~ 
+        series_position: ~
+        pub_year: 2026
+      - goodreads_book_id: 217203373
+        title: "The Silken Empress"
+        series_name: ~
+        series_position: ~
+        pub_year: 2024
+
+  # ── 12. K.D. Robertson (newer) ─────────────────────────────
+  # Note: stored in our DB as "K. D. Robertson" (with spaces).
+  # Use the exact Goodreads spelling for canonical_name.
+  - canonical_name: "K.D. Robertson"
+    goodreads_author_id: 17126423
+    author_url: "https://www.goodreads.com/author/show/17126423"
+    total_books_on_goodreads: 29
+    notes: |
+      Stored locally as "K. D. Robertson" (spaces); confirm
+      Goodreads canonical spelling and update canonical_name
+      above to match.
+    sample_books:
+      - goodreads_book_id: 250813695
+        title: "Neural Wraith 4"
+        series_name: ~ # Book just released. It should eventually be updated to be a part of the "Neural Wraith" series at series_position of 4.
+        series_position: ~
+        pub_year: 2026
+      - goodreads_book_id: 244916675
+        title: "Heretic Spellblade: Epilogue" # English translated it is "86—EIGHTY-SIX, Vol. 10: Fragmental Neoteny"
+        series_name: ~ # It should technically be a part of "Heretic Spellblade" series, but Goodreads doesn't have that since it's an "Epilogue" and its series_position would be 9
+        series_position: ~
+        pub_year: 2025
+      - goodreads_book_id: 197230901
+        title: "Mob Sorcery"
+        series_name: "Mob Sorcery"
+        series_position: 1
+        pub_year: 2023
+      - goodreads_book_id: 56866813
+        title: "Heretic Spellblade 2"
+        series_name: "Heretic Spellblade"
+        series_position: 2
+        pub_year: 2021
+      - goodreads_book_id: 250447381
+        title: "Mob Sorcery Omnibus: Books 1-4"
+        series_name: ~ # It is an omnibus of the "Mob Sorcery" series' first four books
+        series_position: ~
+        pub_year: 2026
+
+  # ── 13. Asato Asato (Japanese — 86 light novel series) ─────
+  - canonical_name: "Asato Asato"
+    goodreads_author_id: 18041551
+    author_url: "https://www.goodreads.com/author/show/18041551"
+    total_books_on_goodreads: 44
+    notes: |
+      Author of the 86 light novel series. Non-Latin name —
+      Goodreads transliterates. Edge case for v2.11.0's
+      sitemap-slug-to-name extraction (the slug will use
+      underscore-Latin form, may not round-trip cleanly).
+      If you find both English-titled and Japanese-titled
+      books on their author page, note a few of each in
+      sample_books.
+    sample_books:
+      - goodreads_book_id: 49094049
+        title: "86—EIGHTY-SIX, Vol. 4: Under Pressure"
+        series_name: "86—EIGHTY-SIX Light Novel" # I'd likely just strip the "Light Novel" once I had it in my own library
+        series_position: 4
+        pub_year: 2018
+      - goodreads_book_id: 59464747
+        title: "８６―エイティシックス―Ep.10　―フラグメンタル・ネオテニー―" # English translated it is "86—EIGHTY-SIX, Vol. 10: Fragmental Neoteny"
+        series_name: "86—EIGHTY-SIX Light Novel" # I'd likely just strip the "Light Novel" once I had it in my own library
+        series_position: 10
+        pub_year: 2021
+      - goodreads_book_id: 241636748
+        title: "86--EIGHTY-SIX Alter.2 (light novel): Fight, Magical Girl Reina Lena! Go, Starship San Magnolia!"
+        series_name: ~ # It really should be a series, but Goodreads hasn't created one for it yet. It would likely be "86--EIGHTY-SIX Alter" and series_position of 2
+        series_position: ~
+        pub_year: 2026
+      - goodreads_book_id: 212294556
+        title: "86--EIGHTY-SIX: Operation High School" # It really should have additionally ", Vol. 1" in the title considering my comment below. But this is what Goodreads has.
+        series_name: ~ # It really should be a series, but Goodreads hasn't created one for it yet. It would likely be "86--EIGHTY-SIX: Operation High School" and series_position of 1
+        series_position: ~
+        pub_year: 2024
+      - goodreads_book_id: 55661351
+        title: "86--EIGHTY-SIX Manga, Vol. 2"
+        series_name: "86--EIGHTY-SIX Manga" # Manga version series of the light novel
+        series_position: 2
+        pub_year: 2019
+
+  # ── 14. Isuna Hasekura (Japanese — Spice and Wolf) ─────────
+  - canonical_name: "Isuna Hasekura"
+    goodreads_author_id: 2936674
+    author_url: "https://www.goodreads.com/author/show/2936674"
+    total_books_on_goodreads: 108
+    notes: |
+      Spice and Wolf series. Goodreads has some works in both
+      English and Japanese. Useful for "does our pipeline handle
+      multi-language bibliographies" — note both an English-
+      titled book and a Japanese-titled book in sample_books
+      if you see them on the author page.
+    sample_books:
+      - goodreads_book_id: 6483360
+        title: "Spice & Wolf, Vol. 01"
+        series_name: "狼と香辛料 [Ookami to Koushinryou] (Novel)" # English translated the series is "Spice and Wolf" (Or Spice & Wolf depending)
+        series_position: 1
+        pub_year: 2006
+      - goodreads_book_id: 45731767
+        title: "Wolf & Parchment: New Theory Spice & Wolf, Vol. 4"
+        series_name: "新説 狼と香辛料 狼と羊皮紙 (Novel)" # English translated it is "Wolf & Parchment: New Theory Spice & Wolf"
+        series_position: 4
+        pub_year: 2019
+      - goodreads_book_id: 68428
+        title: "狼と香辛料 XVI 太陽の金貨 [下]" # English translated the title is "Spice & Wolf, Vol. 16: The Coin of the Sun (Part II)"
+        series_name: "狼と香辛料 [Ookami to Koushinryou] (Novel)" # English translated the series is "Spice and Wolf" (Or Spice & Wolf depending)
+        series_position: 16
+        pub_year: 2011
+      - goodreads_book_id: 15766358
+        title: "マグダラで眠れ" # English translated it is "Magudala de Nemure" although TECHNICALLY it really should be "Magudala de Nemure, Vol. 1"
+        series_name: マグダラで眠れ [Magudara de nemure] (Novel) # English translated the series is "Magudala de Nemure"
+        series_position: 1
+        pub_year: 2012
+      - goodreads_book_id: 122778802
+        title: "Spice and Wolf, Vol. 24"
+        series_name: "狼と香辛料 [Ookami to Koushinryou] (Novel)" # English translated the series is "Spice and Wolf" (Or Spice & Wolf depending)
+        series_position: 24
+        pub_year: 2023
+
+
+# ── Sample-books template (copy-paste into each author's
+#    `sample_books: []` list above when ready to fill in) ────
+#
+#    sample_books:
+#      - goodreads_book_id: 7235533
+#        title: "The Way of Kings"
+#        series_name: "The Stormlight Archive"
+#        series_position: "1"
+#        pub_year: 2010
+#      - goodreads_book_id: 17332218
+#        title: "Words of Radiance"
+#        series_name: "The Stormlight Archive"
+#        series_position: "2"
+#        pub_year: 2014
+#      - goodreads_book_id: 68428
+#        title: "Elantris"
+#        series_name: ~
+#        series_position: ~
+#        pub_year: 2005
