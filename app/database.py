@@ -65,7 +65,11 @@ CREATE TABLE IF NOT EXISTS announces (
     author_blob       TEXT,
     decision          TEXT NOT NULL,
     decision_reason   TEXT NOT NULL,
-    matched_author    TEXT
+    matched_author    TEXT,
+    -- v2.9.0 format-priority dedup: persist the IRC announce's
+    -- `Filetype: ( xxx )` field so we can audit dedup decisions
+    -- after the fact. Pre-v2.9.0 announces have this NULL.
+    filetype          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS grabs (
@@ -90,7 +94,15 @@ CREATE TABLE IF NOT EXISTS grabs (
     -- no qBit submit was made, and no snatch budget was charged.
     -- The pipeline path past `STATE_DOWNLOADED` runs identically
     -- to a normal grab. is_reingest=0 on every legacy/normal row.
-    is_reingest       INTEGER NOT NULL DEFAULT 0
+    is_reingest       INTEGER NOT NULL DEFAULT 0,
+    -- v2.9.0 format-priority dedup. `book_format` is the lowercased
+    -- file extension hint (epub, azw3, m4b, mp3, ...) taken from the
+    -- announce's Filetype field at grab time. `dedup_key` is the
+    -- normalized (title, first-author-surname) tuple used to find
+    -- in-flight or owned siblings of the same book regardless of
+    -- format. Both NULL on pre-v2.9.0 grabs — see migration backfill.
+    book_format       TEXT,
+    dedup_key         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS snatch_ledger (
@@ -367,6 +379,43 @@ CREATE TABLE IF NOT EXISTS mam_cover_hashes (
     height      INTEGER,
     bytes       INTEGER
 );
+
+-- v2.9.0 — format-priority dedup hold queue.
+-- When an announce arrives for a disabled-format with no in-flight or
+-- owned sibling, we don't grab immediately. Instead we park it here
+-- for `format_dedup_hold_seconds` (default 600s = 10 min) and let the
+-- scheduler re-evaluate at `release_at`. If a higher-priority sibling
+-- arrives during the hold window, the hold is dropped. If nothing
+-- arrives, the hold is released and we inject the grab.
+--
+-- `dedup_key` mirrors `grabs.dedup_key` (normalized title + first-author
+-- surname). `media_type` is "ebook" or "audiobook" — used to look up
+-- the priority list. `book_format` is the lowercased filetype hint.
+-- `torrent_id`, `torrent_name`, `category`, `author_blob` are stored
+-- so the scheduler can call inject_grab at release time without
+-- needing the source announce row to still exist.
+-- `state` is one of: 'pending' (timer still running), 'released' (timer
+-- fired, grab injected), 'dropped' (higher-priority sibling arrived).
+CREATE TABLE IF NOT EXISTS pending_holds (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    announce_id       INTEGER REFERENCES announces(id) ON DELETE SET NULL,
+    dedup_key         TEXT NOT NULL,
+    media_type        TEXT NOT NULL,
+    book_format       TEXT NOT NULL,
+    torrent_id        TEXT NOT NULL,
+    torrent_name      TEXT NOT NULL,
+    category          TEXT,
+    author_blob       TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    release_at        TEXT NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'pending',
+    resolved_at       TEXT,
+    resolution_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_holds_state_release
+    ON pending_holds(state, release_at);
+CREATE INDEX IF NOT EXISTS idx_pending_holds_dedup_key
+    ON pending_holds(dedup_key);
 """
 
 
@@ -473,6 +522,37 @@ MIGRATIONS: list[str] = [
     # from already-snatched-on-disk reingests (no MAM .torrent fetch,
     # no qBit submit, no snatch budget charge) from normal grabs.
     "ALTER TABLE grabs ADD COLUMN is_reingest INTEGER NOT NULL DEFAULT 0",
+    # v2.9.0 — format-priority dedup. Persist the announce filetype
+    # for audit; tag each grab with book_format + dedup_key so the
+    # dedup gate can find in-flight siblings by normalized key. The
+    # index on grabs(dedup_key) MUST live in MIGRATIONS only — putting
+    # it in SCHEMA's CREATE INDEX block would crash legacy DBs the
+    # same way the v2.7.0 bundle_group_id regression did (column not
+    # yet ALTERed in when SCHEMA runs). See test_legacy_db_upgrade.py.
+    "ALTER TABLE announces ADD COLUMN filetype TEXT",
+    "ALTER TABLE grabs ADD COLUMN book_format TEXT",
+    "ALTER TABLE grabs ADD COLUMN dedup_key TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_grabs_dedup_key ON grabs(dedup_key)",
+    """CREATE TABLE IF NOT EXISTS pending_holds (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        announce_id       INTEGER REFERENCES announces(id) ON DELETE SET NULL,
+        dedup_key         TEXT NOT NULL,
+        media_type        TEXT NOT NULL,
+        book_format       TEXT NOT NULL,
+        torrent_id        TEXT NOT NULL,
+        torrent_name      TEXT NOT NULL,
+        category          TEXT,
+        author_blob       TEXT,
+        created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        release_at        TEXT NOT NULL,
+        state             TEXT NOT NULL DEFAULT 'pending',
+        resolved_at       TEXT,
+        resolution_reason TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_pending_holds_state_release "
+    "ON pending_holds(state, release_at)",
+    "CREATE INDEX IF NOT EXISTS idx_pending_holds_dedup_key "
+    "ON pending_holds(dedup_key)",
 ]
 
 

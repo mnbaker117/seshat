@@ -170,8 +170,36 @@ DEFAULT_SETTINGS = {
     # Format-level gates. The "format" is the MAM category prefix
     # before " - " (e.g. "ebooks", "audiobooks", "comics graphic novels").
     # Empty allowed_formats = accept all formats that pass category gate.
+    # The UI labels this gate "Media Type" as of v2.9.0 — the setting
+    # key is kept as `allowed_formats` for settings.json backwards-compat.
     "allowed_formats": [],
     "excluded_formats": [],
+
+    # v2.9.0 — per-media-type Format Priority. List order is the
+    # priority order (top = highest). `enabled: true` means an
+    # announce in that filetype is always grabbed regardless of
+    # in-flight or owned siblings. `enabled: false` means the
+    # announce is held / skipped per the format-priority dedup rules
+    # (see app/orchestrator/format_dedup.py). The lists drive the
+    # rules; the format set per media type is also the universe of
+    # formats the dedup gate recognizes.
+    "format_priority": {
+        "ebook": [
+            {"fmt": "epub", "enabled": True},
+            {"fmt": "azw3", "enabled": False},
+            {"fmt": "mobi", "enabled": False},
+            {"fmt": "pdf",  "enabled": False},
+        ],
+        "audiobook": [
+            {"fmt": "m4b", "enabled": True},
+            {"fmt": "mp3", "enabled": False},
+        ],
+    },
+    # How long to hold a disabled-format announce before grabbing it,
+    # in case a higher-priority sibling arrives during the window.
+    # 600 = 10 minutes. Tunable for slow uploaders who submit the
+    # second-format torrent minutes after the first.
+    "format_dedup_hold_seconds": 600,
     # Audiobook acceptance toggle. When True, the filter builder
     # merges `allowed_audiobook_categories` into `allowed_categories`
     # (so audiobook announces pass the category gate) and adds

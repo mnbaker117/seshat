@@ -137,6 +137,28 @@ class TestLegacyDbUpgrade:
             cursor = await db.execute("PRAGMA table_info(grabs)")
             grab_cols = {row[1] for row in await cursor.fetchall()}
             assert "is_reingest" in grab_cols
+            # v2.9.0 format-priority dedup columns on grabs.
+            assert "book_format" in grab_cols
+            assert "dedup_key" in grab_cols
+
+            # v2.9.0 announces.filetype column.
+            cursor = await db.execute("PRAGMA table_info(announces)")
+            ann_cols = {row[1] for row in await cursor.fetchall()}
+            assert "filetype" in ann_cols
+
+            # v2.9.0 pending_holds table + indexes.
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='pending_holds'"
+            )
+            assert (await cursor.fetchone()) is not None
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name IN ('idx_grabs_dedup_key', "
+                "'idx_pending_holds_state_release', "
+                "'idx_pending_holds_dedup_key')"
+            )
+            assert len({row[0] for row in await cursor.fetchall()}) == 3
 
             # Bundle-group index present.
             cursor = await db.execute(
@@ -157,6 +179,130 @@ class TestLegacyDbUpgrade:
             assert row[2] == 0
         finally:
             await db.close()
+
+    async def test_v28_to_v29_upgrade(self, tmp_path, monkeypatch):
+        """v2.9.0 format-priority dedup adds:
+          - `announces.filetype`
+          - `grabs.book_format`, `grabs.dedup_key`
+          - new `pending_holds` table
+          - index `idx_grabs_dedup_key` (MIGRATIONS only — same legacy
+            safety pattern as v2.7.0's bundle_group_id index)
+        Simulate a v2.8.1-shape DB (so prior migrations are stamped as
+        applied) and assert init_db() lands the v2.9.0 additions
+        cleanly without re-running earlier migrations.
+        """
+        from app import config, database
+
+        db_path = tmp_path / "seshat-v281.db"
+        monkeypatch.setattr(config, "APP_DB_PATH", db_path)
+        monkeypatch.setattr(database, "APP_DB_PATH", db_path)
+
+        # Build a v2.8.1-shape DB: every column that existed at v2.8.1
+        # but NONE of the v2.9.0 additions. Stamp user_version high
+        # enough that init_db skips the pre-v2.9.0 migrations.
+        async with aiosqlite.connect(str(db_path)) as db:
+            await db.executescript("""
+                CREATE TABLE announces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seen_at TEXT, raw TEXT, torrent_id TEXT, torrent_name TEXT,
+                    category TEXT, author_blob TEXT, decision TEXT,
+                    decision_reason TEXT, matched_author TEXT
+                );
+                CREATE TABLE grabs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    announce_id INTEGER, mam_torrent_id TEXT NOT NULL,
+                    torrent_name TEXT NOT NULL, category TEXT, author_blob TEXT,
+                    torrent_file_path TEXT, qbit_hash TEXT, state TEXT NOT NULL,
+                    state_updated_at TEXT, grabbed_at TEXT, submitted_at TEXT,
+                    completed_at TEXT, failed_reason TEXT,
+                    failed_with_cookie_id INTEGER,
+                    source_metadata TEXT,
+                    is_reingest INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+            # v2.8.1's migration count is 26 (12 pre-v2.7 + 8 v2.7 + 1 v2.8
+            # + earlier additions). The exact number matters less than that
+            # it's >= the pre-v2.9.0 count so v2.9.0 entries run as the
+            # only new migrations. We pick a safe lower bound by reading
+            # the current MIGRATIONS length minus v2.9.0's 7 entries.
+            from app.database import MIGRATIONS as _MIGRATIONS
+            v281_count = len(_MIGRATIONS) - 7
+            await db.execute(f"PRAGMA user_version = {v281_count}")
+            await db.commit()
+
+        await init_db()
+
+        db = await get_db()
+        try:
+            cursor = await db.execute("PRAGMA table_info(announces)")
+            ann_cols = {row[1] for row in await cursor.fetchall()}
+            assert "filetype" in ann_cols
+
+            cursor = await db.execute("PRAGMA table_info(grabs)")
+            grab_cols = {row[1] for row in await cursor.fetchall()}
+            assert "book_format" in grab_cols
+            assert "dedup_key" in grab_cols
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='pending_holds'"
+            )
+            assert (await cursor.fetchone()) is not None
+
+            cursor = await db.execute("PRAGMA table_info(pending_holds)")
+            hold_cols = {row[1] for row in await cursor.fetchall()}
+            for required in (
+                "dedup_key", "media_type", "book_format", "torrent_id",
+                "torrent_name", "release_at", "state",
+            ):
+                assert required in hold_cols, f"missing pending_holds.{required}"
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name = 'idx_grabs_dedup_key'"
+            )
+            assert (await cursor.fetchone()) is not None
+
+            # Final user_version stamps at the new migration count so
+            # next startup skips everything.
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            from app.database import MIGRATIONS as _MIGRATIONS_AFTER
+            assert row[0] == len(_MIGRATIONS_AFTER)
+        finally:
+            await db.close()
+
+    async def test_v29_settings_defaults_present(self):
+        """v2.9.0 adds `format_priority` (dict per media type) and
+        `format_dedup_hold_seconds` to the settings defaults. Verify
+        both keys are in DEFAULTS with sensible shapes — catches the
+        case where a future refactor strips them out.
+        """
+        from app.config import DEFAULT_SETTINGS
+
+        assert "format_dedup_hold_seconds" in DEFAULT_SETTINGS
+        assert isinstance(DEFAULT_SETTINGS["format_dedup_hold_seconds"], int)
+        assert DEFAULT_SETTINGS["format_dedup_hold_seconds"] >= 60
+
+        assert "format_priority" in DEFAULT_SETTINGS
+        fp = DEFAULT_SETTINGS["format_priority"]
+        assert "ebook" in fp and "audiobook" in fp
+        # Each entry must be a list of {fmt, enabled} dicts.
+        for media_type, entries in fp.items():
+            assert isinstance(entries, list) and entries, (
+                f"format_priority[{media_type}] must be a non-empty list"
+            )
+            for entry in entries:
+                assert set(entry.keys()) >= {"fmt", "enabled"}
+                assert isinstance(entry["fmt"], str)
+                assert isinstance(entry["enabled"], bool)
+        # Recommended defaults: highest-priority entry is enabled, so
+        # behavior on upgrade matches the design plan (epub-only for
+        # ebook, m4b-only for audiobook).
+        assert fp["ebook"][0]["fmt"] == "epub"
+        assert fp["ebook"][0]["enabled"] is True
+        assert fp["audiobook"][0]["fmt"] == "m4b"
+        assert fp["audiobook"][0]["enabled"] is True
 
     async def test_schema_indexes_reference_declared_columns(self):
         """Lint guard: every column referenced by a CREATE INDEX
