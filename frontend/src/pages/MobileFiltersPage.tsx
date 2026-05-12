@@ -127,7 +127,13 @@ export default function MobileFiltersPage() {
   const excludedFormats = new Set(
     (effective.excluded_formats as string[]) ?? [],
   );
-  const acceptAudiobooks = !!effective.accept_audiobook_announces;
+  // v2.9.0: audiobook acceptance derived from the Media Type filter.
+  const acceptAudiobooks =
+    allowedFormats.size === 0 || allowedFormats.has("audiobooks");
+
+  type FmtEntry = { fmt: string; enabled: boolean };
+  const formatPriority =
+    (effective.format_priority as Record<string, FmtEntry[]>) ?? {};
 
   // 3-state chip: Off → Allow → Exclude → Off. supportExclude=false
   // collapses it to Off ↔ Allow.
@@ -257,30 +263,6 @@ export default function MobileFiltersPage() {
         </div>
       )}
 
-      <MobileSection title="Audiobook announces" defaultOpen={true}>
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            fontSize: 14,
-            color: t.text,
-            cursor: "pointer",
-            minHeight: 44,
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={acceptAudiobooks}
-            onChange={(e) =>
-              setField("accept_audiobook_announces", e.target.checked)
-            }
-            style={{ width: 22, height: 22 }}
-          />
-          Accept audiobook announces
-        </label>
-      </MobileSection>
-
       <MobileSection
         title="Categories"
         subtitle={`${allowedCats.size} ebook + ${allowedAudiobookCats.size} audiobook selected`}
@@ -332,7 +314,7 @@ export default function MobileFiltersPage() {
       </MobileSection>
 
       <MobileSection
-        title="Formats"
+        title="Media Type"
         count={`${allowedFormats.size}/${enums.formats.length}`}
         defaultOpen={false}
       >
@@ -352,6 +334,30 @@ export default function MobileFiltersPage() {
             ),
           )}
         </div>
+        <p style={{ fontSize: 11, color: t.td, marginTop: 8 }}>
+          Empty = accept all. Adding "audiobooks" enables audiobook
+          subcategories above.
+        </p>
+      </MobileSection>
+
+      <MobileSection
+        title="Format Priority"
+        count={
+          Object.keys(formatPriority).length === 0
+            ? "off"
+            : `${Object.keys(formatPriority).length} types`
+        }
+        defaultOpen={false}
+      >
+        <MobileFormatPriority
+          formatPriority={formatPriority}
+          onChange={(next) => setField("format_priority", next)}
+        />
+        <p style={{ fontSize: 11, color: t.td, marginTop: 8 }}>
+          Top of each list = highest priority. Enabled = grab now.
+          Disabled = hold briefly for a higher-priority sibling, then
+          grab if alone.
+        </p>
       </MobileSection>
 
       <MobileSection
@@ -416,6 +422,184 @@ export default function MobileFiltersPage() {
           </MobileBtn>
         </div>
       )}
+    </div>
+  );
+}
+
+
+// v2.9.0 Format Priority — mobile-native variant of the desktop
+// component. Up/down arrow buttons sized for touch + an enabled
+// toggle per row. One sub-card per media type.
+type FmtEntry = { fmt: string; enabled: boolean };
+
+function MobileFormatPriority({
+  formatPriority,
+  onChange,
+}: {
+  formatPriority: Record<string, FmtEntry[]>;
+  onChange: (next: Record<string, FmtEntry[]>) => void;
+}) {
+  const t = useTheme();
+  const orderedKeys = useMemo(() => {
+    const known = ["ebook", "audiobook"];
+    const others = Object.keys(formatPriority).filter(
+      (k) => !known.includes(k),
+    );
+    return [...known.filter((k) => k in formatPriority), ...others];
+  }, [formatPriority]);
+
+  function updateMedia(media: string, next: FmtEntry[]) {
+    onChange({ ...formatPriority, [media]: next });
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {orderedKeys.map((media) => {
+        const entries = formatPriority[media] ?? [];
+        return (
+          <div key={media}>
+            <div
+              style={{
+                fontSize: 12,
+                color: t.tg,
+                textTransform: "uppercase",
+                fontWeight: 700,
+                letterSpacing: "0.04em",
+                marginBottom: 6,
+              }}
+            >
+              {media} Formats
+            </div>
+            <MobileFormatPriorityList
+              entries={entries}
+              onChange={(next) => updateMedia(media, next)}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MobileFormatPriorityList({
+  entries,
+  onChange,
+}: {
+  entries: FmtEntry[];
+  onChange: (next: FmtEntry[]) => void;
+}) {
+  const t = useTheme();
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= entries.length) return;
+    const next = [...entries];
+    [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+  const toggle = (i: number) => {
+    onChange(
+      entries.map((e, idx) =>
+        idx === i ? { ...e, enabled: !e.enabled } : e,
+      ),
+    );
+  };
+  if (entries.length === 0) {
+    return (
+      <p style={{ fontSize: 12, color: t.td }}>
+        No formats configured for this media type.
+      </p>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {entries.map((entry, i) => {
+        const isTop = i === 0;
+        return (
+          <div
+            key={entry.fmt}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 12px",
+              minHeight: 44,
+              borderRadius: 8,
+              background: isTop ? t.abg : t.bg3,
+              border: `1px solid ${isTop ? t.abr : t.border}`,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 700,
+                color: isTop ? t.accent : t.td,
+                width: 18,
+              }}
+            >
+              {i + 1}.
+            </span>
+            <span
+              style={{
+                flex: 1,
+                fontSize: 13,
+                fontWeight: 500,
+                color: isTop ? t.accent : t.text,
+                textTransform: "uppercase",
+                letterSpacing: 0.4,
+              }}
+            >
+              {entry.fmt}
+            </span>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 12,
+                color: t.td,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={entry.enabled}
+                onChange={() => toggle(i)}
+                style={{ width: 18, height: 18 }}
+              />
+              On
+            </label>
+            <button
+              onClick={() => move(i, -1)}
+              disabled={isTop}
+              style={{
+                background: "none",
+                border: "none",
+                padding: 6,
+                color: isTop ? t.tg : t.td,
+                fontSize: 16,
+                opacity: isTop ? 0.3 : 1,
+              }}
+              aria-label="Move up"
+            >
+              ▲
+            </button>
+            <button
+              onClick={() => move(i, 1)}
+              disabled={i === entries.length - 1}
+              style={{
+                background: "none",
+                border: "none",
+                padding: 6,
+                color: i === entries.length - 1 ? t.tg : t.td,
+                fontSize: 16,
+                opacity: i === entries.length - 1 ? 0.3 : 1,
+              }}
+              aria-label="Move down"
+            >
+              ▼
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

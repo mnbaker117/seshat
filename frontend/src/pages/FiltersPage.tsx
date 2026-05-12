@@ -144,7 +144,18 @@ function DesktopFiltersPage() {
   const excludedFormats = new Set(
     (effective.excluded_formats as string[]) ?? [],
   );
-  const acceptAudiobooks = !!effective.accept_audiobook_announces;
+  // v2.9.0: audiobook acceptance is derived from the Media Type
+  // filter. Empty allowed_formats means "accept all" — including
+  // audiobooks. Otherwise the user must have ticked the audiobooks
+  // chip explicitly. Mirrors `_build_filter_config` in app/main.py.
+  const acceptAudiobooks =
+    allowedFormats.size === 0 || allowedFormats.has("audiobooks");
+
+  // Format Priority — per-media-type list of {fmt, enabled} entries.
+  // Drives the v2.9.0 format-priority dedup gate. Top = highest.
+  type FmtEntry = { fmt: string; enabled: boolean };
+  const formatPriority =
+    (effective.format_priority as Record<string, FmtEntry[]>) ?? {};
 
   function toggleInSet(
     settingKey: string,
@@ -187,33 +198,6 @@ function DesktopFiltersPage() {
       {error && <Banner tone="err">{error}</Banner>}
       {ok && <Banner tone="ok">{ok}</Banner>}
 
-      {/* ── Audiobook acceptance ──────────────────────────── */}
-      <Section
-        title="Audiobook Announces"
-        subtitle="Pipeline-side toggle. When off, audiobook IRC announces are skipped regardless of the category list below."
-      >
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            fontSize: 14,
-            color: theme.text,
-            cursor: "pointer",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={acceptAudiobooks}
-            onChange={(e) =>
-              setField("accept_audiobook_announces", e.target.checked)
-            }
-          />
-          Accept audiobook announces (routes m4b/mp3 downloads to
-          Audiobookshelf when an ABS library path is configured)
-        </label>
-      </Section>
-
       {/* ── Categories ─────────────────────────────────────── */}
       <Section
         title="Allowed Categories"
@@ -245,7 +229,7 @@ function DesktopFiltersPage() {
                     color: theme.textDim, textTransform: "none",
                     letterSpacing: 0,
                   }}>
-                    (toggle audiobook announces above to enable)
+                    (add "audiobooks" to the Media Type filter below to enable)
                   </span>
                 )}
               </h4>
@@ -284,10 +268,10 @@ function DesktopFiltersPage() {
         </p>
       </Section>
 
-      {/* ── Formats ────────────────────────────────────────── */}
+      {/* ── Media Type ─────────────────────────────────────── */}
       <Section
-        title="Formats"
-        subtitle="Top-level format gate. Empty allowed = accept all."
+        title="Media Type"
+        subtitle="High-level media gate. Empty = accept all. Adding 'audiobooks' here also enables audiobook subcategories above."
       >
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {enums.formats.map((f) => (
@@ -305,6 +289,24 @@ function DesktopFiltersPage() {
             />
           ))}
         </div>
+      </Section>
+
+      {/* ── Format Priority (v2.9.0) ───────────────────────── */}
+      <Section
+        title="Format Priority"
+        subtitle="Per-media-type priority for dedup. Enabled formats always grab; disabled formats are held briefly to see if a higher-priority sibling arrives, then grabbed if none does."
+      >
+        <FormatPrioritySection
+          formatPriority={formatPriority}
+          onChange={(next) => setField("format_priority", next)}
+        />
+        <p style={{ fontSize: 11, color: theme.textDim, marginTop: 12 }}>
+          Top of each list = highest priority. Enabled = grab immediately.
+          Disabled = hold briefly (in case a higher-priority sibling
+          arrives), then grab if alone. The hold window is{" "}
+          {Math.round((effective.format_dedup_hold_seconds as number ?? 600) / 60)} min
+          (configurable in Settings).
+        </p>
       </Section>
 
       {/* ── Languages ──────────────────────────────────────── */}
@@ -367,6 +369,199 @@ function DesktopFiltersPage() {
           {saving ? <Spin size={14} /> : "Save"}
         </Btn>
       </div>
+    </div>
+  );
+}
+
+// v2.9.0 — Format Priority editor. Renders one sub-card per media
+// type ("ebook" / "audiobook" today) with a draggable, toggleable
+// list of {fmt, enabled} entries. Top-of-list = highest priority.
+// Up/down arrows for keyboard-accessible reorder mirrors the existing
+// FormatPriorityList in SettingsPage.tsx; the enabled checkbox is
+// the v2.9.0-specific addition that drives grab-now-vs-hold behavior.
+type FmtEntry = { fmt: string; enabled: boolean };
+
+function FormatPrioritySection({
+  formatPriority,
+  onChange,
+}: {
+  formatPriority: Record<string, FmtEntry[]>;
+  onChange: (next: Record<string, FmtEntry[]>) => void;
+}) {
+  const theme = useTheme();
+  // Iterate media types in a stable, user-friendly order — ebook
+  // first, audiobook second, then anything else the backend ever
+  // adds (forward-compat for comics etc).
+  const orderedKeys = useMemo(() => {
+    const known = ["ebook", "audiobook"];
+    const others = Object.keys(formatPriority).filter(
+      (k) => !known.includes(k),
+    );
+    return [...known.filter((k) => k in formatPriority), ...others];
+  }, [formatPriority]);
+
+  function updateMedia(media: string, next: FmtEntry[]) {
+    onChange({ ...formatPriority, [media]: next });
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {orderedKeys.map((media) => {
+        const entries = formatPriority[media] ?? [];
+        return (
+          <div
+            key={media}
+            style={{
+              background: theme.bg3,
+              border: `1px solid ${theme.borderL}`,
+              borderRadius: 8,
+              padding: "12px 14px",
+            }}
+          >
+            <h4
+              style={{
+                fontSize: 13,
+                fontWeight: 700,
+                color: theme.text2,
+                marginTop: 0,
+                marginBottom: 10,
+                textTransform: "uppercase",
+                letterSpacing: 0.4,
+              }}
+            >
+              {media} Formats
+            </h4>
+            <FormatPriorityList
+              entries={entries}
+              onChange={(next) => updateMedia(media, next)}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FormatPriorityList({
+  entries,
+  onChange,
+}: {
+  entries: FmtEntry[];
+  onChange: (next: FmtEntry[]) => void;
+}) {
+  const theme = useTheme();
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= entries.length) return;
+    const next = [...entries];
+    [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+  const toggle = (i: number) => {
+    const next = entries.map((e, idx) =>
+      idx === i ? { ...e, enabled: !e.enabled } : e,
+    );
+    onChange(next);
+  };
+  if (entries.length === 0) {
+    return (
+      <p style={{ fontSize: 12, color: theme.textDim }}>
+        No formats configured for this media type.
+      </p>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {entries.map((entry, i) => {
+        const isTop = i === 0;
+        return (
+          <div
+            key={entry.fmt}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "6px 12px",
+              borderRadius: 6,
+              background: isTop ? theme.abg : theme.bg,
+              border: `1px solid ${isTop ? theme.abr : theme.borderL}`,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 700,
+                color: isTop ? theme.accent : theme.td,
+                width: 20,
+              }}
+            >
+              {i + 1}.
+            </span>
+            <span
+              style={{
+                fontSize: 14,
+                fontWeight: 500,
+                color: isTop ? theme.accent : theme.text2,
+                flex: 1,
+                textTransform: "uppercase",
+                letterSpacing: 0.4,
+              }}
+            >
+              {entry.fmt}
+            </span>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 12,
+                color: theme.textDim,
+                cursor: "pointer",
+                userSelect: "none",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={entry.enabled}
+                onChange={() => toggle(i)}
+              />
+              Enabled
+            </label>
+            <button
+              onClick={() => move(i, -1)}
+              disabled={isTop}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: isTop ? "default" : "pointer",
+                color: isTop ? theme.tg : theme.td,
+                fontSize: 14,
+                padding: "0 4px",
+                opacity: isTop ? 0.3 : 1,
+              }}
+              aria-label="Move up"
+            >
+              ▲
+            </button>
+            <button
+              onClick={() => move(i, 1)}
+              disabled={i === entries.length - 1}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: i === entries.length - 1 ? "default" : "pointer",
+                color: i === entries.length - 1 ? theme.tg : theme.td,
+                fontSize: 14,
+                padding: "0 4px",
+                opacity: i === entries.length - 1 ? 0.3 : 1,
+              }}
+              aria-label="Move down"
+            >
+              ▼
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

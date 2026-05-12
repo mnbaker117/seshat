@@ -60,6 +60,9 @@ async def send_to_pipeline(data: dict = Body(...)):
         raise HTTPException(400, "No books specified")
     buy_personal_fl = bool(data.get("buy_personal_fl", False))
     use_wedge_override = bool(data.get("use_wedge_override", False))
+    # v2.9.0 — bypass the format-priority dedup gate for this batch.
+    # Equivalent to the manual-inject "Snatch anyway" checkbox.
+    override_format_dedup = bool(data.get("override_format_dedup", False))
 
     if state.dispatcher is None:
         raise HTTPException(503, "Pipeline dispatcher not initialized")
@@ -69,7 +72,7 @@ async def send_to_pipeline(data: dict = Body(...)):
         placeholders = ",".join("?" * len(book_ids))
         rows = await (await db.execute(
             f"SELECT b.id, b.title, b.mam_url, b.mam_status, b.mam_torrent_id, "
-            f"b.mam_category, "
+            f"b.mam_category, b.mam_formats, "
             f"b.source_url, b.isbn, b.series_id, b.series_index, b.cover_url, "
             f"b.description, b.page_count, "
             f"a.name as author_name, s.name as series_name "
@@ -135,12 +138,20 @@ async def send_to_pipeline(data: dict = Body(...)):
                 )
 
         try:
+            # v2.9.0 — feed the first MAM format (e.g. "epub" from a
+            # comma-joined "epub,azw3") into inject_grab so the dedup
+            # gate can recognize the format. Without this hint the
+            # gate falls through to allow because filetype is empty.
+            mam_formats_csv = (r["mam_formats"] or "").strip().lower()
+            filetype_hint = (mam_formats_csv.split(",")[0] or "").strip()
+
             result = await inject_grab(
                 state.dispatcher,
                 torrent_id=tid,
                 torrent_name=(r["title"] or "").strip(),
                 category=(r["mam_category"] or "").strip(),
                 author_blob=author,
+                filetype=filetype_hint,
                 # Phase 5: pass clean book metadata so download-folder
                 # template-mode (`{author}/{series}/{title}`) renders
                 # with the real values instead of the noisy torrent
@@ -150,6 +161,7 @@ async def send_to_pipeline(data: dict = Body(...)):
                 book_title=(r["title"] or "").strip(),
                 raw_line=f"discovery:{r['mam_torrent_id']}",
                 force_fl_wedge=use_wedge_override,
+                apply_format_dedup=not override_format_dedup,
             )
             ok = result.action in ("submit", "queue") and result.error is None
 

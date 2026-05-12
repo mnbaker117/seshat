@@ -64,10 +64,21 @@ class GrabItem(BaseModel):
     # Unknown keys are stored as-is; the pipeline reads only the
     # keys it recognizes.
     metadata: Optional[dict[str, Any]] = None
+    # Optional MAM filetype hint (epub / azw3 / m4b / mp3 / ...). When
+    # the caller has it (Discovery's send-to-pipeline does — it pulls
+    # the format from the MAM search row), passing it lets the
+    # v2.9.0 format-dedup gate make the right call instead of
+    # falling through on "no filetype" with a warning.
+    filetype: Optional[str] = None
 
 
 class InjectBatchRequest(BaseModel):
     items: list[GrabItem] = Field(..., min_length=1, max_length=100)
+    # v2.9.0 — bypass the format-priority dedup gate for every item
+    # in this batch. Discovery's send-to-pipeline UI surfaces this
+    # as a "Snatch anyway" checkbox at the batch level (the typical
+    # "I know I already own this format but want it again" path).
+    override_format_dedup: bool = False
 
 
 class GrabResultItem(BaseModel):
@@ -130,7 +141,9 @@ async def inject_batch(body: InjectBatchRequest) -> InjectBatchResponse:
                 torrent_name=(item.title or "").strip(),
                 category=(item.category or "").strip(),
                 author_blob=item.author or "",
+                filetype=(item.filetype or "").strip(),
                 raw_line=f"external:{item.url_or_id}",
+                apply_format_dedup=not body.override_format_dedup,
             )
             ok = result.action in ("submit", "queue") and result.error is None
 

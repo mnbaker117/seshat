@@ -177,6 +177,128 @@ class TestEnvOverridePrecedence:
         assert second_settings["mam_irc_nick"] == "first_value"
 
 
+class TestLegacySettingsMigration:
+    """v2.9.0 migration: `accept_audiobook_announces` boolean →
+    "audiobooks" membership in `allowed_formats`. Documented in
+    `_apply_legacy_settings_migrations` in app/config.py."""
+
+    def _seed_settings_file(self, tmp_path, payload: dict) -> None:
+        """Write a settings.json with the given shape, monkeypatch-
+        friendly: caller is expected to have already pointed DATA_DIR
+        at tmp_path via env var."""
+        import json
+        (tmp_path / "settings.json").write_text(json.dumps(payload))
+
+    def test_legacy_on_with_nonempty_formats_adds_audiobooks(
+        self, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        import app.config
+        importlib.reload(app.config)
+        self._seed_settings_file(tmp_path, {
+            "accept_audiobook_announces": True,
+            "allowed_formats": ["ebooks"],
+        })
+
+        settings = app.config.load_settings()
+        # Legacy flag is gone.
+        assert "accept_audiobook_announces" not in settings
+        # "audiobooks" added to allowed_formats.
+        assert "audiobooks" in settings["allowed_formats"]
+        assert "ebooks" in settings["allowed_formats"]
+
+        # Persisted to disk in the migrated shape (no legacy key).
+        import json
+        saved = json.loads((tmp_path / "settings.json").read_text())
+        assert "accept_audiobook_announces" not in saved
+        assert "audiobooks" in saved["allowed_formats"]
+
+    def test_legacy_on_with_empty_formats_keeps_empty(
+        self, monkeypatch, tmp_path,
+    ):
+        """Empty allowed_formats means 'accept all formats' — already
+        includes audiobooks. Migration should NOT pollute it with an
+        explicit audiobooks entry (which would flip semantics to
+        'only audiobooks')."""
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        import app.config
+        importlib.reload(app.config)
+        self._seed_settings_file(tmp_path, {
+            "accept_audiobook_announces": True,
+            "allowed_formats": [],
+        })
+
+        settings = app.config.load_settings()
+        assert "accept_audiobook_announces" not in settings
+        assert settings["allowed_formats"] == []
+
+    def test_legacy_off_just_drops_the_key(self, monkeypatch, tmp_path):
+        """User had accept_audiobook_announces=False (default ebook-only).
+        Migration should remove the key without adding 'audiobooks' to
+        allowed_formats — preserves ebook-only behavior."""
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        import app.config
+        importlib.reload(app.config)
+        self._seed_settings_file(tmp_path, {
+            "accept_audiobook_announces": False,
+            "allowed_formats": ["ebooks"],
+        })
+
+        settings = app.config.load_settings()
+        assert "accept_audiobook_announces" not in settings
+        assert settings["allowed_formats"] == ["ebooks"]
+        assert "audiobooks" not in settings["allowed_formats"]
+
+    def test_legacy_on_with_audiobooks_already_listed_no_duplicate(
+        self, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        import app.config
+        importlib.reload(app.config)
+        self._seed_settings_file(tmp_path, {
+            "accept_audiobook_announces": True,
+            "allowed_formats": ["ebooks", "audiobooks"],
+        })
+
+        settings = app.config.load_settings()
+        assert "accept_audiobook_announces" not in settings
+        assert settings["allowed_formats"].count("audiobooks") == 1
+
+    def test_no_legacy_key_is_noop(self, monkeypatch, tmp_path):
+        """Already-migrated settings (no legacy key) should round-trip
+        cleanly — no spurious writes, no shape changes."""
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        import app.config
+        importlib.reload(app.config)
+        self._seed_settings_file(tmp_path, {
+            "allowed_formats": ["ebooks", "audiobooks"],
+        })
+
+        settings = app.config.load_settings()
+        assert "accept_audiobook_announces" not in settings
+        assert settings["allowed_formats"] == ["ebooks", "audiobooks"]
+
+    def test_migration_is_idempotent(self, monkeypatch, tmp_path):
+        """Running the helper twice on the same dict must not flip
+        the result. Defends against future code paths that load
+        twice without reloading from disk."""
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        import app.config
+        importlib.reload(app.config)
+
+        settings = {
+            "accept_audiobook_announces": True,
+            "allowed_formats": ["ebooks"],
+        }
+        first = app.config._apply_legacy_settings_migrations(settings)
+        assert first is True
+        snapshot = dict(settings)
+
+        second = app.config._apply_legacy_settings_migrations(settings)
+        assert second is False
+        assert settings == snapshot
+
+
 class TestNoSilentlyMissingSeeds:
     """The discipline test: every ENV_* constant defined as a
     first-run seed at the top of config.py must be referenced in

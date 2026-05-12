@@ -166,21 +166,28 @@ async def _build_filter_config(settings: dict) -> FilterConfig:
     finally:
         await db.close()
 
-    # Start from the user's ebook category list. When audiobook
-    # acceptance is on, merge the separate audiobook category list so
-    # the filter admits audiobook announces without the user having
-    # to edit their existing ebook configuration.
+    # Start from the user's ebook category list. As of v2.9.0,
+    # audiobook acceptance is driven by the Media Type filter
+    # (`allowed_formats`) instead of a separate boolean: when the
+    # filter is empty (= "accept all formats") OR when it contains
+    # "audiobooks", we merge `allowed_audiobook_categories` into the
+    # runtime category set so the filter admits audiobook announces
+    # without the user having to edit their existing ebook
+    # configuration. See `_apply_legacy_settings_migrations` in
+    # app/config.py for the upgrade path from the old toggle.
     category_entries = list(settings.get("allowed_categories", []) or [])
     format_entries = list(settings.get("allowed_formats", []) or [])
-    if settings.get("accept_audiobook_announces", False):
+    audiobook_accepted = (
+        not format_entries  # empty = accept all
+        or any(
+            (extract_format(f) or normalize_category(f)) == "audiobooks"
+            for f in format_entries
+        )
+    )
+    if audiobook_accepted:
         category_entries.extend(
             settings.get("allowed_audiobook_categories", []) or []
         )
-        # Only augment allowed_formats when it's non-empty (an empty
-        # set already means "accept all formats"). If the user has
-        # restricted to specific formats, add "audiobooks" alongside.
-        if format_entries:
-            format_entries.append("audiobooks")
 
     return FilterConfig(
         allowed_categories=frozenset(

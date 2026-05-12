@@ -200,16 +200,13 @@ DEFAULT_SETTINGS = {
     # 600 = 10 minutes. Tunable for slow uploaders who submit the
     # second-format torrent minutes after the first.
     "format_dedup_hold_seconds": 600,
-    # Audiobook acceptance toggle. When True, the filter builder
-    # merges `allowed_audiobook_categories` into `allowed_categories`
-    # (so audiobook announces pass the category gate) and adds
-    # "audiobooks" to `allowed_formats` when `allowed_formats` is
-    # non-empty (preserving explicit format gating). When False, this
-    # is all a no-op — ebook-only deployments stay exactly as they
-    # were. Keep ebook and audiobook configuration separate so the
-    # user can toggle audiobook acceptance without editing their
-    # existing ebook category list.
-    "accept_audiobook_announces": False,
+    # Audiobook acceptance is derived as of v2.9.0 from the Media
+    # Type filter (`allowed_formats`): when empty (= "accept all") or
+    # when it contains "audiobooks", audiobook announces flow through
+    # the filter and `allowed_audiobook_categories` gets merged into
+    # the runtime category set. The legacy `accept_audiobook_announces`
+    # boolean is migrated to "audiobooks" in `allowed_formats` by
+    # `_apply_legacy_settings_migrations` on first v2.9.0 load.
     "allowed_audiobook_categories": [
         "audiobooks action adventure",
         "audiobooks science fiction",
@@ -696,6 +693,47 @@ def apply_logging(verbose: bool = False):
 _settings_cache: dict = {"mtime": object(), "data": None}
 
 
+def _apply_legacy_settings_migrations(settings: dict) -> bool:
+    """Mutate `settings` in place to rewrite legacy shapes.
+
+    Returns True if anything changed (caller persists if so).
+    Idempotent — running on already-migrated settings is a no-op.
+
+    v2.9.0 migration: `accept_audiobook_announces` boolean → membership
+    of "audiobooks" in `allowed_formats`. The legacy flag did two
+    things at runtime:
+      1. Merged `allowed_audiobook_categories` into runtime categories.
+      2. Auto-added "audiobooks" to `allowed_formats` when that list
+         was non-empty.
+    Step (1) is now driven by `audiobooks` being filter-allowed
+    (see `_build_filter_config` in app/main.py). Step (2) is folded
+    into the saved `allowed_formats` directly so the UI shows the
+    user's true acceptance set without runtime mutation.
+
+    Migration rule:
+      * accept_audiobook_announces was True AND allowed_formats was
+        non-empty AND "audiobooks" not in it → add it.
+      * accept_audiobook_announces was True AND allowed_formats was
+        empty → leave allowed_formats empty (empty = accept all,
+        which already accepts audiobooks).
+      * accept_audiobook_announces was False → no change to
+        allowed_formats; the audiobooks chip stays off.
+      * After applying, drop the legacy key.
+    """
+    changed = False
+    if "accept_audiobook_announces" in settings:
+        legacy_on = bool(settings.get("accept_audiobook_announces"))
+        if legacy_on:
+            formats = list(settings.get("allowed_formats") or [])
+            if formats and "audiobooks" not in formats:
+                formats.append("audiobooks")
+                settings["allowed_formats"] = formats
+                changed = True
+        del settings["accept_audiobook_announces"]
+        changed = True
+    return changed
+
+
 def load_settings() -> dict:
     """Load settings.json, merged over DEFAULT_SETTINGS, with mtime cache."""
     try:
@@ -711,6 +749,25 @@ def load_settings() -> dict:
             with open(SETTINGS_PATH) as f:
                 saved = json.load(f)
             merged = {**DEFAULT_SETTINGS, **saved}
+            # Apply legacy-shape migrations BEFORE caching so callers
+            # see only the current shape. If anything changed, persist
+            # so the file on disk matches what the running process holds.
+            if _apply_legacy_settings_migrations(merged):
+                try:
+                    save_settings(merged)
+                    _log.info(
+                        "Applied legacy settings migrations and resaved "
+                        "settings.json"
+                    )
+                except Exception:
+                    _log.exception(
+                        "Failed to persist migrated settings; in-memory "
+                        "copy is correct but disk still has legacy shape"
+                    )
+            try:
+                cur_mtime = SETTINGS_PATH.stat().st_mtime
+            except OSError:
+                pass
             _settings_cache["data"] = merged
             _settings_cache["mtime"] = cur_mtime
             return merged

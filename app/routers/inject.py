@@ -59,9 +59,15 @@ class InjectRequest(BaseModel):
     torrent_name: str = ""
     category: str = ""
     author_blob: str = ""
+    filetype: str = ""
     source: str = "manual_inject"
     use_wedge_override: bool = False
     buy_personal_fl: bool = False
+    # v2.9.0 — bypass the format-priority dedup gate for this one
+    # grab. The manual-inject UI surfaces this as a "Snatch anyway"
+    # checkbox the user can flip if they explicitly want a duplicate
+    # format of an already-in-flight or already-owned book.
+    override_format_dedup: bool = False
 
 
 class InjectResponse(BaseModel):
@@ -267,8 +273,10 @@ async def inject_endpoint(request: InjectRequest) -> InjectResponse:
         torrent_name=request.torrent_name,
         category=request.category,
         author_blob=request.author_blob,
+        filetype=request.filetype,
         raw_line=f"manual_inject:source={request.source}",
         force_fl_wedge=request.use_wedge_override,
+        apply_format_dedup=not request.override_format_dedup,
     )
 
     # ok=True means the grab successfully entered the pipeline
