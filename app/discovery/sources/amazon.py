@@ -98,8 +98,13 @@ _AUTHOR_LINK_RE = re.compile(r"by\s+", re.IGNORECASE)
 
 # Maximum pages of Amazon search results to fetch per author
 _MAX_SEARCH_PAGES = 2
-# Maximum detail page fetches per author scan
-_MAX_DETAIL_FETCHES = 25
+# Maximum detail page fetches per author scan.
+# v2.11.0: reduced from 25 → 10 to fit within the lookup.py 600s
+# timeout at the 30s discovery rate (10 × 35s avg = ~6 min).
+# Amazon's role is "fill in series/format data the other sources
+# miss", not "be the primary source" — 10 details is plenty for
+# the top 5-10 books of an author's catalog.
+_MAX_DETAIL_FETCHES = 10
 
 # Junk marketplace listing detection. Amazon search results include
 # third-party seller listings with garbled titles like:

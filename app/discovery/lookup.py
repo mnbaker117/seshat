@@ -260,7 +260,16 @@ SOURCES: list[SourceSpec] = [
     # headroom over the new typical, matching Hardcover's primary-tier
     # timeout shape.
     SourceSpec("kobo",         "secondary",     180.0, _src_kobo,         True),
-    SourceSpec("amazon",       "secondary",     180.0, _src_amazon,       False),
+    # Amazon: 600s timeout (was 180s through v2.11.0 stage 5+). The
+    # curl_cffi Chrome 120 TLS impersonation defeats Akamai's bot
+    # gate, but the 30s rate-limit (required to stay under Akamai's
+    # density scoring) makes a per-author scan walk slowly: search +
+    # 2-3 page fetches + up to _MAX_DETAIL_FETCHES detail pages at
+    # ~35s each. Realistic worst-case at the v2.11.0 limits is
+    # 10 details × 35s + overhead = ~6.5 minutes. 600s leaves ~30%
+    # headroom. Paired with _MAX_DETAIL_FETCHES=10 in amazon.py so
+    # the budget caps work, not just elapsed time.
+    SourceSpec("amazon",       "secondary",     600.0, _src_amazon,       False),
     SourceSpec("ibdb",         "supplementary",  90.0, _src_ibdb,         False),
     SourceSpec("google_books", "supplementary",  60.0, _src_google_books, False),
     SourceSpec("openlibrary",  "supplementary", 120.0, _src_openlibrary,  False),
