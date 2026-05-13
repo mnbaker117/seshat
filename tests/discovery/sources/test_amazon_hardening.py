@@ -250,15 +250,68 @@ class TestFetchHardening:
         # subsequent sleeps (if any) are the 8s backoff which we
         # don't expect to fire on a 200. So all 5 recorded sleeps
         # are jittered rate-limits.
+        # v2.11.0: jitter widened from fixed `uniform(0, 0.5)` to
+        # proportional `uniform(0, rate*0.5)`. At rate=2.0 the range
+        # is [2.0, 3.0]. At rate=30.0 (the new default) it would be
+        # [30.0, 45.0]. Floor of 0.5s for the jitter max so tiny
+        # rates still get some variance.
         rate_sleeps = [d for d in durations if d < 8.0]
         assert len(rate_sleeps) == 5
-        # All should be in [2.0, 2.5]
+        # All should be in [2.0, 3.0] (proportional jitter at rate=2)
         for s in rate_sleeps:
-            assert 2.0 <= s <= 2.5, f"sleep {s} outside jitter range"
+            assert 2.0 <= s <= 3.0, f"sleep {s} outside jitter range"
         # And NOT all identical — proves jitter is applied
         assert len(set(rate_sleeps)) > 1, (
             "rate-limit sleeps are perfectly periodic — jitter not applied"
         )
+        await src.close()
+
+    async def test_jitter_scales_with_rate_limit(self, monkeypatch):
+        """v2.11.0 — jitter is proportional to rate (max = rate * 0.5).
+
+        At rate=30 (the new Amazon discovery default) the effective
+        spacing varies 30-45s; at rate=2 (legacy) it's 2-3s. Proves the
+        jitter scales correctly with the user-configured rate, so the
+        cadence doesn't pattern-match `rate.0s` exactly regardless
+        of how slow or fast the user sets it.
+        """
+        durations = _patch_sleep(monkeypatch)
+        src = AmazonSource(rate_limit=30.0)
+        _patch_get(src, [
+            httpx.Response(200, content=b"<html><body>ok</body></html>"),
+        ] * 4)
+
+        for _ in range(4):
+            await src._fetch("https://www.amazon.com/s")
+
+        rate_sleeps = [d for d in durations if d < 60.0]
+        assert len(rate_sleeps) == 4
+        # All in [30.0, 45.0] = rate + uniform(0, rate*0.5)
+        for s in rate_sleeps:
+            assert 30.0 <= s <= 45.0, f"sleep {s} outside [30, 45] jitter range"
+        # And not all identical
+        assert len(set(rate_sleeps)) > 1
+        await src.close()
+
+    async def test_jitter_floor_for_tiny_rate(self, monkeypatch):
+        """Tiny rate (or 0) still gets some jitter, not zero. Floor
+        of 0.5s on the jitter max prevents perfectly periodic
+        cadence at low rates."""
+        durations = _patch_sleep(monkeypatch)
+        src = AmazonSource(rate_limit=0)
+        _patch_get(src, [
+            httpx.Response(200, content=b"<html><body>ok</body></html>"),
+        ] * 4)
+
+        for _ in range(4):
+            await src._fetch("https://www.amazon.com/s")
+
+        rate_sleeps = [d for d in durations if d < 8.0]
+        assert len(rate_sleeps) == 4
+        # All in [0.0, 0.5] — jitter floor preserves variance
+        for s in rate_sleeps:
+            assert 0.0 <= s <= 0.5
+        assert len(set(rate_sleeps)) > 1
         await src.close()
 
     async def test_thin_200_body_logs_warning(self, monkeypatch, caplog):

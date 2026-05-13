@@ -71,7 +71,17 @@ _log = logging.getLogger("seshat.metadata.source_config")
 KNOWN_SOURCES: dict[str, dict[str, Any]] = {
     "mam":         {"display": "MyAnonamouse",  "available_for": ("ebook", "audiobook"), "default_rate": 2.0, "mam_only": True},
     "goodreads":   {"display": "Goodreads",     "available_for": ("ebook", "audiobook"), "default_rate": 2.0},
-    "amazon":      {"display": "Amazon",        "available_for": ("ebook",),             "default_rate": 2.0},
+    # Amazon: 30s default rate (was 2.0 through v2.10.x). v2.11.0
+    # confirmed via single-shot probe that Amazon's bot detection
+    # is density-based, not fingerprint-based: a one-off query
+    # succeeds with our existing UA, but sustained 0.5-1 req/s
+    # trips the counter within ~6-10 requests. 30s/req keeps us
+    # well under the threshold for sustained discovery; for
+    # enricher use the rate doesn't matter (per-book lookups are
+    # naturally minutes apart from snatching cadence). User can
+    # tighten the rate via Settings but Amazon discovery is off
+    # by default anyway.
+    "amazon":      {"display": "Amazon",        "available_for": ("ebook",),             "default_rate": 30.0},
     "hardcover":   {"display": "Hardcover",     "available_for": ("ebook", "audiobook"), "default_rate": 1.0},
     "kobo":        {"display": "Kobo",          "available_for": ("ebook",),             "default_rate": 3.0},
     "ibdb":        {"display": "IBDB",          "available_for": ("ebook",),             "default_rate": 1.0},
@@ -97,7 +107,14 @@ KNOWN_SOURCES: dict[str, dict[str, Any]] = {
 _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, bool]] = {
     "mam":         {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": False},
     "goodreads":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
-    "amazon":      {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
+    # Amazon — v2.11.0 strategy: enricher-only by default.
+    # Bulk discovery scans (sustained sequential queries) trip
+    # Amazon's bot-detection counter ~6-10 requests in. Per-book
+    # enricher lookups are naturally low-density (one per snatched
+    # book, minutes apart) and slip through fine.
+    # User can opt back into discovery via Settings; UI should
+    # warn + recommend rate ≥ 30s (see AmazonSource jitter logic).
+    "amazon":      {"ebook_enrich": True,  "ebook_scan": False, "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
     "hardcover":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
     "kobo":        {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
     "ibdb":        {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
@@ -105,24 +122,44 @@ _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, bool]] = {
     # and carries no audiobook-specific fields (narrator, duration,
     # ASIN). Keeps firing for ebook grabs where it's useful.
     "google_books": {"ebook_enrich": True, "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
-    # Open Library — free, no key. Coverage strongest for older /
-    # well-cataloged books, sparse for indie/self-pub. Useful as a
-    # secondary metadata source; not promoted to mandatory tier.
+    # Open Library — free, no key. v2.11.0: promoted to primary-tier
+    # coverage role after harness showed 93% hit rate (vs 43%
+    # Hardcover-mainstream-only). Cross-script aggregation + variant
+    # query make it the best generalist for indie + translated work.
     "openlibrary": {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": False},
     "audible":     {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
 }
 
 
 # Default priority order used on fresh installs. MAM always first —
-# it's free and authoritative. The rest follows a "most-coverage-
-# first, specialized-last" ordering per content type.
+# it's free and authoritative.
+#
+# v2.11.0 reshuffle — backed by the post-resolver-fix validation
+# harness on 2026-05-13 (`docs/validation/sources-20260513-112040.md`):
+#   - Hardcover #2 (was #4) — 14/14 = 100% hit rate with harness
+#     throttle-hardening, fast (~2s/author), best ratings/social
+#     signal. Yesterday's "Hardcover blind to indie" verdict was
+#     pure harness artifact; HC actually has Robyn Bee + Hasekura
+#     + every other benchmark author.
+#   - OpenLibrary #3 (was #8) — 13/14 = 93% hit rate, free, the
+#     only source that recovered Hasekura's full 94-book biblio
+#     via cross-script aggregation. Strongest indie + translated
+#     coverage.
+#   - Goodreads stays at #4 (was #2) — depth gain not coverage
+#     critical once we have HC+OL+GB+Kobo covering 13/14 without
+#     it. When Phase 5.5 cookies land it adds depth, but the new
+#     priority order doesn't assume it's available.
+#   - Amazon dropped from discovery list — enricher only (see
+#     _DEFAULT_NEW_INSTALL_STATE.amazon.ebook_scan=False).
+#   - IBDB last — niche, downstream-filtered to ~1 book per author
+#     in real production scans.
 _DEFAULT_EBOOK_PRIORITY: list[str] = [
-    "mam", "goodreads", "amazon", "hardcover", "kobo", "ibdb",
-    "google_books", "openlibrary", "audible",
+    "mam", "hardcover", "openlibrary", "goodreads",
+    "google_books", "kobo", "amazon", "ibdb", "audible",
 ]
 _DEFAULT_AUDIOBOOK_PRIORITY: list[str] = [
-    "mam", "audible", "goodreads", "hardcover",
-    "google_books", "amazon", "kobo", "openlibrary", "ibdb",
+    "mam", "audible", "hardcover", "openlibrary",
+    "goodreads", "google_books", "amazon", "kobo", "ibdb",
 ]
 
 

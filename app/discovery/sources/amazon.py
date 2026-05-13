@@ -136,16 +136,23 @@ class AmazonSource(BaseSource):
     }
     default_timeout = 15.0
 
-    def __init__(self, rate_limit: float = 2.0):
+    def __init__(self, rate_limit: float = 30.0):
+        # v2.11.0: default rate raised from 2.0 → 30.0 to match the
+        # bot-detection-density findings. Per-book enricher use is
+        # naturally spaced (not affected by this); bulk discovery
+        # use needs the slow rate to stay under the gate.
         super().__init__(rate_limit=rate_limit)
 
     async def _fetch(self, url: str, params: dict = None) -> Optional[str]:
         """HTTP GET with jittered rate limiting + selective retry.
 
         v2.10.6 Amazon hardening:
-          - **Jitter** added to rate-limit (`+ uniform(0, 0.5)`) so
-            request cadence isn't perfectly periodic — periodicity is
-            an obvious bot fingerprint.
+          - **Jitter** added to rate-limit so request cadence isn't
+            perfectly periodic — periodicity is an obvious bot
+            fingerprint. v2.11.0 widened the jitter from a fixed
+            `uniform(0, 0.5)` to proportional `uniform(0, rate*0.5)`
+            so at the new 30s discovery rate the effective spacing
+            varies 30-45s instead of pattern-matching 30.0s exactly.
           - **CAPTCHA detection** on 200 responses. Amazon serves
             `/errors/validateCaptcha` interstitials with HTTP 200, so
             a naive status-only check accepts them as real pages.
@@ -159,10 +166,19 @@ class AmazonSource(BaseSource):
           - **Genuine 5xx retry** with one backoff (8s). Network /
             upstream-transient failures retry once; harder failures
             degrade to None.
+
+        v2.11.0 probe (2026-05-13) confirmed Amazon's gate is
+        density-based, NOT fingerprint-based: an isolated request
+        with our existing Firefox UA succeeds identically to a full
+        Chrome-fingerprint request. The mitigation is therefore
+        slow the request rate, not improve the headers.
         """
-        # Jittered sleep — periodicity is fingerprint-y. ±25% of base
-        # rate gives meaningful variance without slowing the scan.
-        await asyncio.sleep(self.rate_limit + random.uniform(0, 0.5))
+        # Proportional jitter — up to half the base rate. At rate=30s
+        # this gives 30-45s effective spacing; at rate=2s (legacy)
+        # this gives 2-3s. Keeps the cadence non-periodic while
+        # scaling sensibly with the user-configured rate.
+        jitter_max = max(self.rate_limit * 0.5, 0.5)
+        await asyncio.sleep(self.rate_limit + random.uniform(0, jitter_max))
 
         # First attempt
         try:
