@@ -526,6 +526,7 @@ function DesktopSettingsPage() {
   const mamCreds = creds.filter(c => ["mam_session_id", "mam_irc_password"].includes(c.key));
   const qbitCreds = creds.filter(c => c.key === "qbit_password");
   const apiCreds = creds.filter(c => c.key === "hardcover_api_key");
+  const googleBooksCreds = creds.filter(c => c.key === "google_books_api_key");
   const absCreds = creds.filter(c => c.key === "abs_api_key");
   const cwaCreds = creds.filter(c => c.key === "cwa_password");
 
@@ -866,6 +867,7 @@ function DesktopSettingsPage() {
               Was misplaced under Sinks & Delivery where only sink-
               specific config belongs. */}
           {apiCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Bearer token from hardcover.app → Account → API." />)}
+          {googleBooksCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Google Cloud API key with Books API enabled. Restrict to your server's egress IP for safety. The keyed endpoint has a much higher daily quota (~1000 free queries/day) than the no-key path." />)}
           <MetadataSourcesPanel />
         </>}
 

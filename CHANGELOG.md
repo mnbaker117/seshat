@@ -7,6 +7,64 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.7] — 2026-05-13
+
+Phase 3 of the v2.11.0 metadata-source overhaul: wires the Google
+Books API key end-to-end. Pre-v2.10.7 the source hit Google's
+no-key public endpoint which kept tripping its 429 circuit-breaker
+(the anonymous quota is shared across every client on the same IP
+and exhausts fast under modest scan load).
+
+### Added — Google Books API key plumbing
+
+- **`app/discovery/sources/google_books.py:GoogleBooksSource`**
+  takes a new optional `api_key` constructor arg and exposes
+  `update_api_key()` (mirrors the v2.10.5 HardcoverSource pattern).
+  New `_request_params()` helper merges the key into every request
+  params dict so the existing two query sites (`search_author` +
+  `get_author_books`) both pick it up without further wiring.
+- **`app/secrets.py:SECRET_KEYS`** — adds `google_books_api_key` so
+  `_resolve_secrets` picks it up at startup like any other encrypted
+  credential.
+- **`app/discovery/lookup.py`** — `reload_sources` reads the key from
+  settings and passes it to the GoogleBooksSource constructor; the
+  per-author scan also runs a pre-flight `update_api_key()` injection
+  with the freshest secrets-store value (same pattern as Hardcover)
+  so a key rotation in the Settings UI takes effect on the next scan
+  without restarting the process.
+- **`frontend/src/pages/SettingsPage.tsx`** — new `CredField` for
+  `google_books_api_key` rendered alongside the existing Hardcover
+  key in Settings → Sources, with help text covering the IP
+  restriction + quota tradeoff.
+
+### Setup (operator)
+
+Runbook at `/home/mbaker/Documents/Projects/files/google-books-api-setup.md`
+(referenced by the v2.11.0 plan memory) covers the Google Cloud
+Console steps end-to-end: project creation → Books API enable →
+credentials → key creation → IP-restrict to server egress + scope
+to Books API only → paste into Settings.
+
+### Tests
+
+- `tests/discovery/sources/test_google_books_api_key.py` (new, 9
+  cases) — `_request_params` key injection (no-key, key-set,
+  whitespace, empty-string, no-mutation), `update_api_key` lifecycle
+  (changes subsequent params, can disable, strips whitespace,
+  None-safe).
+
+Suite: **2261 passing, 7 skipped** (+9 from v2.10.6's 2252).
+
+### Live verification
+
+Direct API test from the production container with the new key
+returned `200 OK` with full payload. The same call without the key
+returned `429 Quota exceeded` — confirming the keyed endpoint has
+its own (much larger) quota allocation distinct from the throttled
+anonymous bucket.
+
+---
+
 ## [2.10.6] — 2026-05-13
 
 Three discovery-source improvements bundled together: Open Library

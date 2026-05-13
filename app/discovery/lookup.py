@@ -193,7 +193,10 @@ def reload_sources():
     kobo = KoboSource(rate_limit=get_source_rate_limit(s, "kobo"))
     amazon = AmazonSource(rate_limit=get_source_rate_limit(s, "amazon"))
     ibdb = IbdbSource(rate_limit=get_source_rate_limit(s, "ibdb"))
-    google_books = GoogleBooksSource(rate_limit=get_source_rate_limit(s, "google_books"))
+    google_books = GoogleBooksSource(
+        rate_limit=get_source_rate_limit(s, "google_books"),
+        api_key=s.get("google_books_api_key", ""),
+    )
     openlibrary = OpenLibrarySource(rate_limit=get_source_rate_limit(s, "openlibrary"))
     audible = AudibleDiscoverySource(
         region=s.get("audible_region", "us"),
@@ -2901,13 +2904,17 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     # (Goodreads today) so a slow primary source gets a second shot
     # with whatever scan budget is left over.
     per_author_timed_out: list = []
-    # Read Hardcover API key once; the source needs it injected before its
-    # _try_source runs. Same encrypted-store-then-legacy fallback as before.
+    # Read Hardcover + Google Books API keys once; both sources get
+    # them injected via the per-source pre-flight below. Encrypted
+    # store first, then fall back to settings (for env-var
+    # populated installs and pre-secrets-store deployments).
     try:
         from app.secrets import get_secret as _get_secret
         _hc_key = await _get_secret("hardcover_api_key") or settings.get("hardcover_api_key")
+        _gb_key = await _get_secret("google_books_api_key") or settings.get("google_books_api_key")
     except Exception:
         _hc_key = settings.get("hardcover_api_key")
+        _gb_key = settings.get("google_books_api_key")
 
     # Pick ebook vs audiobook source list based on the active library.
     # Content type is stamped on each discovered library at startup.
@@ -2957,11 +2964,13 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         # audiobook editions, not print/ebook). Harmless on sources that
         # don't check it.
         source._content_type = ct
-        # Per-source pre-flight (Hardcover is the only one that needs it).
+        # Per-source pre-flight injections.
         if spec.name == "hardcover":
             source.update_api_key(_hc_key)
             source._owned_titles = our_titles
             source._owned_series_names = our_series_names
+        elif spec.name == "google_books":
+            source.update_api_key(_gb_key)
 
         # Cap the source at its per-source timeout *or* the remaining
         # budget, whichever is smaller. Prevents a slow source near the

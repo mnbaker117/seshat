@@ -43,7 +43,7 @@ class GoogleBooksSource(BaseSource):
     }
     default_timeout = 15.0
 
-    def __init__(self, rate_limit: float = 1.5):
+    def __init__(self, rate_limit: float = 1.5, api_key: str = ""):
         super().__init__(rate_limit=rate_limit)
         # Consecutive 429 counter for the circuit breaker. Instance-level
         # so `reload_sources()` (fired on every settings save) resets it
@@ -52,6 +52,31 @@ class GoogleBooksSource(BaseSource):
         # the first request because the counter would still be past the
         # threshold.
         self._consecutive_429s = 0
+        # v2.10.7 — Google Books API key. The keyed endpoint has a
+        # much more generous quota than the no-key public endpoint
+        # (which keeps hitting 429 on modest scans). When set, every
+        # request gets `?key=…` appended via _request_params(). Empty
+        # string preserves the legacy no-key behavior so the source
+        # still works on installs without a configured key.
+        self.api_key = (api_key or "").strip()
+
+    def _request_params(self, base: dict) -> dict:
+        """Merge the API key into a request params dict if configured.
+        Returns a new dict so the caller's `base` isn't mutated."""
+        out = dict(base)
+        if self.api_key:
+            out["key"] = self.api_key
+        return out
+
+    def update_api_key(self, key: str) -> None:
+        """Force the api_key to update (mirrors HardcoverSource).
+
+        lookup.py injects the freshest key from the encrypted secrets
+        store as a per-source pre-flight on every scan, so a key
+        rotation in the Settings UI takes effect on the next scan
+        without restarting the process.
+        """
+        self.api_key = (key or "").strip()
 
     async def _get(self, url: str, retries: int = 0, **kwargs):
         """Override base _get with no retries for Google Books.
@@ -120,7 +145,11 @@ class GoogleBooksSource(BaseSource):
         try:
             resp = await self._get(
                 _API,
-                params={"q": f"inauthor:{author_name}", "maxResults": "5", "printType": "books"},
+                params=self._request_params({
+                    "q": f"inauthor:{author_name}",
+                    "maxResults": "5",
+                    "printType": "books",
+                }),
             )
             data = resp.json()
         except Exception:
@@ -152,11 +181,11 @@ class GoogleBooksSource(BaseSource):
         try:
             resp = await self._get(
                 _API,
-                params={
+                params=self._request_params({
                     "q": f"inauthor:{author_name}",
                     "maxResults": "40",
                     "printType": "books",
-                },
+                }),
             )
             data = resp.json()
             all_items.extend(data.get("items", []))
