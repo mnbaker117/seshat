@@ -10,6 +10,7 @@ description backfill. Match quality is poor for niche/indie titles
 and there's no native series field — we parse series from the title
 parenthetical pattern when possible.
 """
+import asyncio
 import logging
 import re
 import time
@@ -17,7 +18,7 @@ from typing import Optional
 
 import httpx
 
-from app.discovery.sources.base import BaseSource, AuthorResult, SeriesResult, BookResult
+from app.discovery.sources.base import BaseSource, AuthorResult, SeriesResult, BookResult, _redact_sensitive
 from app.metadata.scoring import score_match
 
 logger = logging.getLogger("seshat.discovery.google_books")
@@ -79,11 +80,20 @@ class GoogleBooksSource(BaseSource):
         self.api_key = (key or "").strip()
 
     async def _get(self, url: str, retries: int = 0, **kwargs):
-        """Override base _get with no retries for Google Books.
+        """Override base _get with split retry behavior for Google Books.
 
-        Google's free API has a daily quota (~1000 req). Retrying on 429
-        just burns the quota faster — better to fail fast and let the
-        enricher fall through to the next source.
+        - **429 (quota exhausted)**: fail fast, don't retry. Retrying on
+          429 just burns the quota faster — better to surface the failure
+          immediately and let the enricher fall through to the next source.
+          Counts toward the circuit breaker.
+        - **5xx (transient server error)**: retry up to 2 times with
+          exponential backoff (3s, 6s). Validation runs caught real
+          transients getting through as terminal failures because the
+          previous "retries=0 for everything" policy didn't distinguish
+          server-side hiccups from quota exhaustion.
+        - **Other / network errors**: same retry-on-503 path; httpx
+          surfaces connect errors as exceptions without an HTTP code,
+          which generally indicates a transient issue worth retrying.
 
         Also implements the auto-disable circuit breaker: tracks
         consecutive 429 responses and flips `google_books_enabled` to
@@ -92,19 +102,42 @@ class GoogleBooksSource(BaseSource):
         skips Google Books entirely instead of burning 60s on a
         guaranteed-to-fail request.
         """
-        try:
-            resp = await super()._get(url, retries=0, **kwargs)
-        except httpx.HTTPStatusError as e:
-            if e.response is not None and e.response.status_code == 429:
-                self._consecutive_429s += 1
-                if self._consecutive_429s >= _CIRCUIT_BREAKER_THRESHOLD:
-                    self._trip_circuit_breaker()
-            raise
-        # Any non-429 success resets the counter. A transient 429 that
-        # resolves on the next request (quota-window boundary) stays well
-        # under the threshold and doesn't trip.
-        self._consecutive_429s = 0
-        return resp
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                resp = await super()._get(url, retries=0, **kwargs)
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code if e.response is not None else 0
+                if status == 429:
+                    # Quota exhausted — never retry, count toward circuit breaker
+                    self._consecutive_429s += 1
+                    if self._consecutive_429s >= _CIRCUIT_BREAKER_THRESHOLD:
+                        self._trip_circuit_breaker()
+                    raise
+                if status >= 500 and attempt < max_attempts - 1:
+                    backoff = 3 * (2 ** attempt)  # 3s, 6s
+                    logger.debug(
+                        f"  google_books: {status} on attempt {attempt+1}/{max_attempts} "
+                        f"for {url} — retrying in {backoff}s ({_redact_sensitive(e)})"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
+            except Exception as e:
+                # Network / timeout / other transient — retry the same as 5xx
+                if attempt < max_attempts - 1:
+                    backoff = 3 * (2 ** attempt)
+                    logger.debug(
+                        f"  google_books: network error on attempt "
+                        f"{attempt+1}/{max_attempts} for {url} — retrying in "
+                        f"{backoff}s ({_redact_sensitive(e)})"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
+            # Success path: any 2xx clears the 429 counter
+            self._consecutive_429s = 0
+            return resp
 
     def _trip_circuit_breaker(self) -> None:
         """Auto-disable Google Books in settings after repeated 429s.

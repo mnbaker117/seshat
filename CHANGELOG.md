@@ -7,6 +7,81 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.10] — 2026-05-13
+
+Security + reliability hygiene patch as the deck-clearing first step
+toward v2.11.0's metadata-overhaul work. No semantic behavior change
+to discovery priorities or source selection — three independent fixes
+informed by the post-v2.10.9 validation harness run.
+
+### Security — Google Books API key was leaking into operator logs
+
+`httpx.HTTPStatusError`'s string representation includes the full
+request URL with query params, so when the base-class WARN log in
+`app/discovery/sources/base.py` formatted the exception, the key
+appeared verbatim in container logs:
+
+```
+google_books: GIVING UP on https://www.googleapis.com/books/v1/volumes after 1 attempts:
+Server error '503 Service Unavailable' for url
+'https://www.googleapis.com/books/v1/volumes?q=...&key=AIzaSy0N0Um...'
+```
+
+Added a `_redact_sensitive(s)` helper that strips known-sensitive
+query params (`key`, `apikey`, `api_key`, `token`, `password`,
+`secret`) from any string, applied at every log site inside
+`base._get`. The leak is closed for Google Books today and for any
+future keyed source the same way.
+
+### Reliability — Google Books 503 transients now retry
+
+Pre-v2.10.10 `GoogleBooksSource._get` passed `retries=0` to its
+parent unconditionally — meaning *every* failure surfaced as
+terminal, including 503 Service Unavailable transients. The
+2026-05-12 validation harness caught 3 such transients in a single
+14-author run (Logan Jacobs, K.D. Robertson, Asato Asato all FAILed
+on Google Books from a 503 with no second attempt).
+
+Split the failure policy by HTTP code:
+
+- **429 (quota exhausted)** — still fails fast and counts toward
+  the circuit breaker. Retrying a 429 just burns the daily quota.
+- **5xx (transient server error)** — retries up to 2 times with
+  exponential backoff (3s, 6s). Matches the Hardcover / Open
+  Library / Goodreads behavior.
+- **Network errors (ConnectError, etc.)** — same retry-on-503 path.
+
+### Preventive — `audible_id` columns added to authors / series / books
+
+Same defensive migration shape that v2.10.9 added for
+`openlibrary_id`. Currently `AudibleSource` doesn't set
+`external_id` on individual `BookResult`s, but if/when that
+changes the dynamic `f"{source_name}_id"` merge path in
+`lookup.py` would crash on a missing column — the exact gotcha
+that bit Open Library before v2.10.9. Adding the columns now is
+zero behavior change today and immunizes the future rollout.
+
+Columns added to:
+- SCHEMA (authors, series, books)
+- MIGRATIONS list (3 ALTER TABLE statements)
+- `_ensure_columns` safety-net (3 entries — full coverage)
+
+### Tests
+
+`tests/discovery/sources/test_google_books_api_key.py` gains 13
+new tests across two new classes:
+- `TestRedactSensitive` (6 tests) — verifies the redaction helper
+  catches `key=` / `token=` / `api_key=` / case variants /
+  multi-param URLs, leaves non-sensitive params alone, and handles
+  the actual exception-message-as-input shape.
+- `TestRetryOn503NotOn429` (5 tests) — 429 fails fast, 503 retries
+  to success, 503 exhausts retries cleanly, counter resets on
+  success, network errors retry.
+
+Suite: **2283 passing, 7 skipped** (up from 2272).
+
+---
+
 ## [2.10.9] — 2026-05-13
 
 Hotfix for the bug v2.10.8 surfaced — Open Library was running for

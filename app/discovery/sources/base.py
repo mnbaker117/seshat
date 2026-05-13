@@ -18,7 +18,23 @@ from dataclasses import dataclass, field
 from typing import Optional
 import asyncio
 import logging
+import re
 import httpx
+
+
+_SENSITIVE_QUERY_PARAMS = ("key", "apikey", "api_key", "token", "password", "secret")
+_REDACT_RX = re.compile(
+    r"([?&](?:" + "|".join(_SENSITIVE_QUERY_PARAMS) + r"))=[^&\s'\"]*",
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive(s: object) -> str:
+    """Strip sensitive query-string params (api keys, tokens) before
+    they hit logs. httpx exception messages include the full request
+    URL with params, which leaks Google Books / future-keyed-source
+    secrets into operator-visible logs."""
+    return _REDACT_RX.sub(r"\1=REDACTED", str(s))
 
 
 # ─── Result Types ────────────────────────────────────────────
@@ -152,15 +168,16 @@ class BaseSource:
                 if attempt < retries:
                     backoff = min(3 * (2 ** attempt), 12)  # 3, 6, 12, 12, ...
                     self.logger.debug(
-                        f"  {self.name}: attempt {attempt+1}/{retries+1} failed for {url}: {e} "
-                        f"— retrying in {backoff}s"
+                        f"  {self.name}: attempt {attempt+1}/{retries+1} failed "
+                        f"for {url}: {_redact_sensitive(e)} — retrying in {backoff}s"
                     )
                     await asyncio.sleep(backoff)
                     continue
                 # Surface terminal failure as a WARNING instead of letting
                 # it disappear silently. Caller still gets the exception.
                 self.logger.warning(
-                    f"  {self.name}: GIVING UP on {url} after {retries+1} attempts: {e}"
+                    f"  {self.name}: GIVING UP on {url} after {retries+1} "
+                    f"attempts: {_redact_sensitive(e)}"
                 )
                 raise
 

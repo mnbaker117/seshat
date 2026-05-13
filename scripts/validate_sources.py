@@ -46,6 +46,9 @@ from app.discovery.sources.amazon import AmazonSource  # noqa: E402
 from app.discovery.sources.goodreads import GoodreadsSource  # noqa: E402
 from app.discovery.sources.google_books import GoogleBooksSource  # noqa: E402
 from app.discovery.sources.hardcover import HardcoverSource  # noqa: E402
+from app.discovery.sources.ibdb import IbdbSource  # noqa: E402
+from app.discovery.sources.kobo import KoboSource  # noqa: E402
+from app.discovery.sources.openlibrary import OpenLibrarySource  # noqa: E402
 
 
 AUTHORS: list[str] = [
@@ -133,13 +136,12 @@ async def main(hardcover_api_key: str, google_books_api_key: str) -> int:
     sources = [
         GoodreadsSource(rate_limit=2.0),
         HardcoverSource(api_key=hardcover_api_key),
+        OpenLibrarySource(rate_limit=1.5),
+        KoboSource(rate_limit=1.5),
         AmazonSource(rate_limit=1.5),
+        IbdbSource(rate_limit=1.5),
+        GoogleBooksSource(rate_limit=1.5, api_key=google_books_api_key or None),
     ]
-    if google_books_api_key is not None:
-        # GoogleBooksSource doesn't take an api_key arg today — it
-        # uses the no-key public endpoint. The setting is reserved
-        # for v2.11.0 when the API-key plumbing lands.
-        sources.append(GoogleBooksSource(rate_limit=1.5))
 
     print(f"validating {len(AUTHORS)} authors against {len(sources)} sources...")
     print()
@@ -237,6 +239,12 @@ async def _load_keys_from_secrets(args) -> tuple[str, str]:
         try:
             from app.secrets import get_secret
             hk = (await get_secret("hardcover_api_key")) or ""
+        except Exception:
+            pass
+    if not gk:
+        try:
+            from app.secrets import get_secret
+            gk = (await get_secret("google_books_api_key")) or ""
         except Exception:
             pass
     return hk, gk

@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS authors (
     ibdb_id TEXT,
     google_books_id TEXT,
     openlibrary_id TEXT,
+    audible_id TEXT,
     image_url TEXT,
     bio TEXT,
     verified INTEGER NOT NULL DEFAULT 0,
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS series (
     kobo_id TEXT,
     fictiondb_id TEXT,
     openlibrary_id TEXT,
+    audible_id TEXT,
     total_books INTEGER,
     description TEXT,
     last_lookup_at REAL,
@@ -102,6 +104,7 @@ CREATE TABLE IF NOT EXISTS books (
     fictiondb_id TEXT,
     kobo_id TEXT,
     openlibrary_id TEXT,
+    audible_id TEXT,
     cover_url TEXT,
     cover_path TEXT,
     pub_date TEXT,
@@ -386,6 +389,14 @@ MIGRATIONS = [
     "ALTER TABLE authors ADD COLUMN amazon_id TEXT",
     "ALTER TABLE series ADD COLUMN amazon_id TEXT",
     "ALTER TABLE books ADD COLUMN amazon_id TEXT",
+    # Audible source — preventive columns matching the openlibrary_id /
+    # amazon_id pattern. Added so if/when Audible discovery starts
+    # setting external_id on BookResults, the dynamic f"{source}_id"
+    # merge path in lookup.py doesn't crash on a missing column
+    # (the same gotcha that bit openlibrary in v2.10.9).
+    "ALTER TABLE authors ADD COLUMN audible_id TEXT",
+    "ALTER TABLE series ADD COLUMN audible_id TEXT",
+    "ALTER TABLE books ADD COLUMN audible_id TEXT",
     # Omnibus flag — marks compilations/box-sets that should display
     # separately from numbered series entries (don't shift numbering).
     "ALTER TABLE books ADD COLUMN is_omnibus INTEGER NOT NULL DEFAULT 0",
@@ -1410,6 +1421,9 @@ async def init_db(slug=None):
             ("books", "ibdb_id", "TEXT"),
             ("books", "google_books_id", "TEXT"),
             ("books", "amazon_id", "TEXT"),
+            ("books", "audible_id", "TEXT"),
+            ("authors", "audible_id", "TEXT"),
+            ("series", "audible_id", "TEXT"),
             ("books", "is_omnibus", "INTEGER NOT NULL DEFAULT 0"),
             ("pen_name_links", "link_type", "TEXT NOT NULL DEFAULT 'pen_name'"),
             ("authors", "ibdb_id", "TEXT"),
