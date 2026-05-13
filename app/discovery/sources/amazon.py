@@ -9,17 +9,21 @@ Two-pass flow per author:
   1. Search: amazon.com/s for books by the author name
   2. Detail: amazon.com/dp/{ASIN} for series info, metadata
 
-Author-centric (get_author_books), using httpx.AsyncClient, with results
-grouped into SeriesResult/BookResult for the merge pipeline and
-existing_titles/owned_titles optimization via _on_book/_on_new_candidate
-progress hooks.
+Author-centric (get_author_books), grouped into SeriesResult/BookResult
+for the merge pipeline. Existing_titles/owned_titles optimization via
+_on_book/_on_new_candidate progress hooks.
 
-Key anti-bot measures:
-  - Plain httpx with realistic Firefox headers (no cloudscraper)
-  - Accept-Encoding: gzip, deflate, br, zstd (critical)
+Key anti-bot measures (v2.11.0):
+  - **curl_cffi with Chrome 120 TLS impersonation** (was httpx through
+    v2.11.0 stage 5; switched after the 2026-05-13 wire-level UAT
+    proved Amazon's IPv4 path is fronted by Akamai Bot Manager,
+    which scores Python's standard TLS fingerprint as bot).
+  - Realistic Chrome headers (provided by curl_cffi's impersonate)
+  - Accept-Encoding: gzip, deflate, br, zstd (handled by curl_cffi)
   - Explicit search params (unfiltered, stripbooks, digital-text)
-  - Conservative rate limiting (2.0s default)
-  - No retries (Amazon blocks aggressive retry patterns)
+  - Conservative rate limiting (30.0s default for bulk discovery;
+    per-book enricher use is naturally low-density and unaffected)
+  - One backoff retry on genuine 5xx; no retry on CAPTCHA / Robot-Check
   - Graceful degradation to None on any failure
 """
 import asyncio
@@ -32,6 +36,43 @@ from typing import Optional
 from app.discovery.sources.base import BaseSource, AuthorResult, SeriesResult, BookResult
 
 logger = logging.getLogger("seshat.discovery.amazon")
+
+
+# curl_cffi import is lazy + soft-guarded so a dev install without the
+# binary wheel still imports the module (calls will hard-fail with a
+# clear message). Production requirements.txt pins curl_cffi>=0.7.0.
+def _create_impersonating_session():
+    """Build a curl_cffi AsyncSession with Chrome 120 TLS impersonation.
+
+    Akamai Bot Manager (Amazon's IPv4 path edge) scores requests
+    against the JA3 hash of the TLS handshake. Python's standard
+    `httpx` / `requests` TLS fingerprint is on every bot-detection
+    blocklist. curl_cffi drives `libcurl-impersonate`, which exactly
+    replicates Chrome's cipher suite order, BoringSSL extension list,
+    ALPN preferences, and HTTP/2 frame patterns — making the request
+    indistinguishable from Chrome at the protocol layer.
+
+    Validated 2026-05-13: a curl_cffi request from the same long-
+    lived web worker process that just got soft-blocked with httpx
+    returned 200 + 1.14 MB body. Same IP, same headers, same time
+    window — only the TLS fingerprint differed.
+
+    Returns None if curl_cffi isn't installed (degrades gracefully to
+    the legacy httpx path via the source's `_fetch` fallback).
+    """
+    try:
+        from curl_cffi.requests import AsyncSession
+        return AsyncSession(
+            impersonate="chrome120",
+            timeout=15.0,
+        )
+    except ImportError:
+        logger.warning(
+            "amazon: curl_cffi not installed — falling back to httpx "
+            "(WILL be soft-blocked by Akamai Bot Manager). Install via "
+            "pip install curl_cffi for browser-TLS impersonation."
+        )
+        return None
 
 _SEARCH_URL = "https://www.amazon.com/s"
 _PRODUCT_URL = "https://www.amazon.com/dp"
@@ -125,6 +166,11 @@ class AmazonSource(BaseSource):
     """
 
     name = "amazon"
+    # v2.11.0: default_headers + default_timeout retained for the
+    # legacy httpx fallback path (when curl_cffi isn't installed).
+    # The curl_cffi `impersonate="chrome120"` mode supplies its own
+    # browser-matched header set, so these values are bypassed when
+    # the impersonating session is active.
     default_headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64; rv:143.0) "
@@ -142,53 +188,82 @@ class AmazonSource(BaseSource):
         # naturally spaced (not affected by this); bulk discovery
         # use needs the slow rate to stay under the gate.
         super().__init__(rate_limit=rate_limit)
+        # Lazy curl_cffi session. Created on first _fetch call so the
+        # module imports cleanly even when curl_cffi isn't installed.
+        # None means "fall back to base httpx client".
+        self._cf_session = None
+        self._cf_init_attempted = False
+
+    def _get_cf_session(self):
+        """Return the cached curl_cffi AsyncSession, or None on import error.
+
+        Created lazily on first use. The session lives for the source's
+        lifetime; rate-limiting handles inter-request spacing.
+        Future refinement (if Akamai starts scoring session-level state):
+        recreate per author or per N requests.
+        """
+        if self._cf_session is not None:
+            return self._cf_session
+        if self._cf_init_attempted:
+            # Already tried, curl_cffi not available — don't keep retrying
+            return None
+        self._cf_init_attempted = True
+        self._cf_session = _create_impersonating_session()
+        return self._cf_session
 
     async def _fetch(self, url: str, params: dict = None) -> Optional[str]:
         """HTTP GET with jittered rate limiting + selective retry.
 
-        v2.10.6 Amazon hardening:
-          - **Jitter** added to rate-limit so request cadence isn't
-            perfectly periodic — periodicity is an obvious bot
-            fingerprint. v2.11.0 widened the jitter from a fixed
-            `uniform(0, 0.5)` to proportional `uniform(0, rate*0.5)`
-            so at the new 30s discovery rate the effective spacing
-            varies 30-45s instead of pattern-matching 30.0s exactly.
-          - **CAPTCHA detection** on 200 responses. Amazon serves
-            `/errors/validateCaptcha` interstitials with HTTP 200, so
-            a naive status-only check accepts them as real pages.
-            Detected pages are logged distinctly and return None
-            without retry (retrying would just hit the same gate
-            again).
-          - **Robot-check 503 detection**: a 503 with "Robot Check"
-            in the body is a soft-block, not an upstream error.
-            Single attempt, no retry — retry-storms make the gate
-            stickier.
-          - **Genuine 5xx retry** with one backoff (8s). Network /
-            upstream-transient failures retry once; harder failures
-            degrade to None.
+        Anti-bot stack (v2.11.0):
+          - **curl_cffi Chrome 120 TLS impersonation** (the actual
+            signal Akamai Bot Manager scores against). Replaces
+            httpx as the transport. Falls back to httpx via the
+            base-class `client` if curl_cffi isn't installed.
+          - **Proportional jitter** on the rate-limit sleep:
+            `uniform(0, rate*0.5)`. At rate=30s spacing is 30-45s.
+          - **CAPTCHA detection** on 200 responses — Amazon serves
+            `/errors/validateCaptcha` interstitials with HTTP 200.
+            Detected pages return None without retry.
+          - **Thin-body warning** on sub-50KB 200 responses — real
+            product / search pages are 500KB-1MB+; under-50KB usually
+            means a silent soft-block that the CAPTCHA detector
+            doesn't trip. Logged so operators can correlate.
+          - **Robot-check 503 detection** — 503 with "Robot Check"
+            body. No retry (retry-storms make the gate stickier).
+          - **Genuine 5xx retry** with one 8s backoff.
 
-        v2.11.0 probe (2026-05-13) confirmed Amazon's gate is
-        density-based, NOT fingerprint-based: an isolated request
-        with our existing Firefox UA succeeds identically to a full
-        Chrome-fingerprint request. The mitigation is therefore
-        slow the request rate, not improve the headers.
+        v2.11.0 wire-level UAT (2026-05-13) proved the upstream
+        differentiator: Amazon's IPv4 path is fronted by Akamai
+        Bot Manager, which scores requests by JA3 TLS fingerprint.
+        Same request from same IP with same headers gets thin-body
+        (Akamai soft-block) from httpx but 200+1.14MB from curl_cffi
+        with Chrome 120 impersonation. Same window, same session.
+        Mitigation = browser-TLS impersonation, not slower headers.
         """
-        # Proportional jitter — up to half the base rate. At rate=30s
-        # this gives 30-45s effective spacing; at rate=2s (legacy)
-        # this gives 2-3s. Keeps the cadence non-periodic while
-        # scaling sensibly with the user-configured rate.
+        # Proportional jitter — up to half the base rate.
         jitter_max = max(self.rate_limit * 0.5, 0.5)
         await asyncio.sleep(self.rate_limit + random.uniform(0, jitter_max))
 
-        # First attempt
-        try:
-            resp = await self.client.get(url, params=params)
-        except Exception as e:
-            logger.debug(f"  amazon: fetch error for {url}: {e}")
-            return None
-
-        status = resp.status_code
-        body = resp.text if status >= 200 else ""
+        # Prefer the impersonating session; fall back to base-class
+        # httpx client only if curl_cffi isn't installed (will be
+        # soft-blocked by Akamai, but the source still imports).
+        session = self._get_cf_session()
+        if session is not None:
+            try:
+                resp = await session.get(url, params=params)
+            except Exception as e:
+                logger.debug(f"  amazon: fetch error for {url}: {e}")
+                return None
+            status = resp.status_code
+            body = resp.text if status >= 200 else ""
+        else:
+            try:
+                resp = await self.client.get(url, params=params)
+            except Exception as e:
+                logger.debug(f"  amazon: fetch error for {url}: {e}")
+                return None
+            status = resp.status_code
+            body = resp.text if status >= 200 else ""
 
         # CAPTCHA on a 200 — soft-block, no retry.
         if status == 200 and _is_captcha_page(body):
@@ -199,14 +274,9 @@ class AmazonSource(BaseSource):
             return None
 
         if status == 200:
-            # Suspicious-thin-200 warning. A real Amazon search results
-            # page is ~1MB+; a real product detail page is ~500KB+. A
-            # 200 with a sub-50KB body usually means Amazon served us
-            # a soft-block / minimal interstitial that doesn't trip our
-            # CAPTCHA markers (common during heavy session activity).
-            # Surfaces the case so operators can correlate "amazon: no
-            # search results" with actual upstream weirdness instead of
-            # silently shrugging it off.
+            # Suspicious-thin-200 warning. Real Amazon pages are
+            # 500KB-1MB+; sub-50KB usually means a silent soft-block
+            # that doesn't trip our CAPTCHA detector.
             if len(body) < 50_000:
                 logger.warning(
                     f"  amazon: 200 OK with suspiciously small body "
@@ -223,22 +293,21 @@ class AmazonSource(BaseSource):
             )
             return None
 
-        # Genuine 5xx → one backoff retry. Other non-200 (404, 403,
-        # 410) → log and bail; not retryable.
+        # Genuine 5xx → one backoff retry. Other non-200 → log + bail.
         if 500 <= status < 600:
             logger.info(
                 f"  amazon: HTTP {status} for {url} — retrying once after 8s"
             )
             await asyncio.sleep(8.0)
             try:
-                resp = await self.client.get(url, params=params)
+                if session is not None:
+                    resp = await session.get(url, params=params)
+                else:
+                    resp = await self.client.get(url, params=params)
             except Exception as e:
                 logger.debug(f"  amazon: retry error for {url}: {e}")
                 return None
             if resp.status_code == 200:
-                # Re-check for CAPTCHA on the retry too — Amazon
-                # sometimes flips from 503 to a 200 CAPTCHA page on
-                # the second hit.
                 if _is_captcha_page(resp.text):
                     logger.info(
                         f"  amazon: CAPTCHA challenge on retry at {url} "
@@ -253,6 +322,16 @@ class AmazonSource(BaseSource):
 
         logger.info(f"  amazon: HTTP {status} for {url}")
         return None
+
+    async def close(self):
+        """Close the curl_cffi session + parent's httpx client."""
+        if self._cf_session is not None:
+            try:
+                await self._cf_session.close()
+            except Exception:
+                pass
+            self._cf_session = None
+        await super().close()
 
     async def search_author(self, author_name: str) -> Optional[AuthorResult]:
         """Search Amazon for an author. Returns minimal AuthorResult.

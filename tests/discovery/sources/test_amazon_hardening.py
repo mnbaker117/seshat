@@ -293,6 +293,92 @@ class TestFetchHardening:
         assert len(set(rate_sleeps)) > 1
         await src.close()
 
+    async def test_curl_cffi_session_used_when_available(self, monkeypatch):
+        """v2.11.0 — when curl_cffi is installed, `_fetch` prefers the
+        impersonating AsyncSession over the base-class httpx client.
+        Mocks `_get_cf_session` to return a fake session and asserts
+        it's the one that handled the GET."""
+        _patch_sleep(monkeypatch)
+        src = AmazonSource(rate_limit=0)
+
+        called = {"cf": 0, "httpx": 0}
+
+        class _FakeResp:
+            status_code = 200
+            text = "<html><body>cf result</body></html>"
+
+        async def fake_cf_get(url, params=None, **kwargs):
+            called["cf"] += 1
+            return _FakeResp()
+
+        class _FakeSession:
+            get = staticmethod(fake_cf_get)
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(
+            AmazonSource, "_get_cf_session", lambda self: _FakeSession(),
+        )
+        # Also patch the httpx client.get so if the fallback fires we know
+        async def fake_httpx_get(url, params=None, **kwargs):
+            called["httpx"] += 1
+            return httpx.Response(200, content=b"<html>httpx</html>")
+        actual_client = src.client
+        actual_client.get = fake_httpx_get  # type: ignore[method-assign]
+
+        body = await src._fetch("https://www.amazon.com/s")
+
+        assert body is not None
+        assert "cf result" in body
+        assert called["cf"] == 1, "curl_cffi session should have been called"
+        assert called["httpx"] == 0, "httpx fallback should NOT fire when cf_session is available"
+        await src.close()
+
+    async def test_falls_back_to_httpx_when_curl_cffi_unavailable(self, monkeypatch):
+        """When `_get_cf_session` returns None (curl_cffi not installed),
+        `_fetch` falls back to the base-class httpx client. This preserves
+        the source's ability to import + run in dev environments without
+        the optional binary dep."""
+        _patch_sleep(monkeypatch)
+        src = AmazonSource(rate_limit=0)
+        # Force the fallback path
+        monkeypatch.setattr(AmazonSource, "_get_cf_session", lambda self: None)
+
+        called = {"httpx": 0}
+        async def fake_httpx_get(url, params=None, **kwargs):
+            called["httpx"] += 1
+            return httpx.Response(200, content=b"<html>fallback</html>")
+        actual_client = src.client
+        actual_client.get = fake_httpx_get  # type: ignore[method-assign]
+
+        body = await src._fetch("https://www.amazon.com/s")
+
+        assert body is not None
+        assert "fallback" in body
+        assert called["httpx"] == 1
+        await src.close()
+
+    async def test_close_releases_curl_cffi_session(self, monkeypatch):
+        """`close()` must release the curl_cffi session — leaking
+        AsyncSessions across container lifetime would accumulate
+        TLS state at Akamai's edge."""
+        src = AmazonSource(rate_limit=0)
+
+        closed = {"cf": False}
+
+        class _FakeSession:
+            async def close(self):
+                closed["cf"] = True
+
+        fake = _FakeSession()
+        src._cf_session = fake  # bypass lazy init
+
+        await src.close()
+
+        assert closed["cf"] is True
+        assert src._cf_session is None
+
     async def test_jitter_floor_for_tiny_rate(self, monkeypatch):
         """Tiny rate (or 0) still gets some jitter, not zero. Floor
         of 0.5s on the jitter max prevents perfectly periodic
