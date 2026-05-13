@@ -191,7 +191,14 @@ def reload_sources():
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
     goodreads = GoodreadsSource(rate_limit=get_source_rate_limit(s, "goodreads"))
     kobo = KoboSource(rate_limit=get_source_rate_limit(s, "kobo"))
-    amazon = AmazonSource(rate_limit=get_source_rate_limit(s, "amazon"))
+    # Stage 5++: format + language drive Amazon's server-side
+    # authorFilters API on /juvec. Defaults applied if missing.
+    _amazon_entry = (s.get("metadata_sources") or {}).get("amazon") or {}
+    amazon = AmazonSource(
+        rate_limit=get_source_rate_limit(s, "amazon"),
+        format_filter=_amazon_entry.get("format", "kindle"),
+        language=_amazon_entry.get("language", "English"),
+    )
     ibdb = IbdbSource(rate_limit=get_source_rate_limit(s, "ibdb"))
     google_books = GoogleBooksSource(
         rate_limit=get_source_rate_limit(s, "google_books"),
