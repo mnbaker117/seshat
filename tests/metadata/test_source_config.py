@@ -481,3 +481,109 @@ class TestMandatoryFlag:
         settings: dict = {}
         migrate_legacy_settings(settings)
         assert is_source_mandatory(settings, "nonexistent") is False
+
+
+class TestAmazonAuthorStoreDefaults:
+    """v2.11.0 Stage 5++ — Amazon discovery is re-enabled by default
+    after the bot-detection density problem is solved by the
+    Author-Store flow (1 GET + ~7 POSTs instead of 45 detail GETs).
+
+    Two new per-source config strings drive Amazon's own server-side
+    filter API: `format` (default `"kindle"`) and `language`
+    (default `"English"`). They flow through `_backfill_known_sources`
+    into the Amazon entry in `metadata_sources`."""
+
+    def test_amazon_ebook_scan_re_enabled_on_fresh_install(self):
+        """Stage 5 default-disabled bulk discovery because raw
+        sequential queries tripped Akamai after ~6-10 requests.
+        Stage 5++ replaces that with the Author-Store flow (1 GET +
+        batched /juvec POSTs), so default-on is safe again."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        amazon = settings["metadata_sources"]["amazon"]
+        assert amazon["ebook_scan"] is True
+        assert amazon["ebook_enrich"] is True
+
+    def test_amazon_audiobook_scan_stays_off(self):
+        """The Author-Store flow filters out audio_download bindings —
+        Audible handles audiobook discovery. Both audiobook flags
+        remain default-off."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        amazon = settings["metadata_sources"]["amazon"]
+        assert amazon["audiobook_scan"] is False
+        assert amazon["audiobook_enrich"] is False
+
+    def test_amazon_format_default_kindle(self):
+        """Server-side filter input value (not the binding-symbol
+        output) — Amazon accepts lowercase format names. Kindle is
+        the default discovery target because it has the broadest
+        author catalog coverage."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        amazon = settings["metadata_sources"]["amazon"]
+        assert amazon["format"] == "kindle"
+
+    def test_amazon_language_default_english(self):
+        """Server-side language filter — Amazon accepts capitalized
+        full-name values from content.languageFilter (e.g. "English",
+        "Spanish", "ChineseSimplified")."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        amazon = settings["metadata_sources"]["amazon"]
+        assert amazon["language"] == "English"
+
+    def test_amazon_defaults_not_present_on_other_sources(self):
+        """format/language are Amazon-specific config — not generic
+        toggles. Other sources should never accidentally carry them."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        for name, entry in settings["metadata_sources"].items():
+            if name == "amazon":
+                continue
+            assert "format" not in entry, (
+                f"{name!r} should not carry Amazon-specific 'format' key"
+            )
+            assert "language" not in entry, (
+                f"{name!r} should not carry Amazon-specific 'language' key"
+            )
+
+    def test_backfill_adds_amazon_keys_to_pre_stage5pp_install(self):
+        """Existing installs upgrading from pre-Stage-5++ have an
+        amazon entry in metadata_sources but with ebook_scan False
+        (Stage 5 default) and no format/language keys. Confirm
+        backfill does NOT clobber the existing entry — it only adds
+        keys to missing sources, not missing keys within existing
+        sources. Users keep their Stage-5 setting; the new keys are
+        consulted with defaults at read-time in the source code.
+
+        This guards against a scenario where backfill aggressively
+        overwrites the user's persisted `ebook_scan: False` back to
+        True against their wishes."""
+        # Pretend the install already migrated under Stage 5 — has
+        # amazon entry with the old default.
+        settings = {
+            "metadata_sources": {
+                "amazon": {
+                    "rate_limit": 30.0,
+                    "ebook_enrich": True,
+                    "ebook_scan": False,   # user's actual Stage 5 state
+                    "audiobook_enrich": False,
+                    "audiobook_scan": False,
+                    "mandatory": False,
+                },
+            },
+            "metadata_priority": {
+                "ebook": ["amazon"],
+                "audiobook": [],
+            },
+        }
+        migrate_legacy_settings(settings)
+        amazon = settings["metadata_sources"]["amazon"]
+        # Existing per-source entry untouched.
+        assert amazon["ebook_scan"] is False
+        # Backfill does NOT inject format/language onto an existing
+        # entry — they only flow on fresh installs. The source code
+        # reads with `.get("format", "kindle")` defaults at runtime
+        # so this is functionally fine.
+        assert "format" not in amazon

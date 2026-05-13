@@ -104,17 +104,22 @@ KNOWN_SOURCES: dict[str, dict[str, Any]] = {
 # supplementary sources where DETAIL on every unmatched book would
 # be wasted effort. Default True on the primary tier (Goodreads /
 # Hardcover for ebook; Audible for audiobook), False elsewhere.
-_DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, bool]] = {
+_DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, Any]] = {
     "mam":         {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": False},
     "goodreads":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
-    # Amazon — v2.11.0 strategy: enricher-only by default.
-    # Bulk discovery scans (sustained sequential queries) trip
-    # Amazon's bot-detection counter ~6-10 requests in. Per-book
-    # enricher lookups are naturally low-density (one per snatched
-    # book, minutes apart) and slip through fine.
-    # User can opt back into discovery via Settings; UI should
-    # warn + recommend rate ≥ 30s (see AmazonSource jitter logic).
-    "amazon":      {"ebook_enrich": True,  "ebook_scan": False, "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
+    # Amazon — v2.11.0 Stage 5++: Author-Store discovery re-enabled.
+    # The pre-Stage-5++ density problem (45 detail GETs per author tripped
+    # Akamai after 6-10 requests) is solved by the Author-Store flow:
+    # 1 GET of /stores/author/{id}/allbooks returns 85 fully-populated
+    # products from embedded JSON; remaining ASINs fetched via batched
+    # POST /juvec. ~7 requests per author instead of 45, all behind
+    # curl_cffi Chrome-120 impersonation.
+    # `format` + `language` drive Amazon's own server-side filter API
+    # via authorFilters in the /juvec POST body. Defaults to Kindle +
+    # English (Mark's primary discovery target). UI dropdowns under
+    # Settings → Sources → Amazon will offer paperback / hardcover /
+    # mass_market and the other languages from content.languageFilter.
+    "amazon":      {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False, "format": "kindle", "language": "English"},
     "hardcover":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
     "kobo":        {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
     "ibdb":        {"ebook_enrich": False, "ebook_scan": False, "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False},
@@ -414,7 +419,7 @@ def _build_source_entry(
 
     rate_limit = _legacy_rate_for(name, settings, meta["default_rate"])
 
-    return {
+    entry: dict[str, Any] = {
         "rate_limit": float(rate_limit),
         "ebook_enrich": bool(ebook_enrich),
         "ebook_scan": bool(ebook_scan),
@@ -422,6 +427,20 @@ def _build_source_entry(
         "audiobook_scan": bool(audiobook_scan),
         "mandatory": bool(defaults.get("mandatory", False)),
     }
+    # Preserve source-specific extras (e.g. Amazon's `format` /
+    # `language` strings that drive the Author-Store filter API).
+    # The 5 toggles + `mandatory` are explicitly built above; any
+    # other key in defaults is a source-private config string that
+    # should round-trip into metadata_sources unchanged.
+    _STANDARD_KEYS = {
+        "ebook_enrich", "ebook_scan",
+        "audiobook_enrich", "audiobook_scan",
+        "mandatory",
+    }
+    for k, v in defaults.items():
+        if k not in _STANDARD_KEYS:
+            entry[k] = v
+    return entry
 
 
 def _legacy_rate_for(

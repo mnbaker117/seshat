@@ -122,6 +122,14 @@ CREATE TABLE IF NOT EXISTS books (
     tags TEXT,
     publisher TEXT,
     formats TEXT,
+    -- JSON map from binding symbol → ASIN for every format variant of
+    -- this work that Amazon's Author Store exposed via mediaMatrix:
+    --   {"kindle_edition": "B002...", "hardcover": "0765...", "paperback": "1250..."}.
+    -- Populated by AmazonAuthorStoreSource (v2.11.0 Stage 5++). Lets the
+    -- UI offer "switch canonical format" without a fresh scan, and the
+    -- enricher fetch the right detail page when the user prefers
+    -- hardcover/paperback metadata.
+    amazon_format_asins TEXT,
     mam_url TEXT,
     mam_status TEXT,
     mam_formats TEXT,
@@ -595,6 +603,13 @@ MIGRATIONS = [
     "ALTER TABLE authors ADD COLUMN openlibrary_id TEXT",
     "ALTER TABLE series ADD COLUMN openlibrary_id TEXT",
     "ALTER TABLE books ADD COLUMN openlibrary_id TEXT",
+    # ── v2.11.0 Stage 5++: amazon_format_asins JSON map ──────────
+    # AmazonAuthorStoreSource hydrates this from each product's
+    # mediaMatrix.items so we keep a complete format-variant map
+    # alongside the canonical ASIN. Stored as JSON; written through
+    # json.dumps. NULL is fine (older books without an Author-Store
+    # scan, or non-Amazon sources).
+    "ALTER TABLE books ADD COLUMN amazon_format_asins TEXT",
 ]
 
 
@@ -1432,6 +1447,7 @@ async def init_db(slug=None):
             ("books", "metadata_source_pref", "TEXT NOT NULL DEFAULT 'seshat'"),
             ("books", "field_source_map", "TEXT"),
             ("books", "user_edited_fields", "TEXT NOT NULL DEFAULT '[]'"),
+            ("books", "amazon_format_asins", "TEXT"),
         ]
         for table, col, coltype in _ensure_columns:
             try:
