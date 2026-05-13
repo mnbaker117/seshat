@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Optional
 
 from app.discovery.sources.base import (
@@ -100,6 +101,62 @@ def _norm_for_match(name: str) -> str:
     return name.lower().replace(".", "").replace(" ", "")
 
 
+# Regex helpers for the v2.11.0 punct+whitespace-strip resolver tier.
+# OL's full-text search is whitespace-sensitive for initials: querying
+# "K.D. Robertson" returns 0 hits, "K. D. Robertson" returns 2. Generate
+# both forms so a single resolver call covers either input shape.
+_RX_COMPACT_INITIALS = re.compile(r"\b([A-Z])\.([A-Z])\.")          # "K.D." → match groups for "K.", "D."
+_RX_SPACED_INITIALS = re.compile(r"\b([A-Z])\.\s+([A-Z])\.")        # "K. D." → reverse
+
+
+def _query_variants(author_name: str) -> list[str]:
+    """Produce alternate OL-search query strings for `author_name`.
+
+    Returns the input verbatim first, followed by any variant forms
+    that differ. Currently:
+      - Compact initials → spaced: "K.D. Robertson" → "K. D. Robertson"
+      - Spaced initials → compact: "K. D. Robertson" → "K.D. Robertson"
+
+    Empty input or single-word names short-circuit to `[author_name]`.
+    """
+    variants: list[str] = [author_name]
+    if not author_name:
+        return variants
+
+    spaced = _RX_COMPACT_INITIALS.sub(r"\1. \2.", author_name)
+    if spaced != author_name:
+        variants.append(spaced)
+
+    compact = _RX_SPACED_INITIALS.sub(r"\1.\2.", author_name)
+    if compact != author_name and compact not in variants:
+        variants.append(compact)
+
+    return variants
+
+
+def _has_cjk(s: str) -> bool:
+    """True if `s` contains any CJK ideograph / hiragana / katakana.
+
+    Used as the gate for the cross-script aggregation rule: OL's
+    `/search/authors.json` for a romanized Japanese name (e.g.
+    "Isuna Hasekura") frequently returns the canonical native-script
+    record (e.g. 支倉凍砂, work_count=79) alongside lower-work-count
+    English transliterations (work_count=5). When the CJK record
+    dominates work count, it's almost always the canonical author
+    and should be aggregated into the result set.
+    """
+    if not s:
+        return False
+    for ch in s:
+        try:
+            cat = unicodedata.name(ch, "")
+        except ValueError:
+            continue
+        if cat.startswith(("CJK", "HIRAGANA", "KATAKANA", "HANGUL")):
+            return True
+    return False
+
+
 class OpenLibrarySource(BaseSource):
     name = "openlibrary"
     default_headers = {
@@ -112,36 +169,62 @@ class OpenLibrarySource(BaseSource):
         super().__init__(rate_limit=rate_limit)
 
     async def search_author(self, author_name: str) -> Optional[AuthorResult]:
-        """Resolve `author_name` to an OL author key + walk their works.
+        """Resolve `author_name` to OL author key(s) + walk their works.
 
-        Mirrors the v2.10.5 Hardcover pattern: phase 1 finds the
-        canonical author record (with namesake disambiguation), phase 2
-        paginates the author's works relation. Returns a populated
-        `AuthorResult` so the downstream `_try_source` fast path skips
-        the redundant `get_author_books` call.
+        Mirrors the v2.10.5 Hardcover pattern: phase 1 finds canonical
+        author record(s), phase 2 paginates each one's works relation.
+        Returns a populated `AuthorResult` so the downstream `_try_source`
+        fast path skips the redundant `get_author_books` call.
+
+        v2.11.0: phase 1 may return multiple keys when OL has split an
+        author across records (e.g. translated/CJK + Latin transcription).
+        Works are aggregated across all matched records and deduplicated
+        by work-key so the canonical record's full bibliography surfaces.
         """
-        ol_key = await self._resolve_author_key(author_name)
-        if not ol_key:
+        ol_keys = await self._resolve_author_keys(author_name)
+        if not ol_keys:
             logger.info(
                 "  OpenLibrary: no author match for '%s'", author_name,
             )
             return None
 
-        works = await self._fetch_all_author_works(ol_key)
-        if not works:
+        seen_work_keys: set[str] = set()
+        all_works: list[dict] = []
+        for key in ol_keys:
+            works = await self._fetch_all_author_works(key)
+            for w in works:
+                wkey = (w.get("key") or "").rsplit("/", 1)[-1]
+                if not wkey:
+                    continue
+                if wkey in seen_work_keys:
+                    continue
+                seen_work_keys.add(wkey)
+                all_works.append(w)
+
+        primary_key = ol_keys[0]
+        if not all_works:
             logger.info(
-                "  OpenLibrary: author %s '%s' returned 0 works",
-                ol_key, author_name,
+                "  OpenLibrary: author %s '%s' returned 0 works "
+                "(aggregated across %d record(s))",
+                primary_key, author_name, len(ol_keys),
             )
             return AuthorResult(
-                name=author_name, external_id=ol_key,
+                name=author_name, external_id=primary_key,
             )
 
-        logger.info(
-            "  OpenLibrary: author %s '%s' → %d works",
-            ol_key, author_name, len(works),
-        )
-        return self._build_result(author_name, ol_key, works)
+        if len(ol_keys) > 1:
+            logger.info(
+                "  OpenLibrary: author '%s' → %d works aggregated across "
+                "%d records: %s",
+                author_name, len(all_works), len(ol_keys),
+                ", ".join(ol_keys),
+            )
+        else:
+            logger.info(
+                "  OpenLibrary: author %s '%s' → %d works",
+                primary_key, author_name, len(all_works),
+            )
+        return self._build_result(author_name, primary_key, all_works)
 
     async def get_author_books(
         self, author_id: str, **_kw,
@@ -156,35 +239,69 @@ class OpenLibrarySource(BaseSource):
 
     # ── Phase 1 — author lookup ───────────────────────────────────
 
-    async def _resolve_author_key(
+    async def _resolve_author_keys(
         self, author_name: str
-    ) -> Optional[str]:
-        """Find the OL author key matching `author_name`.
+    ) -> list[str]:
+        """Find OL author key(s) matching `author_name`.
 
-        Strict normalized-name match preferred; ties broken by
-        `work_count` (more prolific = more likely the user's target).
-        Falls back to OL's top-ranked match when no name passes the
-        strict gate (OL's ranker is generally reliable for first hits).
+        Returns a list (possibly empty). One key per matched OL author
+        record. Most authors resolve to exactly one key; multiple keys
+        signal that OL has split the same person across records (common
+        for translated authors who exist as both a romanized record and
+        a native-script record).
+
+        Resolution chain (v2.11.0):
+
+        1. **Variant queries** — try the input name verbatim; if OL
+           returns 0 hits, retry with whitespace-stripped initials
+           ("K.D." ↔ "K. D."). OL's full-text search is whitespace-
+           sensitive on initials so this single query change recovers
+           authors like K.D. Robertson that would otherwise FAIL.
+
+        2. **Strict-name aggregation** — among the returned docs,
+           include every record whose name strictly normalizes to the
+           target (lowercase, periods/spaces stripped). Case variants
+           like "Isuna Hasekura" / "ISUNA HASEKURA" / "Isuna HASEKURA"
+           all aggregate together.
+
+        3. **Cross-script aggregation** — also include any non-Latin
+           script record (CJK / hiragana / katakana / hangul) whose
+           work_count exceeds the strict-match maximum. OL routinely
+           returns the canonical Japanese record for a romanized
+           query, but the strict-name gate would otherwise discard it
+           because "支倉凍砂" doesn't normalize to "isunahasekura".
+           Work-count dominance is the signal that this is the same
+           prolific author, not an unrelated entry.
+
+        4. **Top-hit fallback** — if no record passes either gate,
+           return OL's #1-ranked result wrapped in a single-element
+           list. Preserves the v2.10.6 behavior for the long tail of
+           noisy / partial matches.
         """
-        try:
-            resp = await self._get(
-                f"{BASE}/search/authors.json",
-                params={"q": author_name, "limit": 10},
-            )
-            data = resp.json()
-        except Exception as e:
-            logger.debug(
-                "  OpenLibrary: author search error for '%s': %s",
-                author_name, e,
-            )
-            return None
+        docs = await self._search_authors(author_name)
 
-        docs = data.get("docs") or []
+        # Variant retry — OL's search is whitespace-sensitive on
+        # initials. If the verbatim query missed, try alternate forms
+        # before giving up.
         if not docs:
-            return None
+            for variant in _query_variants(author_name)[1:]:
+                docs = await self._search_authors(variant)
+                if docs:
+                    logger.info(
+                        "  OpenLibrary: '%s' returned 0 hits; "
+                        "recovered via variant query '%s'",
+                        author_name, variant,
+                    )
+                    break
+
+        if not docs:
+            return []
 
         target = _norm_for_match(author_name)
-        scored: list[tuple[int, int, str, str]] = []  # (score, work_count, name, key)
+        strict: list[tuple[int, str, str]] = []      # (work_count, name, key)
+        substring: list[tuple[int, str, str]] = []   # 50-score fallback pool
+        others: list[tuple[int, str, str]] = []      # everything else, for cross-script
+
         for d in docs:
             key = d.get("key")
             name = d.get("name") or ""
@@ -192,17 +309,15 @@ class OpenLibrarySource(BaseSource):
             if not key or not name:
                 continue
             normalized = _norm_for_match(name)
-            score = 0
             if normalized == target:
-                score = 100
-            elif target in normalized or normalized in target:
-                score = 50
-            if score == 0:
-                continue
-            scored.append((score, work_count, name, key))
+                strict.append((work_count, name, key))
+            elif target and (target in normalized or normalized in target):
+                substring.append((work_count, name, key))
+            else:
+                others.append((work_count, name, key))
 
-        if not scored:
-            # No name passed strict gate — trust OL's ranker (top hit).
+        if not strict and not substring:
+            # No name-match at all — trust OL's ranker (single top hit).
             top = docs[0]
             top_key = top.get("key")
             if top_key:
@@ -211,20 +326,64 @@ class OpenLibrarySource(BaseSource):
                     "falling back to top hit '%s' (key=%s)",
                     author_name, top.get("name"), top_key,
                 )
-            return top_key
+                return [top_key]
+            return []
 
-        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-        winner = scored[0]
-        if len(scored) > 1:
-            others = ", ".join(
-                f"{n}({c})" for _, c, n, _ in scored[1:5]
+        # Strict-name aggregation: include every record that strictly
+        # matches. Order by work_count desc so the primary record (the
+        # one whose bibliography is most likely complete) comes first.
+        strict_sorted = sorted(strict, key=lambda t: t[0], reverse=True)
+        keys: list[str] = [k for _, _, k in strict_sorted]
+
+        # If no strict hits but we had substring matches, fall back to
+        # the most prolific substring match (preserves v2.10.6 behavior).
+        if not keys and substring:
+            substring.sort(key=lambda t: t[0], reverse=True)
+            keys = [substring[0][2]]
+
+        # Cross-script aggregation. When the OL search has returned a
+        # CJK-script record alongside the romanized strict matches and
+        # the CJK record dominates work count, it's the canonical native-
+        # script entry — almost always the same person. Include it.
+        if strict_sorted:
+            max_strict_wc = strict_sorted[0][0]
+            for wc, name, key in others:
+                if _has_cjk(name) and wc > max_strict_wc:
+                    keys.append(key)
+                    logger.info(
+                        "  OpenLibrary: aggregating cross-script record "
+                        "%s '%s' (work_count=%d > strict-max=%d) for '%s'",
+                        key, name, wc, max_strict_wc, author_name,
+                    )
+
+        if len(strict_sorted) > 1:
+            others_str = ", ".join(
+                f"{n}({c})" for c, n, _ in strict_sorted[1:5]
             )
             logger.info(
-                "  OpenLibrary: disambiguated '%s' → key=%s name=%r "
-                "work_count=%d. Passed-over namesakes: %s",
-                author_name, winner[3], winner[2], winner[1], others,
+                "  OpenLibrary: aggregated %d strict-match records for "
+                "'%s'. Primary: %s. Also: %s",
+                len(strict_sorted), author_name, strict_sorted[0][1],
+                others_str,
             )
-        return winner[3]
+
+        return keys
+
+    async def _search_authors(self, query: str) -> list[dict]:
+        """Single call to /search/authors.json. Returns docs list or []."""
+        try:
+            resp = await self._get(
+                f"{BASE}/search/authors.json",
+                params={"q": query, "limit": 10},
+            )
+            data = resp.json()
+        except Exception as e:
+            logger.debug(
+                "  OpenLibrary: author search error for %r: %s",
+                query, e,
+            )
+            return []
+        return data.get("docs") or []
 
     # ── Phase 2 — walk author's works ─────────────────────────────
 

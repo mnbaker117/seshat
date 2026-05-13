@@ -47,6 +47,7 @@ from app.metadata.sources.hardcover import HardcoverSource
 from app.metadata.sources.ibdb import IbdbSource
 from app.metadata.sources.kobo import KoboSource
 from app.metadata.sources.mam_search import MamSearchSource
+from app.metadata.sources.openlibrary import OpenLibrarySource
 
 _log = logging.getLogger("seshat.metadata.enricher")
 
@@ -214,6 +215,7 @@ _SOURCE_REGISTRY: dict[str, type[MetaSource]] = {
     KoboSource.name: KoboSource,
     IbdbSource.name: IbdbSource,
     GoogleBooksSource.name: GoogleBooksSource,
+    OpenLibrarySource.name: OpenLibrarySource,
     AudibleSource.name: AudibleSource,
     # Audnexus is NOT registered — it has no standalone title/author
     # search. AudibleSource instantiates its own AudnexusSource

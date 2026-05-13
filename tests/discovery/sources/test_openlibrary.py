@@ -8,11 +8,13 @@ injected on `self._client`).
 
 Coverage:
   - Series-from-title extractor edge cases
-  - `_resolve_author_key` disambiguation (single, multi w/ name match,
-    multi w/ work_count tiebreak, no match → fallback to top hit)
+  - `_resolve_author_keys` disambiguation (single, multi w/ name match,
+    multi w/ work_count tiebreak, no match → fallback to top hit,
+    variant-query recovery, cross-script aggregation)
   - `_fetch_all_author_works` pagination (single page, multi-page,
     partial-page stop)
-  - End-to-end `search_author` (assembled AuthorResult, no-author miss)
+  - End-to-end `search_author` (assembled AuthorResult, no-author miss,
+    multi-record aggregation with dedup)
   - `get_author_books` is a no-op stub (mirrors HardcoverSource pattern)
 """
 from __future__ import annotations
@@ -24,6 +26,8 @@ import httpx
 from app.discovery.sources.openlibrary import (
     OpenLibrarySource,
     _extract_series_from_title,
+    _has_cjk,
+    _query_variants,
 )
 
 
@@ -98,11 +102,77 @@ class TestSeriesExtraction:
         assert cleaned == ""
 
 
+# ── Pure helpers: query variants + CJK detection ──────────────────
+
+
+class TestQueryVariants:
+    """v2.11.0 punct+whitespace strip tier — OL's full-text search
+    is whitespace-sensitive on initials, so the resolver tries
+    alternate forms when the verbatim query returns 0 hits."""
+
+    def test_compact_initials_get_spaced_variant(self):
+        # "K.D. Robertson" → also try "K. D. Robertson"
+        out = _query_variants("K.D. Robertson")
+        assert out[0] == "K.D. Robertson"
+        assert "K. D. Robertson" in out
+
+    def test_spaced_initials_get_compact_variant(self):
+        # Inverse: "K. D. Robertson" → also try "K.D. Robertson"
+        out = _query_variants("K. D. Robertson")
+        assert out[0] == "K. D. Robertson"
+        assert "K.D. Robertson" in out
+
+    def test_full_name_unchanged_produces_single_variant(self):
+        # No initial-pattern → only the verbatim form
+        out = _query_variants("Brandon Sanderson")
+        assert out == ["Brandon Sanderson"]
+
+    def test_empty_input_safe(self):
+        out = _query_variants("")
+        assert out == [""]
+
+    def test_three_consecutive_initials_handled(self):
+        # "J.R.R. Tolkien" gets at least one variant form
+        out = _query_variants("J.R.R. Tolkien")
+        assert out[0] == "J.R.R. Tolkien"
+        assert len(out) >= 2
+
+
+class TestHasCjk:
+    """v2.11.0 cross-script aggregation gate."""
+
+    def test_kanji_detected(self):
+        assert _has_cjk("支倉凍砂") is True
+
+    def test_hiragana_detected(self):
+        assert _has_cjk("ひらがな") is True
+
+    def test_katakana_detected(self):
+        assert _has_cjk("カタカナ") is True
+
+    def test_hangul_detected(self):
+        assert _has_cjk("한글") is True
+
+    def test_latin_not_detected(self):
+        assert _has_cjk("Brandon Sanderson") is False
+
+    def test_mixed_script_detected(self):
+        # If ANY CJK char is present, returns True
+        assert _has_cjk("Isuna 支倉") is True
+
+    def test_empty_string_false(self):
+        assert _has_cjk("") is False
+
+
 # ── Phase 1: author-key resolution ────────────────────────────────
 
 
-class TestResolveAuthorKey:
-    async def test_single_match_returned_directly(self):
+class TestResolveAuthorKeys:
+    """v2.11.0: `_resolve_author_key` (single) → `_resolve_author_keys`
+    (list). Most authors still resolve to one key; multi-key returns
+    cover the cross-script + duplicate-record cases."""
+
+    async def test_single_match_returned_as_singleton_list(self):
         src = _make_source()
         _patch_get(src, {
             "search/authors.json": {
@@ -110,9 +180,9 @@ class TestResolveAuthorKey:
             },
         })
 
-        result = await src._resolve_author_key("Brandon Sanderson")
+        result = await src._resolve_author_keys("Brandon Sanderson")
 
-        assert result == "/authors/OL38550A"
+        assert result == ["/authors/OL38550A"]
         await src.close()
 
     async def test_strict_name_match_wins_over_partial(self):
@@ -127,32 +197,37 @@ class TestResolveAuthorKey:
             },
         })
 
-        result = await src._resolve_author_key("Brandon Sanderson")
+        result = await src._resolve_author_keys("Brandon Sanderson")
 
-        assert result == "/authors/OL2A"
+        # OL2A is the only strict-name match — partial matches don't
+        # aggregate in absence of cross-script evidence.
+        assert result == ["/authors/OL2A"]
         await src.close()
 
-    async def test_work_count_breaks_tie_on_strict_match(self):
+    async def test_multiple_strict_matches_aggregate_ordered_by_work_count(self):
+        # Case variants of the same name all strictly normalize to the
+        # same target — all should aggregate into the result list,
+        # most-prolific first.
         src = _make_source()
         _patch_get(src, {
             "search/authors.json": {
                 "docs": [
-                    {"key": "/authors/OL10A", "name": "John Smith", "work_count": 5},
-                    {"key": "/authors/OL20A", "name": "John Smith", "work_count": 200},
-                    {"key": "/authors/OL30A", "name": "John Smith", "work_count": 50},
+                    {"key": "/authors/OL10A", "name": "ISUNA HASEKURA", "work_count": 3},
+                    {"key": "/authors/OL20A", "name": "Isuna Hasekura", "work_count": 5},
+                    {"key": "/authors/OL30A", "name": "Isuna HASEKURA", "work_count": 1},
                 ],
             },
         })
 
-        result = await src._resolve_author_key("John Smith")
+        result = await src._resolve_author_keys("Isuna Hasekura")
 
-        assert result == "/authors/OL20A"  # most prolific Smith wins
+        # All 3 case-variants of the same name aggregate, sorted by work_count
+        assert result == ["/authors/OL20A", "/authors/OL10A", "/authors/OL30A"]
         await src.close()
 
     async def test_no_strict_match_falls_back_to_top_hit(self):
-        # OL returned candidates but none pass the strict name-match
-        # gate (e.g., all are partial/wildly-different matches). Fall
-        # back to OL's top-ranked hit rather than returning None.
+        # No name passes strict gate AND no substring match either.
+        # Fall back to OL's top-ranked hit (single-element list).
         src = _make_source()
         _patch_get(src, {
             "search/authors.json": {
@@ -163,25 +238,25 @@ class TestResolveAuthorKey:
             },
         })
 
-        result = await src._resolve_author_key("Brandon Sanderson")
+        result = await src._resolve_author_keys("Brandon Sanderson")
 
-        assert result == "/authors/OL99A"  # top-ranked OL hit
+        assert result == ["/authors/OL99A"]
         await src.close()
 
-    async def test_no_results_returns_none(self):
+    async def test_no_results_returns_empty_list(self):
         src = _make_source()
         _patch_get(src, {
             "search/authors.json": {"docs": []},
         })
 
-        result = await src._resolve_author_key("Nonexistent Author")
+        result = await src._resolve_author_keys("Nonexistent Author")
 
-        assert result is None
+        assert result == []
         await src.close()
 
-    async def test_period_normalization_matches(self):
+    async def test_period_normalization_still_matches(self):
         # "J.N. Chaney" (no space) should match "J. N. Chaney"
-        # (space-separated) — same trick as the v2.10.5 Hardcover fix.
+        # (space-separated) via the strict normalization rule.
         src = _make_source()
         _patch_get(src, {
             "search/authors.json": {
@@ -189,9 +264,122 @@ class TestResolveAuthorKey:
             },
         })
 
-        result = await src._resolve_author_key("J. N. Chaney")
+        result = await src._resolve_author_keys("J. N. Chaney")
 
-        assert result == "/authors/OL777A"
+        assert result == ["/authors/OL777A"]
+        await src.close()
+
+    async def test_variant_query_recovers_when_verbatim_misses(self):
+        # The K.D. Robertson case: OL's full-text search returns 0
+        # for the compact-initials form, 2 hits for spaced form.
+        # The resolver tries variants when verbatim is empty.
+        src = _make_source()
+        call_log: list = []
+        responses_in_order = [
+            {"docs": []},  # first call: verbatim "K.D. Robertson"
+            {"docs": [    # second call: variant "K. D. Robertson"
+                {"key": "/authors/OL11162910A", "name": "K. D. Robertson", "work_count": 6},
+            ]},
+        ]
+        _patch_get(src, {
+            "search/authors.json": responses_in_order,
+        }, call_log=call_log)
+
+        result = await src._resolve_author_keys("K.D. Robertson")
+
+        assert result == ["/authors/OL11162910A"]
+        # Two HTTP calls: verbatim missed, variant recovered
+        assert len(call_log) == 2
+        await src.close()
+
+    async def test_variant_query_no_retry_when_verbatim_hits(self):
+        # If the verbatim query returns hits, NO variant retry happens.
+        # Avoids burning RTTs for the common case.
+        src = _make_source()
+        call_log: list = []
+        _patch_get(src, {
+            "search/authors.json": {
+                "docs": [{"key": "/authors/OL1A", "name": "Brandon Sanderson", "work_count": 142}],
+            },
+        }, call_log=call_log)
+
+        await src._resolve_author_keys("Brandon Sanderson")
+
+        assert len(call_log) == 1  # no variant retry triggered
+        await src.close()
+
+    async def test_cross_script_aggregation_includes_dominant_cjk(self):
+        # The Hasekura case: OL returns several Latin-script "Isuna
+        # Hasekura" records (5, 3, 3 works) plus a high-work-count
+        # CJK record "支倉凍砂" (79 works). The CJK record dominates
+        # work count → aggregate into the result.
+        src = _make_source()
+        _patch_get(src, {
+            "search/authors.json": {
+                "docs": [
+                    {"key": "/authors/OL6791851A", "name": "Isuna Hasekura", "work_count": 5},
+                    {"key": "/authors/OL12608376A", "name": "ISUNA HASEKURA", "work_count": 3},
+                    {"key": "/authors/OL15006681A", "name": "Isuna Hasekura", "work_count": 3},
+                    {"key": "/authors/OL6811405A", "name": "支倉凍砂", "work_count": 79},
+                    {"key": "/authors/OL12638968A", "name": "Hasekura Isuna", "work_count": 1},
+                ],
+            },
+        })
+
+        result = await src._resolve_author_keys("Isuna Hasekura")
+
+        # All 3 strict matches + the CJK dominator
+        assert "/authors/OL6791851A" in result  # 5 works, primary strict
+        assert "/authors/OL12608376A" in result  # 3 works, strict
+        assert "/authors/OL15006681A" in result  # 3 works, strict
+        assert "/authors/OL6811405A" in result   # CJK dominator
+        # The "Hasekura Isuna" reverse-order record does NOT strictly
+        # normalize (h-i vs i-h), and it has low work_count, so excluded.
+        assert "/authors/OL12638968A" not in result
+        # Primary key (first in list) should be the most-prolific
+        # STRICT match (5 works), not the CJK record (79). The CJK
+        # record is appended after the strict aggregation pool.
+        assert result[0] == "/authors/OL6791851A"
+        await src.close()
+
+    async def test_cross_script_excluded_when_work_count_lower(self):
+        # A CJK record with FEWER works than strict matches should NOT
+        # aggregate — it's likely a different person sharing a script.
+        src = _make_source()
+        _patch_get(src, {
+            "search/authors.json": {
+                "docs": [
+                    {"key": "/authors/OL1A", "name": "Some Author", "work_count": 50},
+                    {"key": "/authors/OL2A", "name": "某作家", "work_count": 3},  # tiny CJK ghost
+                ],
+            },
+        })
+
+        result = await src._resolve_author_keys("Some Author")
+
+        assert result == ["/authors/OL1A"]
+        await src.close()
+
+    async def test_latin_script_high_work_count_not_aggregated(self):
+        # Cross-script aggregation is CJK-only. A high-work-count Latin
+        # record that doesn't pass strict-name match must NOT be pulled
+        # in — that's just "a different prolific author with overlap-y
+        # name", a precision risk we explicitly reject.
+        src = _make_source()
+        _patch_get(src, {
+            "search/authors.json": {
+                "docs": [
+                    {"key": "/authors/OL1A", "name": "John Smith", "work_count": 5},
+                    {"key": "/authors/OL99A", "name": "John Q. Robinson", "work_count": 500},
+                ],
+            },
+        })
+
+        result = await src._resolve_author_keys("John Smith")
+
+        # Strict match only — the unrelated Robinson is excluded
+        # even though work_count > strict-max.
+        assert result == ["/authors/OL1A"]
         await src.close()
 
 
@@ -355,6 +543,58 @@ class TestSearchAuthorEndToEnd:
         src = _make_source()
         result = await src.get_author_books("/authors/OL38550A")
         assert result is None
+        await src.close()
+
+    async def test_multi_record_aggregation_dedups_by_work_key(self):
+        # End-to-end exercise of v2.11.0 cross-record aggregation:
+        # OL returns multiple author records (e.g. case variants +
+        # CJK dominant). Each has its own works list; the resolver
+        # walks them all and dedups by work-key. Verifies primary
+        # `external_id` is the first strict match (not the CJK key)
+        # and that a duplicate work appearing under two records
+        # surfaces only once in the final AuthorResult.
+        src = _make_source()
+        _patch_get(src, {
+            "search/authors.json": {
+                "docs": [
+                    {"key": "/authors/OLLatA", "name": "Isuna Hasekura", "work_count": 5},
+                    {"key": "/authors/OLCjkA", "name": "支倉凍砂", "work_count": 79},
+                ],
+            },
+            "/authors/OLLatA/works.json": {
+                "entries": [
+                    {"key": "/works/OLSharedW", "title": "Spice and Wolf 1"},
+                    {"key": "/works/OLLatOnlyW", "title": "English Anthology"},
+                ],
+            },
+            "/authors/OLCjkA/works.json": {
+                "entries": [
+                    # Same work appears under both records — dedup must kick in
+                    {"key": "/works/OLSharedW", "title": "狼と香辛料 1"},
+                    {"key": "/works/OLCjkOnlyW", "title": "狼と羊皮紙"},
+                    {"key": "/works/OLCjkOnly2W", "title": "Wolf & Parchment 2"},
+                ],
+            },
+        })
+
+        result = await src.search_author("Isuna Hasekura")
+
+        assert result is not None
+        # Primary external_id is the FIRST strict-match record, not the
+        # CJK record (which got appended via cross-script aggregation).
+        assert result.external_id == "/authors/OLLatA"
+        # 4 unique works total — the shared one dedups
+        all_titles = [b.title for b in result.books] + [
+            b.title for s in result.series for b in s.books
+        ]
+        # Whichever variant of the shared work landed first (Latin record
+        # walked first), the other should NOT also appear
+        assert len(all_titles) == 4, f"expected 4 unique works, got {all_titles}"
+        # All 3 unique-to-CJK or unique-to-Latin works present
+        assert any("Spice and Wolf 1" == t or "狼と香辛料 1" == t for t in all_titles)
+        assert "English Anthology" in all_titles
+        assert "狼と羊皮紙" in all_titles
+        assert "Wolf & Parchment 2" in all_titles
         await src.close()
 
     async def test_format_specific_parenthetical_not_treated_as_series(self):
