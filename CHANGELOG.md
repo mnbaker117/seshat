@@ -7,6 +7,59 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.9] — 2026-05-13
+
+Hotfix for the bug v2.10.8 surfaced — Open Library was running for
+the first time but its merge crashed because the `openlibrary_id`
+column was never added to `authors` / `series` / `books`. Every
+Open Library author scan dropped its full contribution silently
+(192 books for Sanderson in the v2.10.8 UAT).
+
+### Fixed — `no such column: openlibrary_id` on every Open Library merge
+
+The discovery merge layer in `app/discovery/lookup.py` uses
+`f"{source_name}_id"` to dynamically build the column name when
+writing source-specific external IDs. Open Library was added as a
+discovery source in v2.10.6 and backfilled into upgraded installs
+in v2.10.8, but the corresponding columns were never added.
+
+`app/discovery/database.py`:
+- Added `openlibrary_id TEXT` to the SCHEMA for fresh installs
+  (authors + series + books tables).
+- Three new ALTER TABLE statements at the end of MIGRATIONS for
+  upgraded installs.
+
+### Fixed — Enricher noisy WARN for discovery-only sources
+
+After v2.10.8 backfilled `openlibrary` into the priority lists,
+the enricher (per-book metadata pipeline) logged
+`enricher: unknown source 'openlibrary' in priority list` on every
+dispatcher rebuild because it has no MetaSource counterpart for
+Open Library yet (planned for v2.11.0).
+
+`app/metadata/enricher.py:_build_default_sources` now distinguishes:
+- Sources known to `KNOWN_SOURCES` but missing from the enricher's
+  `_SOURCE_REGISTRY` → DEBUG log ("discovery-only source, skipped")
+- Genuinely unknown source names → WARN as before
+
+### Tests
+
+- `tests/discovery/test_openlibrary_id_migration.py` (new, 5 cases) —
+  fresh-install schema includes `openlibrary_id` on all 3 tables;
+  v2.10.9 migration ALTERs add it to legacy installs; smoke-test
+  that the dynamic `f"{source}_id"` write pattern actually works
+  post-migration.
+
+Suite: **2272 passing, 7 skipped** (+5 from v2.10.8's 2267).
+
+### Deferred to v2.11.0
+
+- `app/metadata/sources/openlibrary.py` — a per-book MetaSource
+  for Open Library so the enricher can use it for review-queue
+  enrichment (currently OL only contributes via discovery scans).
+
+---
+
 ## [2.10.8] — 2026-05-13
 
 Three issues surfaced during the v2.10.7 Sanderson UAT scan, all

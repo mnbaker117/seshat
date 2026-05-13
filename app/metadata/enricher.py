@@ -533,7 +533,28 @@ def _build_default_sources(
             continue
         cls = _SOURCE_REGISTRY.get(name)
         if cls is None:
-            _log.warning("enricher: unknown source %r in priority list", name)
+            # Known-discovery-source-without-enricher-counterpart is
+            # not an error — Open Library landed in v2.10.6 as a
+            # discovery-only source (per-author bibliography walk via
+            # `BaseSource`), and a per-book `MetaSource` for it is
+            # planned for v2.11.0. Downgrade the log so future
+            # discovery-only additions don't spam WARN every time the
+            # enricher rebuilds.
+            try:
+                from app.metadata.source_config import KNOWN_SOURCES
+                known_discovery_only = name in KNOWN_SOURCES
+            except Exception:
+                known_discovery_only = False
+            if known_discovery_only:
+                _log.debug(
+                    "enricher: skipping %r in priority list — "
+                    "discovery-only source, no enricher MetaSource",
+                    name,
+                )
+            else:
+                _log.warning(
+                    "enricher: unknown source %r in priority list", name,
+                )
             continue
         if name == "hardcover" and hardcover_api_key:
             out.append(cls(api_key=hardcover_api_key))

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS authors (
     fictiondb_id TEXT,
     ibdb_id TEXT,
     google_books_id TEXT,
+    openlibrary_id TEXT,
     image_url TEXT,
     bio TEXT,
     verified INTEGER NOT NULL DEFAULT 0,
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS series (
     goodreads_id TEXT,
     kobo_id TEXT,
     fictiondb_id TEXT,
+    openlibrary_id TEXT,
     total_books INTEGER,
     description TEXT,
     last_lookup_at REAL,
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS books (
     goodreads_id TEXT,
     fictiondb_id TEXT,
     kobo_id TEXT,
+    openlibrary_id TEXT,
     cover_url TEXT,
     cover_path TEXT,
     pub_date TEXT,
@@ -569,6 +572,18 @@ MIGRATIONS = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_book_merges_winner ON book_merges(winner_id)",
     "CREATE INDEX IF NOT EXISTS idx_book_merges_loser ON book_merges(loser_id)",
+    # ── v2.10.9: openlibrary_id columns ─────────────────────────
+    # Open Library was added as a discovery source in v2.10.6 +
+    # backfilled into upgraded installs in v2.10.8, but the merge
+    # path (`UPDATE books SET openlibrary_id = ?` via the dynamic
+    # `f"{source_name}_id"` pattern in lookup.py) raised
+    # "no such column: openlibrary_id" on every Open Library result.
+    # Each impacted scan dropped the entire OL contribution silently
+    # (192 books for Sanderson, etc.) — visible in lookup logs as
+    # "[openlibrary] Error for X: no such column".
+    "ALTER TABLE authors ADD COLUMN openlibrary_id TEXT",
+    "ALTER TABLE series ADD COLUMN openlibrary_id TEXT",
+    "ALTER TABLE books ADD COLUMN openlibrary_id TEXT",
 ]
 
 
