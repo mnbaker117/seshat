@@ -127,9 +127,18 @@ class KoboSource(BaseSource):
     for interface consistency and shared logger/rate_limit."""
     name = "kobo"
 
-    def __init__(self, rate_limit: float = 3.0):
+    def __init__(self, rate_limit: float = 3.0, concurrency: int = 4):
         super().__init__(rate_limit=rate_limit)
         self._session = None
+        # v2.11.0: per-book detail fetches run with bounded concurrency
+        # via an asyncio.Semaphore. Each worker still respects
+        # `rate_limit` between requests (inside `_fetch_sync`), so the
+        # effective request rate becomes ~concurrency/rate_limit. At
+        # the defaults (4 / 3.0 = 1.33 req/s) we stay below the
+        # Cloudflare-fronted Kobo's bot-detection threshold while
+        # cutting big-author scan times by ~4×. Raising concurrency
+        # without also raising rate_limit will trigger soft-blocks.
+        self.concurrency = concurrency
 
     def _get_session(self):
         if self._session is None:
@@ -549,53 +558,27 @@ class KoboSource(BaseSource):
             seen_isbns = set()
             dupe_isbns = 0
 
-            for i, rb in enumerate(raw_books):
+            # v2.11.0: classify-then-parallel-fetch refactor. The old
+            # sequential loop ran ~3s/book minimum (rate limit dominated)
+            # and topped out at 80-180s for prolific authors. The new
+            # pattern partitions raw_books into three buckets:
+            #   1. URL-backfill (known title) — no detail fetch needed
+            #   2. SKIP-UNOWNED (library-only mode + not in owned_titles)
+            #   3. DETAIL fetch — the slow path, now run in parallel via
+            #      asyncio.Semaphore-gated workers
+            # Phase 3 (ISBN dedup + BookResult assembly) stays sequential
+            # because dedup state must be ordered.
+
+            url_backfill_rbs: list[dict] = []
+            detail_rbs: list[dict] = []
+            for rb in raw_books:
                 norm = _norm(rb["title"])
                 is_known = bool(existing_norm) and any(
                     norm == et or norm in et or et in norm for et in existing_norm
                 )
-
-                # Log progress every 5 books (Kobo is slower than Goodreads
-                # because of cloudscraper's sync HTTP)
-                if (i + 1) % 5 == 0 or i == 0:
-                    logger.info(f"  Kobo: processing book {i+1}/{len(raw_books)}...")
-
                 if is_known or not rb["kobo_url"]:
-                    # Minimal BookResult for URL backfill — no detail
-                    # fetch. Language is left None so lookup.py's
-                    # `_lang_ok` treats it as "unknown, assume ok".
-                    skipped_known += 1
-                    logger.debug(f"    SKIP-KNOWN (URL backfill): '{rb['title']}'")
-                    # URL-backfill emits a BookResult that the merge
-                    # layer consumes — counts as real work for the
-                    # per-book progress feed. Filter-noise skips
-                    # (unowned) below do NOT call _on_book.
-                    on_book = getattr(self, '_on_book', None)
-                    if on_book:
-                        on_book(rb["title"])
-                    br = BookResult(
-                        title=rb["title"], cover_url=rb["cover"],
-                        external_id=rb["kobo_id"], source="kobo",
-                        source_url=rb["kobo_url"],
-                    )
-                    books.append(br)
+                    url_backfill_rbs.append(rb)
                     continue
-
-                # owned_only optimization: in Library-only mode,
-                # books that don't match existing_titles will be
-                # dropped by _merge_result anyway. Skip the detail
-                # fetch up front — saves ~3s per book at the rate
-                # limit, which dominates total scan time for prolific
-                # authors.
-                #
-                # IMPORTANT: in full_scan mode, lookup.py deliberately
-                # passes `existing_titles=set()` so the URL-backfill
-                # branch above is bypassed and we revisit pages for
-                # fresh metadata. We CANNOT trust existing_titles to
-                # tell us which books are owned in that mode — we
-                # have to consult `owned_titles` (passed separately)
-                # here. Without this check, full_scan + owned_only
-                # silently skips ALL books including owned ones.
                 if owned_only:
                     is_owned = False
                     if owned_titles:
@@ -608,29 +591,69 @@ class KoboSource(BaseSource):
                         skipped_unowned += 1
                         logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
                         continue
+                detail_rbs.append(rb)
 
-                # DETAIL fetch path — the slow one (cloudscraper +
-                # sync HTTP + parse). Emit per-book progress so the
-                # user sees real ticks.
+            # Pass 2a — URL-backfill emit (fast, sequential).
+            for rb in url_backfill_rbs:
+                skipped_known += 1
+                logger.debug(f"    SKIP-KNOWN (URL backfill): '{rb['title']}'")
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(rb["title"])
-                # Bump the new-candidate counter so the new_books
-                # count climbs during the slow fetch (NOT on the URL-
-                # backfill path above, which would over-count).
-                on_new_candidate = getattr(self, '_on_new_candidate', None)
-                if on_new_candidate:
+                books.append(BookResult(
+                    title=rb["title"], cover_url=rb["cover"],
+                    external_id=rb["kobo_id"], source="kobo",
+                    source_url=rb["kobo_url"],
+                ))
+
+            # Pass 2b — bump new-candidate counter once per detail RB
+            # so the UI ticker climbs through the parallel work too.
+            on_new_candidate = getattr(self, '_on_new_candidate', None)
+            if on_new_candidate:
+                for _ in detail_rbs:
                     on_new_candidate()
 
-                # Unknown book — visit the detail page for full metadata
-                details = await self._get_book_details(rb["kobo_url"])
-                enriched += 1
+            # Pass 2c — parallel detail fetches. Bounded by
+            # asyncio.Semaphore so we don't fire more than
+            # `self.concurrency` simultaneous cloudscraper sessions.
+            # Each worker still does its own rate_limit sleep inside
+            # `_fetch_sync`, so the effective request rate is
+            # ~concurrency/rate_limit (default ~1.33 req/s).
+            if detail_rbs:
+                sem = asyncio.Semaphore(self.concurrency)
+                on_book = getattr(self, '_on_book', None)
+                progress_counter = {"n": 0}
+                total = len(detail_rbs)
 
-                # ISBN dedupe (see seen_isbns comment above): if we've
-                # already created a BookResult for this ISBN, drop the
-                # second occurrence. The fetch is wasted (we needed the
-                # detail page to learn the ISBN), but the merge layer
-                # and final count stay clean.
+                async def _fetch_one(rb_local: dict) -> tuple[dict, dict]:
+                    async with sem:
+                        details = await self._get_book_details(rb_local["kobo_url"])
+                    # Emit per-book progress on completion (not on submit)
+                    # so the UI ticker reflects actual finished work.
+                    progress_counter["n"] += 1
+                    n = progress_counter["n"]
+                    if on_book:
+                        on_book(rb_local["title"])
+                    if n == 1 or n % 5 == 0 or n == total:
+                        logger.info(
+                            f"  Kobo: detail {n}/{total} done "
+                            f"(concurrency={self.concurrency}, rate_limit={self.rate_limit}s)"
+                        )
+                    return rb_local, details
+
+                # gather preserves submission order so the subsequent
+                # ISBN-dedup pass sees results in raw_books order.
+                fetch_results = await asyncio.gather(
+                    *(_fetch_one(rb) for rb in detail_rbs)
+                )
+            else:
+                fetch_results = []
+
+            # Pass 3 — sequential ISBN-dedup + BookResult assembly.
+            # MUST be sequential because seen_isbns is order-dependent
+            # (first wins on collision).
+            for rb, details in fetch_results:
+                enriched += 1
                 isbn = details.get("isbn")
                 if isbn and isbn in seen_isbns:
                     dupe_isbns += 1

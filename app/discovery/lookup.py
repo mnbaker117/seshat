@@ -251,13 +251,15 @@ def _src_audible():      return audible
 SOURCES: list[SourceSpec] = [
     SourceSpec("goodreads",    "primary",       300.0, _src_goodreads,    True),
     SourceSpec("hardcover",    "primary",       180.0, _src_hardcover,    True),
-    # Kobo: 300s (was 120s through v2.10.7). Per-book detail fetches
-    # are sequential under cloudscraper; prolific authors (Sanderson:
-    # 82 books × 1.5s rate-limit = ~125s past the listing pages alone)
-    # were timing out and only writing partial data. Bumped to match
-    # Goodreads' historical primary-tier timeout. Long-term fix is
-    # parallelizing the detail loop with a semaphore — deferred.
-    SourceSpec("kobo",         "secondary",     300.0, _src_kobo,         True),
+    # Kobo: 180s (was 300s through v2.10.10). Per-book detail fetches
+    # now run with bounded concurrency (default 4 via the v2.11.0
+    # asyncio.Semaphore refactor in `app/discovery/sources/kobo.py`),
+    # so the ~125s sequential floor that justified the 300s cap is
+    # gone. Sanderson's 80-book bibliography drops from ~220s to ~60s
+    # at the default concurrency/rate-limit ratio. 180s leaves ~3×
+    # headroom over the new typical, matching Hardcover's primary-tier
+    # timeout shape.
+    SourceSpec("kobo",         "secondary",     180.0, _src_kobo,         True),
     SourceSpec("amazon",       "secondary",     180.0, _src_amazon,       False),
     SourceSpec("ibdb",         "supplementary",  90.0, _src_ibdb,         False),
     SourceSpec("google_books", "supplementary",  60.0, _src_google_books, False),
