@@ -35,7 +35,44 @@ interface SourceEntry {
   // for them. Defaults true on the primary tier (Goodreads /
   // Hardcover for ebook; Audible / Hardcover for audiobook).
   mandatory: boolean;
+  // v2.11.0 Stage 5++: Amazon-specific config strings that drive
+  // the server-side authorFilters API on /juvec. Null for every
+  // other source.
+  format?: string | null;
+  language?: string | null;
 }
+
+// Amazon Author-Store format options (matches FILTER_TO_BINDING in
+// app/discovery/sources/amazon_widget_parser.py). The internal value
+// is what Amazon's /juvec API accepts; the display label is what the
+// user sees in the dropdown.
+const AMAZON_FORMAT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "kindle", label: "Kindle" },
+  { value: "paperback", label: "Paperback" },
+  { value: "hardcover", label: "Hardcover" },
+  { value: "mass_market", label: "Mass Market Paperback" },
+  { value: "allFormats", label: "All Formats" },
+];
+
+// Amazon Author-Store language options. The static list covers the
+// most common languages Sanderson + other prolific authors expose;
+// rarer languages are still selectable by typing into the input but
+// these are the quick-pick set.
+const AMAZON_LANGUAGE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "English", label: "English" },
+  { value: "Spanish", label: "Spanish" },
+  { value: "German", label: "German" },
+  { value: "French", label: "French" },
+  { value: "Italian", label: "Italian" },
+  { value: "Portuguese", label: "Portuguese" },
+  { value: "Japanese", label: "Japanese" },
+  { value: "ChineseSimplified", label: "Chinese (Simplified)" },
+  { value: "ChineseTraditional", label: "Chinese (Traditional)" },
+  { value: "Russian", label: "Russian" },
+  { value: "Polish", label: "Polish" },
+  { value: "Turkish", label: "Turkish" },
+  { value: "All Languages", label: "All Languages" },
+];
 
 interface PriorityLists {
   ebook: string[];
@@ -232,7 +269,7 @@ function SourceList({ tab, draft, setDraft, known }: {
     ...availableNames.filter(n => !priority.includes(n)),
   ];
 
-  function setToggle(name: string, key: keyof SourceEntry, value: boolean | number) {
+  function setToggle(name: string, key: keyof SourceEntry, value: boolean | number | string) {
     const entry = draft.sources[name];
     if (!entry) return;
     const next: SourceEntry = { ...entry, [key]: value };
@@ -300,16 +337,17 @@ function SourceList({ tab, draft, setDraft, known }: {
         // with MAM.
         const canUp = !locked && i > 1;
         const canDown = !locked && i < ordered.length - 1;
+        const showAmazonExtras = name === "amazon" && tab === "ebook";
         return (
+          <div key={name}>
           <div
-            key={name}
             style={{
               display: "grid",
               gridTemplateColumns: "24px 24px 1fr 80px 80px 90px 110px",
               alignItems: "center",
               gap: "8px 12px",
               padding: "8px 4px",
-              borderBottom: `1px solid ${t.borderL}`,
+              borderBottom: showAmazonExtras ? "none" : `1px solid ${t.borderL}`,
               background: locked ? t.bg3 : "transparent",
             }}
           >
@@ -428,8 +466,81 @@ function SourceList({ tab, draft, setDraft, known }: {
               />
             </div>
           </div>
+          {showAmazonExtras && (
+            <AmazonExtrasRow
+              entry={entry}
+              onChange={(key, value) => setToggle(name, key, value)}
+            />
+          )}
+          </div>
         );
       })}
+    </div>
+  );
+}
+
+// ─── Amazon-specific sub-row ────────────────────────────────────
+//
+// Renders directly below the Amazon row in the Ebook tab. Lets the
+// user pick which format + language Amazon's `/juvec` server-side
+// filter API returns. These map onto `metadata_sources.amazon.format`
+// and `.language` and round-trip through the same PUT /v1/metadata-
+// sources endpoint as the rest of the panel.
+//
+// Why a sub-row instead of two more columns: format/language are
+// Amazon-only — adding them as grid columns would force every other
+// row to render placeholder cells. A sub-row keeps the grid clean.
+
+function AmazonExtrasRow({
+  entry, onChange,
+}: {
+  entry: SourceEntry;
+  onChange: (key: keyof SourceEntry, value: string) => void;
+}) {
+  const t = useTheme();
+  return (
+    <div style={{
+      display: "flex", gap: 24, alignItems: "center",
+      padding: "8px 4px 12px 60px",  // indent under the rank column
+      borderBottom: `1px solid ${t.borderL}`,
+      fontSize: 12,
+    }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ color: t.textDim, fontWeight: 600 }}>Format</span>
+        <select
+          value={entry.format ?? "kindle"}
+          onChange={e => onChange("format", e.target.value)}
+          style={{
+            padding: "4px 8px", borderRadius: 6,
+            border: `1px solid ${t.border}`, background: t.inp,
+            color: t.text2, fontSize: 12, outline: "none",
+          }}
+        >
+          {AMAZON_FORMAT_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ color: t.textDim, fontWeight: 600 }}>Language</span>
+        <select
+          value={entry.language ?? "English"}
+          onChange={e => onChange("language", e.target.value)}
+          style={{
+            padding: "4px 8px", borderRadius: 6,
+            border: `1px solid ${t.border}`, background: t.inp,
+            color: t.text2, fontSize: 12, outline: "none",
+          }}
+        >
+          {AMAZON_LANGUAGE_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </label>
+      <span style={{ color: t.textDim, fontSize: 11, fontStyle: "italic" }}>
+        Drives Amazon's Author Store filter — only books matching
+        format + language are returned.
+      </span>
     </div>
   );
 }

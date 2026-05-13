@@ -52,6 +52,12 @@ class SourceEntry(BaseModel):
     # entries decay safely; the migration seeds the right per-source
     # default at install time.
     mandatory: bool = False
+    # v2.11.0 Stage 5++ — Amazon-specific config strings that drive
+    # the server-side authorFilters API on /juvec. Other sources
+    # leave these None. The frontend renders dropdowns for the
+    # Amazon row only.
+    format: str | None = None
+    language: str | None = None
 
 
 class PriorityLists(BaseModel):
@@ -123,6 +129,10 @@ def _state_from_settings(settings: dict) -> MetadataSourcesState:
                 # to the panel — UI shows the user the value the
                 # backend would actually use, not always-False.
                 mandatory=is_source_mandatory(settings, name),
+                # Amazon-specific. Read with defaults so pre-Stage-5++
+                # entries surface the ship-defaults to the panel.
+                format=entry.get("format") if name == "amazon" else None,
+                language=entry.get("language") if name == "amazon" else None,
             )
         except Exception:
             _log.exception(
