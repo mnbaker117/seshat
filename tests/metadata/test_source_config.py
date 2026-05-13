@@ -46,7 +46,10 @@ class TestMigration:
     def test_legacy_priority_preserved(self):
         """When the legacy priority list is populated, migration
         preserves its order — MAM gets prepended if absent.
-        Retired source names (audnexus) are scrubbed."""
+        Retired source names (audnexus) are scrubbed. Per v2.10.8,
+        any KNOWN_SOURCES not represented in the legacy list get
+        appended at the END (so the user-curated head order stays
+        intact)."""
         settings = {
             "metadata_provider_priority": ["goodreads", "hardcover", "amazon"],
             # Legacy list that includes the retired audnexus entry —
@@ -54,12 +57,21 @@ class TestMigration:
             "metadata_audiobook_priority": ["audible", "audnexus", "hardcover"],
         }
         migrate_legacy_settings(settings)
-        assert settings["metadata_priority"]["ebook"] == [
+        # User's head order is preserved.
+        assert settings["metadata_priority"]["ebook"][:4] == [
             "mam", "goodreads", "hardcover", "amazon",
         ]
-        assert settings["metadata_priority"]["audiobook"] == [
+        assert settings["metadata_priority"]["audiobook"][:3] == [
             "mam", "audible", "hardcover",
         ]
+        # Backfill appended the rest of KNOWN_SOURCES at the tail.
+        # Order doesn't matter; presence does.
+        ebook_tail = set(settings["metadata_priority"]["ebook"][4:])
+        assert "kobo" in ebook_tail
+        assert "openlibrary" in ebook_tail
+        # Retired entries never come back.
+        assert "audnexus" not in settings["metadata_priority"]["ebook"]
+        assert "audnexus" not in settings["metadata_priority"]["audiobook"]
 
     def test_legacy_enabled_flags_respected(self):
         """`<name>_enabled` → per-source scan toggles honour availability."""
@@ -123,12 +135,124 @@ class TestMigration:
         assert settings["metadata_sources"]["kobo"]["rate_limit"] == 3.0
 
     def test_idempotent_when_already_migrated(self):
-        """Running twice is a no-op."""
+        """Running twice is a no-op (legacy migration AND backfill
+        both stay quiet on the second pass)."""
         settings: dict = {}
         assert migrate_legacy_settings(settings) is True
         snapshot_sources = dict(settings["metadata_sources"])
         assert migrate_legacy_settings(settings) is False
         assert settings["metadata_sources"] == snapshot_sources
+
+    def test_backfill_adds_new_known_source_to_existing_install(self):
+        """v2.10.8 — when a new source is added to KNOWN_SOURCES (e.g.
+        openlibrary in v2.10.6), upgraded installs whose persisted
+        settings predate that addition should pick it up automatically
+        on the next settings load. Pre-v2.10.8 the migration's
+        idempotent-skip path returned False without backfilling, so
+        new sources stayed dead-weight on every existing install."""
+        # Reproduce a v2.10.5-era settings dict — fully migrated, but
+        # missing `openlibrary` (which didn't exist yet at the time).
+        settings = {
+            "metadata_sources": {
+                name: {
+                    "ebook_enrich": True, "ebook_scan": True,
+                    "audiobook_enrich": False, "audiobook_scan": False,
+                    "mandatory": False, "rate_limit": 1.0,
+                }
+                for name in KNOWN_SOURCES
+                if name != "openlibrary"
+            },
+            "metadata_priority": {
+                "ebook": [n for n in KNOWN_SOURCES if n != "openlibrary"],
+                "audiobook": ["mam", "audible", "hardcover"],
+            },
+        }
+        assert "openlibrary" not in settings["metadata_sources"]
+
+        ran = migrate_legacy_settings(settings)
+        assert ran is True, "backfill must signal that something changed"
+
+        # New source is in metadata_sources with sane defaults.
+        assert "openlibrary" in settings["metadata_sources"]
+        ol = settings["metadata_sources"]["openlibrary"]
+        assert ol["rate_limit"] > 0  # picked up KNOWN_SOURCES default_rate
+        assert "ebook_enrich" in ol  # filled from _DEFAULT_NEW_INSTALL_STATE
+
+        # And appended to both priority lists (since it's available
+        # for both content types per KNOWN_SOURCES["openlibrary"]).
+        assert "openlibrary" in settings["metadata_priority"]["ebook"]
+        assert "openlibrary" in settings["metadata_priority"]["audiobook"]
+
+    def test_backfill_idempotent(self):
+        """Once the backfill has run, re-running migration should
+        return False (no second-write side effects)."""
+        settings = {
+            "metadata_sources": {
+                name: {
+                    "ebook_enrich": True, "ebook_scan": True,
+                    "audiobook_enrich": False, "audiobook_scan": False,
+                    "mandatory": False, "rate_limit": 1.0,
+                }
+                for name in KNOWN_SOURCES
+                if name != "openlibrary"
+            },
+            "metadata_priority": {
+                "ebook": [n for n in KNOWN_SOURCES if n != "openlibrary"],
+                "audiobook": ["mam"],
+            },
+        }
+        # First call backfills.
+        assert migrate_legacy_settings(settings) is True
+        snapshot = {k: dict(v) for k, v in settings["metadata_sources"].items()}
+        # Second call should be a no-op.
+        assert migrate_legacy_settings(settings) is False
+        assert settings["metadata_sources"] == snapshot
+
+    def test_backfill_preserves_user_curated_priority_order(self):
+        """Backfill appends new sources at the END of priority lists —
+        never reshuffles user's existing curation."""
+        custom_order = ["hardcover", "mam", "amazon"]  # user moved Hardcover above MAM
+        settings = {
+            "metadata_sources": {
+                name: {
+                    "ebook_enrich": True, "ebook_scan": True,
+                    "audiobook_enrich": False, "audiobook_scan": False,
+                    "mandatory": False, "rate_limit": 1.0,
+                }
+                for name in custom_order
+            },
+            "metadata_priority": {
+                "ebook": custom_order.copy(),
+                "audiobook": ["audible"],
+            },
+        }
+        migrate_legacy_settings(settings)
+        # User's first 3 entries kept in order at the front.
+        assert settings["metadata_priority"]["ebook"][:3] == custom_order
+        # New sources appended to the tail, not interleaved.
+        assert "openlibrary" in settings["metadata_priority"]["ebook"]
+        assert settings["metadata_priority"]["ebook"].index("openlibrary") >= 3
+
+    def test_backfill_does_not_add_audiobook_only_source_to_ebook_priority(self):
+        """Audible is audiobook-only per KNOWN_SOURCES.available_for —
+        backfill shouldn't append it to the ebook priority list when
+        an existing install is missing it from there."""
+        settings = {
+            "metadata_sources": {
+                "mam": {
+                    "ebook_enrich": True, "ebook_scan": True,
+                    "audiobook_enrich": True, "audiobook_scan": True,
+                    "mandatory": False, "rate_limit": 2.0,
+                },
+            },
+            "metadata_priority": {
+                "ebook": ["mam"],
+                "audiobook": ["mam"],
+            },
+        }
+        migrate_legacy_settings(settings)
+        assert "audible" not in settings["metadata_priority"]["ebook"]
+        assert "audible" in settings["metadata_priority"]["audiobook"]
 
     def test_retired_sources_scrubbed_from_existing_settings(self):
         """Settings.json from an older build that still carries

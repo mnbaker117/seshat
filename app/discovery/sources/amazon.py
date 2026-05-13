@@ -183,6 +183,20 @@ class AmazonSource(BaseSource):
             return None
 
         if status == 200:
+            # Suspicious-thin-200 warning. A real Amazon search results
+            # page is ~1MB+; a real product detail page is ~500KB+. A
+            # 200 with a sub-50KB body usually means Amazon served us
+            # a soft-block / minimal interstitial that doesn't trip our
+            # CAPTCHA markers (common during heavy session activity).
+            # Surfaces the case so operators can correlate "amazon: no
+            # search results" with actual upstream weirdness instead of
+            # silently shrugging it off.
+            if len(body) < 50_000:
+                logger.warning(
+                    f"  amazon: 200 OK with suspiciously small body "
+                    f"({len(body)} bytes) for {url} — probable silent "
+                    f"soft-block or layout shift; results will be empty"
+                )
             return body
 
         # Robot-check 503 — soft-block, no retry.

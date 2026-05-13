@@ -132,21 +132,26 @@ _DEFAULT_AUDIOBOOK_PRIORITY: list[str] = [
 def migrate_legacy_settings(settings: dict) -> bool:
     """Populate `metadata_sources` + `metadata_priority` from legacy keys.
 
-    Mutates `settings` in-place. Returns True when a migration ran,
-    False when the new shape was already populated (idempotent no-op).
+    Mutates `settings` in-place. Returns True when a migration ran or
+    a new-source backfill ran, False when nothing needed doing.
 
-    Migration sources:
-      * `metadata_provider_priority`  — priority order for ebook
-      * `metadata_audiobook_priority` — priority order for audiobook
-      * `goodreads_enabled` / `hardcover_enabled` / `kobo_enabled` /
-        `amazon_enabled` / `ibdb_enabled` / `google_books_enabled` /
-        `audible_enabled`  — discovery-side scan toggles
-      * `rate_goodreads` / `rate_hardcover` / `rate_kobo` /
-        `rate_amazon` / `rate_ibdb` / `rate_google_books` /
-        `rate_audible` / `rate_mam`  — per-source rate limits
+    Two distinct passes:
 
-    On fresh install (all legacy keys empty/missing), seeds sensible
-    ship-with defaults from `_DEFAULT_NEW_INSTALL_STATE`.
+    1. **Legacy migration** — runs once per install, when the old
+       per-source flat keys (`goodreads_enabled`, `rate_hardcover`,
+       `metadata_provider_priority`, etc.) need rolling up into the
+       unified `metadata_sources` + `metadata_priority` shape.
+
+    2. **New-source backfill** — runs every time settings load. Adds
+       any source that's been added to `KNOWN_SOURCES` since the
+       install was last upgraded but isn't present in the persisted
+       `metadata_sources` dict. Without this pass, sources added in
+       new releases (e.g. `openlibrary` in v2.10.6) would silently
+       never run for upgraded installs because the discovery scanner
+       filters by per-source toggles in `metadata_sources`.
+
+    On fresh install (all legacy keys empty/missing), the legacy
+    migration seeds defaults from `_DEFAULT_NEW_INSTALL_STATE`.
     """
     # Retired-source scrub: `audnexus` was briefly exposed as a
     # standalone toggleable source in v1.4.0. It has no title/author
@@ -160,38 +165,110 @@ def migrate_legacy_settings(settings: dict) -> bool:
     existing_sources = settings.get("metadata_sources") or {}
     existing_priority = settings.get("metadata_priority") or {}
 
-    # Already migrated — new shape has entries AND at least one
-    # priority list is populated. Nothing to do.
     has_sources = bool(existing_sources)
     has_priority = bool(
         (existing_priority.get("ebook") or [])
         or (existing_priority.get("audiobook") or [])
     )
-    if has_sources and has_priority:
-        return False
 
-    ebook_priority = _derive_priority_list(
-        settings, "metadata_provider_priority", _DEFAULT_EBOOK_PRIORITY,
-    )
-    audiobook_priority = _derive_priority_list(
-        settings, "metadata_audiobook_priority", _DEFAULT_AUDIOBOOK_PRIORITY,
-    )
+    # ── Pass 1: legacy migration (runs once per install) ──
+    legacy_ran = False
+    if not (has_sources and has_priority):
+        ebook_priority = _derive_priority_list(
+            settings, "metadata_provider_priority", _DEFAULT_EBOOK_PRIORITY,
+        )
+        audiobook_priority = _derive_priority_list(
+            settings, "metadata_audiobook_priority", _DEFAULT_AUDIOBOOK_PRIORITY,
+        )
 
-    sources: dict[str, dict[str, Any]] = {}
+        sources: dict[str, dict[str, Any]] = {}
+        for name, meta in KNOWN_SOURCES.items():
+            sources[name] = _build_source_entry(name, meta, settings)
+
+        settings["metadata_sources"] = sources
+        settings["metadata_priority"] = {
+            "ebook": ebook_priority,
+            "audiobook": audiobook_priority,
+        }
+        _log.info(
+            "metadata sources migrated: %d sources, ebook priority=%d, "
+            "audiobook priority=%d",
+            len(sources), len(ebook_priority), len(audiobook_priority),
+        )
+        legacy_ran = True
+
+    # ── Pass 2: new-source backfill (runs every load) ──
+    backfill_ran = _backfill_known_sources(settings)
+
+    return legacy_ran or backfill_ran
+
+
+def _backfill_known_sources(settings: dict) -> bool:
+    """Add any KNOWN_SOURCES entry / priority slot missing from settings.
+
+    Idempotent — silently no-ops when settings already contain every
+    known source. Mutates `settings` in-place; returns True iff any
+    additions were made.
+
+    Per-source toggle defaults come from `_DEFAULT_NEW_INSTALL_STATE`
+    (falling back to "all off + non-mandatory" if that dict ever
+    misses an entry — defensive, shouldn't fire in practice).
+    Per-source rate limits come from `KNOWN_SOURCES[name].default_rate`.
+
+    Priority slots are appended at the end of each list (lowest tier)
+    so the existing user-curated order isn't disturbed. Power-user
+    operators reorder via the Settings → Sources panel after the
+    new source first appears.
+    """
+    sources = settings.setdefault("metadata_sources", {})
+    priority = settings.setdefault(
+        "metadata_priority", {"ebook": [], "audiobook": []},
+    )
+    priority.setdefault("ebook", [])
+    priority.setdefault("audiobook", [])
+
+    added_sources: list[str] = []
     for name, meta in KNOWN_SOURCES.items():
-        sources[name] = _build_source_entry(name, meta, settings)
+        if name in sources:
+            continue
+        defaults = _DEFAULT_NEW_INSTALL_STATE.get(name) or {
+            "ebook_enrich": False, "ebook_scan": False,
+            "audiobook_enrich": False, "audiobook_scan": False,
+            "mandatory": False,
+        }
+        sources[name] = {
+            **defaults,
+            "rate_limit": meta.get("default_rate", 1.0),
+        }
+        added_sources.append(name)
 
-    settings["metadata_sources"] = sources
-    settings["metadata_priority"] = {
-        "ebook": ebook_priority,
-        "audiobook": audiobook_priority,
-    }
-    _log.info(
-        "metadata sources migrated: %d sources, ebook priority=%d, "
-        "audiobook priority=%d",
-        len(sources), len(ebook_priority), len(audiobook_priority),
-    )
-    return True
+    added_priority: list[tuple[str, str]] = []  # (list_name, source_name)
+    for source_name in _DEFAULT_EBOOK_PRIORITY:
+        if source_name in priority["ebook"]:
+            continue
+        if source_name in KNOWN_SOURCES and "ebook" in (
+            KNOWN_SOURCES[source_name].get("available_for") or ()
+        ):
+            priority["ebook"].append(source_name)
+            added_priority.append(("ebook", source_name))
+    for source_name in _DEFAULT_AUDIOBOOK_PRIORITY:
+        if source_name in priority["audiobook"]:
+            continue
+        if source_name in KNOWN_SOURCES and "audiobook" in (
+            KNOWN_SOURCES[source_name].get("available_for") or ()
+        ):
+            priority["audiobook"].append(source_name)
+            added_priority.append(("audiobook", source_name))
+
+    if added_sources or added_priority:
+        _log.info(
+            "metadata-sources backfill: added %d source toggle(s)=%r, "
+            "%d priority slot(s)=%r",
+            len(added_sources), added_sources,
+            len(added_priority), added_priority,
+        )
+        return True
+    return False
 
 
 # Sources that were once registered as user-facing toggles but have

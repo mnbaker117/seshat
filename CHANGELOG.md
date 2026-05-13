@@ -7,6 +7,89 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.10.8] — 2026-05-13
+
+Three issues surfaced during the v2.10.7 Sanderson UAT scan, all
+fixed in one bundle. Without these the Open Library source shipped
+in v2.10.6 never actually ran for upgraded installs.
+
+### Fixed — New sources not picked up by upgraded installs
+
+`migrate_legacy_settings` had an idempotent-skip gate that returned
+early once `metadata_sources` + `metadata_priority` were both
+populated. That gate fires the first time settings are loaded after
+a v2.10.x install, and never re-runs — so any source added in a
+later release (e.g. `openlibrary` in v2.10.6) silently never
+appears in the persisted settings dict, and the discovery scanner
+filters it out of every scan.
+
+**Fix:** new `_backfill_known_sources` pass that runs UNCONDITIONALLY
+on every settings load (after the legacy migration's exit gate).
+For each name in `KNOWN_SOURCES` not already in
+`settings["metadata_sources"]`, adds an entry from
+`_DEFAULT_NEW_INSTALL_STATE` + the `KNOWN_SOURCES[name].default_rate`
+rate. For each priority list slot missing the source (and where the
+source's `available_for` includes that content type), appends at the
+END so user-curated head order is preserved.
+
+Mark's specific symptom: Sanderson rescan showed 0 contribution
+from Open Library because it wasn't in his `metadata_sources` dict
+at all. Verified post-fix that the backfill adds it with the
+shipped defaults.
+
+### Added — Amazon thin-200 body warning
+
+When Amazon returns a 200 OK with a body under 50KB on what should
+be a search results page (~1MB+ in normal operation), it's almost
+always a silent soft-block or layout shift — not a CAPTCHA page our
+existing detector would catch. Pre-v2.10.8 we returned the body and
+parsed 0 ASINs without any log signal, leaving operators puzzled
+about why "amazon: no search results" fired for an author who
+clearly has thousands of Amazon hits (Brandon Sanderson, etc.).
+
+`app/discovery/sources/amazon.py:_fetch` now logs a WARNING when
+the 200 body is suspiciously thin, so the case is visible in
+container logs without turning on debug mode.
+
+### Fixed — Kobo timed out on prolific authors
+
+Kobo's per-source timeout was 120s through v2.10.7. The Sanderson
+UAT scan timed out at exactly 120s with `keeping any partial
+writes, moving on` — Kobo's per-book detail-fetch loop is sequential
+under cloudscraper and 82 books × 1.5s rate-limit alone exceeds
+that budget.
+
+Bumped Kobo's `timeout_sec` to 300s (matching Goodreads' historical
+primary-tier timeout). Long-term fix is parallelizing the detail
+loop with a semaphore — deferred to v2.11.x.
+
+### Tests
+
+- `tests/metadata/test_source_config.py` — 4 new cases for the
+  backfill (adds new known source to existing install, idempotent,
+  preserves user-curated head order, doesn't add audiobook-only
+  source to ebook priority).
+- `tests/metadata/test_source_config.py::test_legacy_priority_preserved`
+  updated to assert head-order preservation + tail backfill (was
+  asserting the legacy list stayed exact, which the v2.10.8 backfill
+  legitimately changes).
+- `tests/discovery/sources/test_amazon_hardening.py` — 2 new cases
+  for the thin-body warning (fires under 50KB, doesn't fire above).
+
+Suite: **2267 passing, 7 skipped** (+6 from v2.10.7's 2261).
+
+### How to verify the upgrade picked up Open Library
+
+Run any author rescan after upgrading. The first scan triggers the
+backfill, and you should see Open Library appear in the per-source
+log lines. Pre-v2.10.8 it never fired; post-v2.10.8 it does.
+
+Persisted settings get the new source added on the next save —
+either an explicit Settings UI write or the next implicit save
+the dispatcher does after a scan completes.
+
+---
+
 ## [2.10.7] — 2026-05-13
 
 Phase 3 of the v2.11.0 metadata-source overhaul: wires the Google

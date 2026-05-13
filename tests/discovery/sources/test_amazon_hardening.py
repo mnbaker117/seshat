@@ -261,6 +261,49 @@ class TestFetchHardening:
         )
         await src.close()
 
+    async def test_thin_200_body_logs_warning(self, monkeypatch, caplog):
+        """v2.10.8 — a 200 with sub-50KB body is suspicious because
+        real Amazon search/detail pages are 500KB+. Log a WARNING so
+        operators can correlate "amazon: no results" with actual
+        upstream weirdness instead of silently shrugging it off."""
+        import logging
+        _patch_sleep(monkeypatch)
+        src = AmazonSource(rate_limit=0)
+        # 5 KB body — well under the 50 KB threshold, but no CAPTCHA
+        # marker in the content so the existing detector won't fire.
+        thin_body = b"<html><body>" + b"x" * 5000 + b"</body></html>"
+        _patch_get(src, [httpx.Response(200, content=thin_body)])
+
+        with caplog.at_level(logging.WARNING, logger="seshat.discovery.amazon"):
+            body = await src._fetch("https://www.amazon.com/s")
+
+        assert body is not None  # not a hard error — body is returned
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("suspiciously small body" in r.message for r in warnings), (
+            f"expected thin-body WARNING; got: {[r.message for r in warnings]}"
+        )
+        await src.close()
+
+    async def test_normal_size_200_no_warning(self, monkeypatch, caplog):
+        """A normal-sized response should NOT trigger the thin-body
+        warning — only the suspicious sub-50KB ones."""
+        import logging
+        _patch_sleep(monkeypatch)
+        src = AmazonSource(rate_limit=0)
+        # 100 KB body — comfortably above the threshold.
+        normal_body = b"<html><body>" + b"x" * 100_000 + b"</body></html>"
+        _patch_get(src, [httpx.Response(200, content=normal_body)])
+
+        with caplog.at_level(logging.WARNING, logger="seshat.discovery.amazon"):
+            await src._fetch("https://www.amazon.com/s")
+
+        warnings = [r for r in caplog.records if "suspiciously small" in r.message]
+        assert warnings == [], (
+            f"thin-body warning fired on a normal-sized response: "
+            f"{[r.message for r in warnings]}"
+        )
+        await src.close()
+
     async def test_network_error_returns_none(self, monkeypatch):
         _patch_sleep(monkeypatch)
         src = AmazonSource(rate_limit=0)
