@@ -30,8 +30,15 @@ etc.
 import asyncio, logging, re, json
 from datetime import datetime
 from typing import Optional
+import httpx
 from bs4 import BeautifulSoup
 from app.discovery.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
+# v2.13.0 — Goodreads HTTP plumbing centralized for Cloudflare bypass.
+# `_get` override below routes every goodreads.com fetch through this
+# module so TLS impersonation + soft-block detection + runtime-state
+# flag writes happen uniformly across the metadata + discovery sources
+# + resolver + URL importer.
+from app.metadata import goodreads_session as _gr_session
 
 logger = logging.getLogger("seshat.discovery.goodreads")
 BASE = "https://www.goodreads.com"
@@ -103,21 +110,11 @@ def _series_from_title_paren(title: str) -> tuple[Optional[str], Optional[float]
     return (name or None), idx
 
 
-def _is_cloudflare_soft_block(resp) -> bool:
-    """Detect Cloudflare's 202-with-empty-body interstitial on Goodreads.
-
-    Distinguishes "Goodreads doesn't have this content" (404 / proper
-    HTML) from "Cloudflare is gating us" (202 / empty 2xx). Used by
-    the `/author/list/{id}` and `/book/show/{id}` fetches in this
-    source so future cookie-refresh diagnostics aren't muddled.
-    """
-    if resp is None:
-        return False
-    if resp.status_code == 202:
-        return True
-    if 200 <= resp.status_code < 300 and not (resp.content or b""):
-        return True
-    return False
+# v2.13.0 — soft-block detection consolidated into
+# `app.metadata.goodreads_session`. Re-export under the original name
+# so existing tests (test_goodreads_search.py imports
+# `_is_cloudflare_soft_block` from this module) keep working.
+_is_cloudflare_soft_block = _gr_session.is_cloudflare_soft_block
 
 
 class GoodreadsSource(BaseSource):
@@ -126,7 +123,7 @@ class GoodreadsSource(BaseSource):
     default_timeout = 60.0
     # follow_redirects=True is the base default
 
-    def __init__(self, rate_limit: float = 2.0):
+    def __init__(self, rate_limit: float = 5.0):
         super().__init__(rate_limit=rate_limit)
         # Resume-from-position state for the v1.2 retry feature.
         # Populated after each book's detail page is merged into the
@@ -142,7 +139,103 @@ class GoodreadsSource(BaseSource):
         # the remainder. Per-source-instance (not global) so pen-name
         # linked pairs or concurrent scans don't cross-contaminate.
         self._partial_state: Optional[dict] = None
-    # No custom _get — base provides it
+
+    async def _get(self, url: str, retries: int = 2, **kwargs):
+        """Override base `_get` to route through `goodreads_session`.
+
+        v2.13.0 Stage 6 Phase A: every goodreads.com fetch from the
+        discovery source goes through `goodreads_session.get_session()`
+        so Cloudflare TLS-fingerprint bypass (curl_cffi chrome120) +
+        soft-block detection + runtime-state flag writes happen
+        uniformly across all callers.
+
+        Differences from the base implementation:
+          - Rate limit + jitter live in `goodreads_session` (single
+            source of truth). The base's `self.rate_limit` is still
+            honored — `get_session()` reads it on first call.
+          - Soft-block (HTTP 202 / empty 2xx body) raises
+            `httpx.HTTPStatusError` so the existing broad
+            `except Exception` handlers in `_get_book_details` and
+            `get_author_books` treat it as a fetch failure (skip
+            this book / move on to the next source). Soft-blocks
+            are NEVER retried — the design hard-stops on 202.
+          - Non-2xx HTTP errors raise the same way, replacing the
+            base's `resp.raise_for_status()`.
+          - `retries` is honored for transport-level exceptions
+            (genuine network failures), not for soft-blocks or 4xx
+            HTTP errors which are terminal.
+
+        Test escape hatch: tests that set `self._client` directly
+        (the legacy injection pattern in test_goodreads_search.py)
+        bypass the session module entirely and use the injected
+        client. This preserves the existing regression test suite
+        without forcing every test to learn the new singleton.
+        """
+        # Test path: when a test has set self._client manually, use it.
+        # The httpx.AsyncClient.get() shape is the same, and tests don't
+        # need the rate-limit / state-flag behavior we add for prod.
+        if self._client is not None:
+            for attempt in range(retries + 1):
+                try:
+                    resp = await self._client.get(url, **kwargs)
+                    resp.raise_for_status()
+                    return resp
+                except Exception as e:
+                    if attempt < retries:
+                        backoff = min(3 * (2 ** attempt), 12)
+                        self.logger.debug(
+                            f"  {self.name}: attempt {attempt+1}/{retries+1} failed "
+                            f"for {url}: {e} — retrying in {backoff}s"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    raise
+
+        # Production path: route through the central goodreads_session.
+        session = await _gr_session.get_session(rate_limit=self.rate_limit)
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                resp = await session.get(url, **kwargs)
+            except Exception as e:
+                last_exc = e
+                if attempt < retries:
+                    backoff = min(3 * (2 ** attempt), 12)
+                    self.logger.debug(
+                        f"  {self.name}: transport error attempt "
+                        f"{attempt+1}/{retries+1} for {url}: {e} — "
+                        f"retrying in {backoff}s"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
+            # Soft-block — hard stop, NEVER retry. Surfaced as an
+            # HTTPStatusError so existing exception handlers in this
+            # file catch it uniformly.
+            if _gr_session.is_cloudflare_soft_block(resp):
+                self.logger.warning(
+                    f"  {self.name}: Cloudflare soft-block on {url} "
+                    f"(status={resp.status_code}) — session state flipped "
+                    f"to soft_blocked, refresh credentials or wait for "
+                    f"the canary to clear"
+                )
+                raise httpx.HTTPStatusError(
+                    f"Cloudflare soft-block (status={resp.status_code})",
+                    request=httpx.Request("GET", url),
+                    response=httpx.Response(resp.status_code),
+                )
+            status = getattr(resp, "status_code", None)
+            if status is None or status >= 400:
+                raise httpx.HTTPStatusError(
+                    f"HTTP {status} for {url}",
+                    request=httpx.Request("GET", url),
+                    response=httpx.Response(status or 0),
+                )
+            return resp
+        # Loop exhausted without success or raise — fall through
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"discovery goodreads: unreachable retry loop for {url}")
 
     async def _get_book_details(self, book_id: str, title: str) -> dict:
         """Visit individual book page to get full details."""

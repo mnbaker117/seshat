@@ -145,7 +145,16 @@ async def _tier1_auto_complete(
     The endpoint is NOT in robots.txt's `*` Disallow list. Identifier-
     based (not free-text), so it doesn't conflict with the `/search`
     rule we're avoiding.
+
+    v2.13.0: still uses httpx (auto_complete is a single-shot JSON
+    probe, not the heavy HTML burst surface that needs curl_cffi
+    chrome120 impersonation). Detection + runtime-state flag write
+    routed through `app.metadata.goodreads_session` so the dispatcher
+    skip + Settings status card see the same signal whether the 202
+    came from this tier or from the heavy HTML fetchers.
     """
+    from app.metadata import goodreads_session  # avoid circular import at module load
+
     try:
         resp = await client.get(_GOODREADS_AUTO_COMPLETE + identifier)
     except Exception as e:
@@ -155,12 +164,11 @@ async def _tier1_auto_complete(
     # Cloudflare soft-block: 202 with empty body. Surface as a distinct
     # signal so callers can distinguish "Goodreads doesn't know this
     # book" from "Goodreads is blocking us at the network layer."
-    if resp.status_code == 202 or (
-        resp.status_code == 200 and not resp.content
-    ):
+    if goodreads_session.is_cloudflare_soft_block(resp):
+        goodreads_session.mark_soft_blocked(last_status=resp.status_code)
         _log.info(
             "resolver: tier1 auto_complete soft-blocked (status=%d, "
-            "empty body) — Goodreads cookies likely need refresh",
+            "empty body) — Goodreads session state flipped to soft_blocked",
             resp.status_code,
         )
         return "_soft_blocked"

@@ -120,28 +120,29 @@ async def _fetch_goodreads_book(book_id: str) -> dict:
     `/search` endpoint that's disallowed for `*` user-agents) so
     this user-initiated paste-URL import path is policy-clean.
 
-    Detects Cloudflare's 202-with-empty-body soft-block and surfaces
-    a 503 with a clear message pointing the user at Hardcover —
-    avoids the silent "no metadata extracted" failure mode where
-    the page parsing chugs through empty markup and returns an
-    empty record.
+    v2.13.0 Stage 6 Phase A: routes through `app.metadata.goodreads_session`
+    so curl_cffi Chrome120 TLS impersonation + uniform soft-block
+    detection + runtime-state flag write all happen here too. Soft-blocks
+    surface as 503 with the existing user-facing message.
     """
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}
-    async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as client:
-        r = await client.get(f"https://www.goodreads.com/book/show/{book_id}")
-        if r.status_code == 202 or (200 <= r.status_code < 300 and not (r.content or b"")):
-            logger.info(
-                "Goodreads paste-URL import: soft-blocked at network layer "
-                "(status=%d, empty=%s) for book_id=%s",
-                r.status_code, not bool(r.content), book_id,
-            )
-            raise HTTPException(
-                503,
-                "Goodreads is currently soft-blocking this server's IP "
-                "(Cloudflare gate). Try again in a few minutes, or paste "
-                "a Hardcover URL instead.",
-            )
-        r.raise_for_status()
+    from app.metadata import goodreads_session
+
+    session = await goodreads_session.get_session()
+    r = await session.get(f"https://www.goodreads.com/book/show/{book_id}")
+    if goodreads_session.is_cloudflare_soft_block(r):
+        logger.info(
+            "Goodreads paste-URL import: soft-blocked at network layer "
+            "(status=%d, empty=%s) for book_id=%s",
+            r.status_code, not bool(r.content), book_id,
+        )
+        raise HTTPException(
+            503,
+            "Goodreads is currently soft-blocking this server's IP "
+            "(Cloudflare gate). Try again in a few minutes, or paste "
+            "a Hardcover URL instead.",
+        )
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, f"Goodreads returned {r.status_code}")
     soup = BeautifulSoup(r.text, "lxml")
     result = {"goodreads_id": book_id, "source": "goodreads", "source_url": json.dumps({"goodreads": f"https://www.goodreads.com/book/show/{book_id}"})}
     title_el = soup.find("h1", {"data-testid": "bookTitle"}) or soup.find("h1")
