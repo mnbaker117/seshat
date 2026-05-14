@@ -379,9 +379,11 @@ function DesktopBooksPage({
       );
       // v2.12.0 — gate scan-started toast on r.total > 0; backend
       // returns total=0 with a {message} when nothing matched.
+      // v2.12.1 #3 — plain English with scope label + author-count.
       if ((r.total ?? 0) > 0) {
+        const scopeWord = scope === "audiobook" ? "audiobook" : "ebook";
         toast.info(
-          `Source scan started — ${r.total} authors. Track progress on the Dashboard.`,
+          `Scanning ${scopeWord} sources for ${r.total} author(s). Track progress on the Dashboard.`,
         );
         window.dispatchEvent(new CustomEvent("seshat:scan-started"));
       } else {

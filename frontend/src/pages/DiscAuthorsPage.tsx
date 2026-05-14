@@ -286,7 +286,11 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
         },
       );
       if ((r.total ?? 0) > 0) {
-        toast.info(`Scan started — ${r.total} author(s)`);
+        // v2.12.1 #3 — plain English with scope label.
+        const scopeWord = scope === "audiobook" ? "audiobook" : "ebook";
+        toast.info(
+          `Scanning ${scopeWord} sources for ${r.total} author(s).`,
+        );
         window.dispatchEvent(new CustomEvent("seshat:scan-started"));
       } else {
         toast.warn(r.message || "Nothing to scan — no matching authors found.");

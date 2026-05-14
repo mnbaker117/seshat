@@ -509,7 +509,10 @@ function DesktopMAMPage({ onNav }: { onNav: NavFn }) {
       if (r.error) {
         toast.error(`Source scan failed: ${r.error}`);
       } else if ((r.total ?? 0) > 0) {
-        toast.info(`${scope === "audiobook" ? "Audiobook" : "Ebook"} scan started for ${r.total} author(s)`);
+        // v2.12.1 #3 — plain English.
+        toast.info(
+          `Scanning ${label} sources for ${r.total} author(s). Track progress on the Dashboard.`,
+        );
         window.dispatchEvent(new CustomEvent("seshat:scan-started"));
         setSel(new Set());
         setSelMode(false);

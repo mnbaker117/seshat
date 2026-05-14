@@ -944,9 +944,27 @@ async def scan_authors_sources(data: dict = Body(...)):
             [l.get("slug") for l in target_libs],
             [(lib.get("slug"), len(rows)) for lib, rows in pre_resolved],
         )
+        # v2.12.1 #3 — name the author(s) so the toast can read them
+        # back to the user. Single-author selections get a fully
+        # personalized message; multi-author selections list up to 3
+        # names then "and N more" to keep the toast compact.
+        if len(names) == 1:
+            msg = (
+                f"No {content_type}-library match for '{names[0]}'. "
+                f"Add this author to a {content_type} library first, "
+                f"or scan the other content type instead."
+            )
+        else:
+            preview = ", ".join(f"'{n}'" for n in names[:3])
+            more = "" if len(names) <= 3 else f" and {len(names) - 3} more"
+            msg = (
+                f"No {content_type}-library match for any of: "
+                f"{preview}{more}."
+            )
         return {"status": "ok", "total": 0,
                 "requested": len(names),
-                "message": "No matching authors in target libraries."}
+                "names": names,
+                "message": msg}
 
     async def _runner():
         from app.discovery.database import set_active_library

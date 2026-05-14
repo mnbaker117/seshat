@@ -719,9 +719,18 @@ function DesktopAuthorDetailPage({
         },
       );
       if ((r.total ?? 0) > 0) {
-        toast.info(`${scope === "audiobook" ? "Audiobook" : "Ebook"} scan started — ${r.total} library iteration(s)`);
+        // v2.12.1 #3 — plain English. Single-library is the common
+        // case; pluralize for >1.
+        const libCount = r.total;
+        const libWord = libCount === 1 ? "library" : "libraries";
+        const authorPart = a?.name ? ` for '${a.name}'` : "";
+        toast.info(
+          `Scanning ${label} sources${authorPart} across ${libCount} ${libWord}.`,
+        );
         window.dispatchEvent(new CustomEvent("seshat:scan-started"));
       } else {
+        // v2.12.1 #3 — backend's `message` already names the author
+        // + suggests a remedy. Frontend just relays it.
         toast.warn(r.message || `No ${label}-library match for this author.`);
         setRef(false);
       }
