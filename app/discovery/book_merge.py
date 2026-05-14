@@ -42,6 +42,10 @@ _IDENTITY_FIELDS = (
     "google_books_id",
     "ibdb_id",
     "audiobookshelf_id",
+    # v2.12.0 — slug companions to *_id for slug-based source URLs.
+    # See BookSidebar idDerivedUrl fallback.
+    "hardcover_slug",
+    "kobo_slug",
     "asin",
     "mam_torrent_id",
     "mam_url",

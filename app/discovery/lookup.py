@@ -165,6 +165,34 @@ def _merge_source_urls(existing_json: str, source_name: str, new_url: str) -> st
     urls[source_name] = new_url
     return json.dumps(urls)
 
+
+# v2.12.0 — slug extractors for sources whose URLs are slug-based.
+# Stored in `books.{source}_slug` so the frontend's BookSidebar
+# badge fallback can reconstruct a working URL from the slug column
+# when the `source_url` JSON dict has been wiped (e.g. via
+# 'Clear Sources'). The numeric/UUID `{source}_id` we already store
+# doesn't round-trip to a URL on its own for these sources.
+_RX_HARDCOVER_SLUG = re.compile(r"hardcover\.app/books/([^/?#]+)", re.IGNORECASE)
+_RX_KOBO_SLUG = re.compile(r"kobo\.com/[^/]+/[^/]+/ebook/([^/?#]+)", re.IGNORECASE)
+
+
+def _extract_source_slug(source_name: str, url: str | None) -> str | None:
+    """Pull the slug from a source-specific URL.
+
+    Returns None for non-slug-based sources, missing URLs, or URLs
+    that don't match the expected pattern. The COALESCE write in the
+    merge layer means returning None leaves any existing slug intact.
+    """
+    if not url:
+        return None
+    if source_name == "hardcover":
+        m = _RX_HARDCOVER_SLUG.search(url)
+        return m.group(1) if m else None
+    if source_name == "kobo":
+        m = _RX_KOBO_SLUG.search(url)
+        return m.group(1) if m else None
+    return None
+
 hardcover = HardcoverSource()
 goodreads = GoodreadsSource()
 kobo = KoboSource()
@@ -1064,6 +1092,16 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 merged = _merge_source_urls(matched_row["source_url"], source_name, bk.source_url)
                 sets.append("source_url=?"); vals.append(merged)
             sets.append(f"{source_name}_id=COALESCE({source_name}_id,?)"); vals.append(bk.external_id)
+            # v2.12.0 — capture slug for sources whose URLs are
+            # slug-based (Hardcover, Kobo). Lets the frontend
+            # BookSidebar's `idDerivedUrl` fallback reconstruct a
+            # working URL when `source_url` JSON is missing. The
+            # numeric/UUID `*_id` we already store doesn't round-trip
+            # to a Hardcover or Kobo URL on its own.
+            _slug = _extract_source_slug(source_name, bk.source_url)
+            if _slug:
+                sets.append(f"{source_name}_slug=COALESCE({source_name}_slug,?)")
+                vals.append(_slug)
             # Series update: fill if empty, or overwrite if current source has higher priority
             if series_id:
                 existing_series = matched_row["series_id"]

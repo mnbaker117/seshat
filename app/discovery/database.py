@@ -130,6 +130,12 @@ CREATE TABLE IF NOT EXISTS books (
     -- enricher fetch the right detail page when the user prefers
     -- hardcover/paperback metadata.
     amazon_format_asins TEXT,
+    -- v2.12.0 — slug columns. Numeric `hardcover_id` / `kobo_id` only
+    -- round-trip to a working URL when paired with the slug; storing
+    -- the slug lets the badge-fallback (BookSidebar idDerivedUrl)
+    -- reconstruct the URL when `source_url` JSON is missing.
+    hardcover_slug TEXT,
+    kobo_slug TEXT,
     mam_url TEXT,
     mam_status TEXT,
     mam_formats TEXT,
@@ -610,6 +616,18 @@ MIGRATIONS = [
     # json.dumps. NULL is fine (older books without an Author-Store
     # scan, or non-Amazon sources).
     "ALTER TABLE books ADD COLUMN amazon_format_asins TEXT",
+    # ── v2.12.0: slug columns for Hardcover + Kobo badge fallback ──
+    # The frontend's BookSidebar derives source URLs from numeric/UUID
+    # *_id columns when `source_url` JSON is missing (Goodreads,
+    # Amazon, Google Books, IBDB all derive cleanly from their IDs).
+    # Hardcover (`hardcover.app/books/{slug}`) and Kobo
+    # (`kobo.com/.../ebook/{slug}`) URLs are slug-based — the *_id
+    # we already store is a numeric Hardcover ID or a Kobo product
+    # ID, neither of which round-trips to a working URL on its own.
+    # Storing the slug alongside the id lets the fallback work for
+    # all four badges instead of just two.
+    "ALTER TABLE books ADD COLUMN hardcover_slug TEXT",
+    "ALTER TABLE books ADD COLUMN kobo_slug TEXT",
 ]
 
 
@@ -1448,6 +1466,9 @@ async def init_db(slug=None):
             ("books", "field_source_map", "TEXT"),
             ("books", "user_edited_fields", "TEXT NOT NULL DEFAULT '[]'"),
             ("books", "amazon_format_asins", "TEXT"),
+            # v2.12.0 — slug columns for badge URL fallback.
+            ("books", "hardcover_slug", "TEXT"),
+            ("books", "kobo_slug", "TEXT"),
         ]
         for table, col, coltype in _ensure_columns:
             try:

@@ -622,11 +622,12 @@ export function BookSidebar({
   // disappear after a data-clear even though the underlying ID
   // links are intact (UAT 2026-05-13 on Hasekura).
   //
-  // Only sources whose stored ID maps cleanly to a canonical URL
-  // are derivable. Hardcover + Kobo URLs use slugs (e.g.
-  // hardcover.app/books/the-way-of-kings) and we only store the
-  // numeric ID, so they can't be derived — badge stays missing,
-  // matching pre-v2.11.1 behaviour.
+  // Sources whose stored ID maps cleanly to a canonical URL fall
+  // back via `idDerivedUrl` below. Sources whose URLs are slug-based
+  // (Hardcover, Kobo) fall back via `slugDerivedUrl` against the
+  // separately-stored `*_slug` column (v2.12.0). Pre-v2.12.0 only
+  // the ID-derivable sources had fallback; HC/Kobo badges
+  // disappeared when source_url JSON was missing.
   const idDerivedUrl: Partial<Record<SourceKey, (id: string) => string>> = {
     goodreads: (id) => `https://www.goodreads.com/book/show/${id}`,
     amazon: (id) => `https://www.amazon.com/dp/${id}`,
@@ -639,8 +640,15 @@ export function BookSidebar({
     amazon: "amazon_id",
     google_books: "google_books_id",
     ibdb: "ibdb_id",
-    hardcover: "hardcover_id",  // present for completeness; no deriver
-    kobo: "kobo_id",
+  };
+  // v2.12.0 — slug-based fallback for Hardcover + Kobo.
+  const slugDerivedUrl: Partial<Record<SourceKey, (slug: string) => string>> = {
+    hardcover: (slug) => `https://hardcover.app/books/${slug}`,
+    kobo: (slug) => `https://www.kobo.com/us/en/ebook/${slug}`,
+  };
+  const slugColumn: Partial<Record<SourceKey, keyof Book>> = {
+    hardcover: "hardcover_slug",
+    kobo: "kobo_slug",
   };
   const metadataEntries: { name: SourceKey; url: string }[] = (() => {
     const order: SourceKey[] = [
@@ -660,12 +668,23 @@ export function BookSidebar({
         out.push({ name: k, url: urls[k] });
         continue;
       }
+      // ID-derived URL fallback (numeric/UUID IDs).
       const builder = idDerivedUrl[k];
       const idKey = idColumn[k];
       if (builder && idKey) {
         const id = book[idKey];
         if (typeof id === "string" && id) {
           out.push({ name: k, url: builder(id) });
+          continue;
+        }
+      }
+      // Slug-derived URL fallback (HC + Kobo).
+      const slugBuilder = slugDerivedUrl[k];
+      const slugKey = slugColumn[k];
+      if (slugBuilder && slugKey) {
+        const slug = book[slugKey];
+        if (typeof slug === "string" && slug) {
+          out.push({ name: k, url: slugBuilder(slug) });
         }
       }
     }
