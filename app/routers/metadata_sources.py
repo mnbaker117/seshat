@@ -333,19 +333,28 @@ async def reset_to_defaults() -> MetadataSourcesResponse:
     sync_legacy_keys(settings)
     save_settings(settings)
 
-    # Same dispatcher + sources-reload chain as PUT.
+    # Same dispatcher + sources-reload chain as PUT. v2.12.0 — track
+    # success of each side-effect so the consolidated info log mirrors
+    # the PUT handler's shape (`dispatcher_rebuilt=...,
+    # sources_reloaded=...`). Without this the panel banner says
+    # "Discovery sources rebuilt — live" but the log line carries no
+    # confirmation, making post-hoc triage harder.
+    dispatcher_rebuilt = False
     try:
         from app.main import _build_dispatcher
         resolved = await _resolve_secrets_lazy()
         state.dispatcher = await _build_dispatcher(settings, resolved)
+        dispatcher_rebuilt = True
     except Exception:
         _log.exception(
             "metadata_sources reset: dispatcher rebuild failed "
             "(settings reset — restart container to apply)"
         )
+    sources_reloaded = False
     try:
         from app.discovery.lookup import reload_sources
         reload_sources()
+        sources_reloaded = True
     except Exception:
         _log.exception(
             "metadata_sources reset: source reload failed "
@@ -354,10 +363,12 @@ async def reset_to_defaults() -> MetadataSourcesResponse:
 
     _log.info(
         "metadata_sources reset to v2.11.x defaults: %d sources, "
-        "ebook priority=%d, audiobook priority=%d",
+        "ebook priority=%d, audiobook priority=%d, "
+        "dispatcher_rebuilt=%s, sources_reloaded=%s",
         len(settings.get("metadata_sources", {})),
         len(settings.get("metadata_priority", {}).get("ebook") or []),
         len(settings.get("metadata_priority", {}).get("audiobook") or []),
+        dispatcher_rebuilt, sources_reloaded,
     )
 
     # Return the new state in GET-shape so the panel can re-render.
