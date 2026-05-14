@@ -12,10 +12,6 @@ test rig stays curl_cffi-free.
 """
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
-
 from app.discovery.amazon_author_id_resolver import (
     _extract_author_id_from_html,
     _normalize_name,
@@ -28,9 +24,15 @@ from app.discovery.amazon_author_id_resolver import (
 
 
 class MockResponse:
-    def __init__(self, status_code: int, text: str):
+    def __init__(
+        self, status_code: int, text: str, url: str | None = None,
+    ):
         self.status_code = status_code
         self.text = text
+        # When set, simulates curl_cffi's `response.url` carrying the
+        # post-redirect target. Tests for the vanity-URL tier set
+        # this to mimic Amazon's 301 → /stores/.../author/{id}.
+        self.url = url
 
 
 class MockSession:
@@ -43,10 +45,18 @@ class MockSession:
         self.calls: list[str] = []
         self.closed = False
 
-    async def get(self, url: str, timeout: float = 15.0) -> MockResponse:
+    async def get(
+        self, url: str, timeout: float = 15.0,
+        allow_redirects: bool = True,
+    ) -> MockResponse:
         self.calls.append(url)
         for substring, resp in self.routes.items():
             if substring in url:
+                # Honour test-supplied `url` on the response (mimics
+                # curl_cffi's post-redirect URL). Fall back to the
+                # request URL when the test didn't override.
+                if resp.url is None:
+                    resp.url = url
                 return resp
         return MockResponse(status_code=404, text="")
 
@@ -360,3 +370,168 @@ class TestResolveAmazonAuthorId:
         assert any(
             "tier-2" in record.message for record in caplog.records
         )
+
+
+# ─── Tier 2a: vanity URL ────────────────────────────────────────
+
+
+class TestVanityUrlTier:
+    """`/author/{normalized_name}` 301-redirects to
+    `/stores/{Display-Name}/author/{id}`. We harvest the ID from the
+    redirect target URL — no body-parsing required. This is the
+    rescue path for Kindle-only indie authors whose /s?i=stripbooks
+    search returns no anchors at all (e.g. William D. Arand)."""
+
+    async def test_vanity_url_redirect_target_yields_id(self):
+        """The mock response carries a `url` attribute pointing at
+        the post-redirect URL. The resolver should extract the
+        author_id from that URL via the `/stores/.../author/{id}`
+        pattern."""
+        session = MockSession({
+            "/author/williamdarand": MockResponse(
+                status_code=200,
+                text=_fat_body("<html>arand store page body</html>"),
+                url="https://www.amazon.com/stores/William-D.-Arand/author/B01AY7PSG4",
+            ),
+        })
+        result = await resolve_amazon_author_id(
+            "William D. Arand", session=session,
+        )
+        assert result == "B01AY7PSG4"
+        # /s search must not have fired — tier-2a short-circuits.
+        assert not any("/s?" in c for c in session.calls)
+
+    async def test_vanity_url_404_falls_through_to_search(self):
+        """Amazon's vanity index doesn't include every author. A 404
+        means "no slug match" — fall through to the search tier."""
+        session = MockSession({
+            "/author/": MockResponse(404, ""),
+            "/s?": MockResponse(
+                200, _search_html(("Brandon-Sanderson", "B001IGFHW6")),
+            ),
+        })
+        result = await resolve_amazon_author_id(
+            "Brandon Sanderson", session=session,
+        )
+        assert result == "B001IGFHW6"
+        # Both tiers fired.
+        assert any("/author/" in c for c in session.calls)
+        assert any("/s?" in c for c in session.calls)
+
+    async def test_vanity_url_normalization_matches_resolver(self):
+        """The slug sent to Amazon is the normalize_name output —
+        lowercase, punctuation stripped, whitespace collapsed. "J.
+        N. Chaney" should hit `/author/jnchaney`."""
+        session = MockSession({
+            "/author/jnchaney": MockResponse(
+                status_code=200,
+                text=_fat_body("<html>chaney</html>"),
+                url="https://www.amazon.com/stores/J.-N.-Chaney/author/B07XYZABCD",
+            ),
+        })
+        result = await resolve_amazon_author_id(
+            "J. N. Chaney", session=session,
+        )
+        assert result == "B07XYZABCD"
+
+    async def test_vanity_url_body_fallback(self):
+        """If the response URL didn't redirect (e.g. test setup or
+        future Amazon change), the resolver still scans the response
+        body for the same `/stores/.../author/{id}` pattern as a
+        belt-and-suspenders fallback."""
+        body = _fat_body(
+            '<html>canonical link <a href="/stores/Foo/author/B0BODYONLY">'
+            'Foo</a></html>'
+        )
+        session = MockSession({
+            "/author/foo": MockResponse(
+                status_code=200, text=body, url="https://www.amazon.com/author/foo",
+            ),
+        })
+        result = await resolve_amazon_author_id(
+            "Foo", session=session,
+        )
+        assert result == "B0BODYONLY"
+
+    async def test_empty_slug_skips_vanity_lookup(self):
+        """A name that normalizes to empty (e.g. just punctuation)
+        shouldn't fire the vanity GET — there's no slug to send."""
+        session = MockSession()  # no routes
+        result = await resolve_amazon_author_id("???", session=session)
+        # No vanity hit, no search hit → None.
+        assert result is None
+        # Critically: no /author/ GET fired (an empty slug would build
+        # a malformed URL).
+        assert not any("/author/" in c for c in session.calls)
+
+
+# ─── Tier 2b: multi-variant /s search ───────────────────────────
+
+
+class TestMultiVariantSearch:
+    """The /s search tries `i=digital-text`, then unfiltered, then
+    `i=stripbooks` — first non-empty parse wins. Rescues Kindle-only
+    indies whose print-store search returns nothing."""
+
+    async def test_digital_text_variant_tried_first(self):
+        """If `i=digital-text` returns anchors, the resolver returns
+        without firing the other two variants. The Kindle store has
+        the best coverage for the indie-author population we care
+        about most."""
+        session = MockSession({
+            "i=digital-text": MockResponse(
+                200, _search_html(("William-D-Arand", "B01AY7PSG4")),
+            ),
+            # If the resolver wrongly fell through to these, it'd
+            # pick BWRONGCODE — assertion below catches that.
+            "i=stripbooks": MockResponse(
+                200, _search_html(("X", "BWRONGCODE")),
+            ),
+        })
+        result = await resolve_amazon_author_id(
+            "William D. Arand", session=session,
+        )
+        assert result == "B01AY7PSG4"
+        # First search call should be the digital-text variant.
+        search_calls = [c for c in session.calls if "/s?" in c]
+        assert search_calls, "expected at least one /s call"
+        assert "i=digital-text" in search_calls[0]
+
+    async def test_empty_first_variant_falls_to_unfiltered(self):
+        """When `i=digital-text` parses zero anchors, the resolver
+        tries the unfiltered variant next."""
+        empty_html = _fat_body("<html>no anchors anywhere</html>")
+        session = MockSession({
+            "i=digital-text": MockResponse(200, empty_html),
+            # The second variant has no `i=` param so we route by
+            # the lack of `&i=`. Match `/s?k=` exactly.
+        })
+        # Add the unfiltered route via a second pattern — order
+        # matters here because the routes are checked in insertion
+        # order. Put the more specific pattern first.
+        session.routes["i=stripbooks"] = MockResponse(200, empty_html)
+        session.routes["/s?k="] = MockResponse(
+            200, _search_html(("Author-Name", "B0FALLBACK")),
+        )
+        result = await resolve_amazon_author_id(
+            "Author Name", session=session,
+        )
+        assert result == "B0FALLBACK"
+        # All three variants tried? No — should stop after the
+        # second hit. The first (digital-text) parses 0, the second
+        # (unfiltered) parses 1 → success.
+        search_calls = [c for c in session.calls if "/s?" in c]
+        assert len(search_calls) >= 2
+
+    async def test_all_variants_empty_returns_none(self):
+        """When every /s variant parses zero anchors, the resolver
+        returns None (caller logs + skips)."""
+        empty = _fat_body("<html>nothing</html>")
+        session = MockSession({"/s?": MockResponse(200, empty)})
+        result = await resolve_amazon_author_id(
+            "Mystery Author", session=session,
+        )
+        assert result is None
+        # Confirms all 3 variants were tried.
+        search_calls = [c for c in session.calls if "/s?" in c]
+        assert len(search_calls) == 3

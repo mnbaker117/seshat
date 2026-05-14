@@ -48,6 +48,17 @@ logger = logging.getLogger("seshat.discovery.amazon.author_id_resolver")
 
 _DP_URL_TEMPLATE = "https://www.amazon.com/dp/{asin}"
 _SEARCH_URL = "https://www.amazon.com/s"
+# Amazon's author vanity-URL: `/author/{normalized_name}` 301-redirects
+# to `/stores/{Display-Name}/author/{author_id}` when the normalized
+# name matches an indexed author. Works for any author (Kindle-only,
+# print, mainstream, indie) — single request, no result-page parsing,
+# no disambiguation needed because the answer is in the redirect URL
+# itself. Validated 2026-05-13 for B01AY7PSG4 (Arand), B001IGFHW6
+# (Sanderson). 404 when no match — falls through to the search tier.
+_VANITY_URL_TEMPLATE = "https://www.amazon.com/author/{slug}"
+_VANITY_REDIRECT_RE = __import__("re").compile(
+    r'/stores/[^/]+/author/(?P<id>[A-Z0-9]{10})'
+)
 
 
 # ─── Author-ID extraction patterns ───────────────────────────────
@@ -140,41 +151,109 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
+async def _tier2_vanity_url(
+    author_name: str,
+    *,
+    session: Any,
+    timeout: float,
+) -> str | None:
+    """GET /author/{normalized_name} and harvest the author_id from
+    Amazon's 301-redirect target.
+
+    The vanity URL redirects to `/stores/{Display-Name}/author/{id}`
+    when Amazon's index has a matching author. Most reliable single-
+    request resolution path; works for Kindle-only indies that the
+    `/s?k=...&i=stripbooks` search doesn't surface.
+
+    Returns the author ID on success, None on 404 / no redirect /
+    no extractable ID. Caller falls through to /s search variants.
+    """
+    slug = _normalize_name(author_name)
+    if not slug:
+        return None
+    url = _VANITY_URL_TEMPLATE.format(slug=slug)
+    try:
+        resp = await session.get(url, timeout=timeout, allow_redirects=True)
+    except Exception as exc:
+        logger.debug("tier2 vanity: GET %s failed: %s", url, exc)
+        return None
+    status = getattr(resp, "status_code", None)
+    if status != 200:
+        # 404 expected when the slug isn't indexed; fall through quietly.
+        logger.debug("tier2 vanity: %s returned status=%s", url, status)
+        return None
+    # The final URL (after redirects) is what carries the author ID.
+    # curl_cffi exposes it via `resp.url`. Match against the
+    # `/stores/.../author/{id}` portion.
+    final_url = str(getattr(resp, "url", "") or "")
+    m = _VANITY_REDIRECT_RE.search(final_url)
+    if m:
+        return m.group("id")
+    # Belt-and-suspenders: the body may also contain the ID even if
+    # the URL didn't redirect cleanly.
+    body = getattr(resp, "text", "") or ""
+    m = _VANITY_REDIRECT_RE.search(body)
+    if m:
+        return m.group("id")
+    return None
+
+
 async def _tier2_search(
     author_name: str,
     *,
     session: Any,
     timeout: float,
 ) -> str | None:
-    """GET /s?k={author}&i=stripbooks, parse author-byline anchors,
-    pick the most-matching ID.
+    """GET `/s?k={author}` against multiple category filters, parse
+    author-byline anchors out of the first non-empty result, pick
+    the most-matching ID.
 
-    Returns the author ID on success, None on no anchor matches.
+    Tries in order:
+      1. `i=digital-text` (Kindle store) — best for Kindle-only
+         indies; the print-store fallback misses them entirely.
+      2. unfiltered — broader coverage if Kindle store had no chip.
+      3. `i=stripbooks` (print) — last resort.
+
+    Returns the author ID on the first variant that produces an
+    anchor match, None if all three are empty.
     """
-    params = {"k": author_name, "i": "stripbooks"}
-    url = f"{_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    try:
-        resp = await session.get(url, timeout=timeout)
-    except Exception as exc:
-        logger.debug("tier2: GET %s failed: %s", url, exc)
-        return None
+    variants = [
+        {"k": author_name, "i": "digital-text"},
+        {"k": author_name},
+        {"k": author_name, "i": "stripbooks"},
+    ]
+    for params in variants:
+        url = f"{_SEARCH_URL}?{urllib.parse.urlencode(params)}"
+        try:
+            resp = await session.get(url, timeout=timeout)
+        except Exception as exc:
+            logger.debug("tier2 search: GET %s failed: %s", url, exc)
+            continue
 
-    status = getattr(resp, "status_code", None)
-    body = getattr(resp, "text", None) or ""
-    if status != 200 or not body:
+        status = getattr(resp, "status_code", None)
+        body = getattr(resp, "text", None) or ""
+        if status != 200 or not body:
+            logger.debug(
+                "tier2 search: %s returned status=%s body_len=%d (skipping)",
+                url, status, len(body),
+            )
+            continue
+        if len(body) < 50_000:
+            logger.warning(
+                "tier2 search: %s thin body (%d bytes) — likely Akamai "
+                "soft-block; trying next variant",
+                url, len(body),
+            )
+            continue
+
+        result = _pick_best_author_id_from_search(body, author_name)
+        if result:
+            return result
         logger.debug(
-            "tier2: GET %s returned status=%s body_len=%d (no extract)",
-            url, status, len(body),
+            "tier2 search: %s parsed 0 author anchors; trying next variant",
+            url,
         )
-        return None
-    if len(body) < 50_000:
-        logger.warning(
-            "tier2: GET %s thin body (%d bytes) — likely Akamai soft-block",
-            url, len(body),
-        )
-        return None
-
-    return _pick_best_author_id_from_search(body, author_name)
+    return None
 
 
 def _pick_best_author_id_from_search(
@@ -321,19 +400,39 @@ async def resolve_amazon_author_id(
                 )
                 return result
 
+        # Tier 2a: vanity URL — one request, redirect target carries
+        # the author_id. Works for any author the Amazon index can
+        # match by normalized name, including Kindle-only indies that
+        # the print-store search misses entirely.
+        result = await _tier2_vanity_url(
+            author_name, session=session, timeout=timeout,
+        )
+        if result:
+            logger.info(
+                "resolved amazon_author_id %r for %r via tier-2a (vanity URL)",
+                result, author_name,
+            )
+            return result
+
+        # Tier 2b: /s search across multiple category filters, parse
+        # author anchors. Slower + less reliable than the vanity URL
+        # but catches authors whose normalized name doesn't match
+        # Amazon's vanity index (e.g. very common names where the
+        # vanity slug points to someone else).
         result = await _tier2_search(
             author_name, session=session, timeout=timeout,
         )
         if result:
             logger.info(
-                "resolved amazon_author_id %r for %r via tier-2 (search)",
+                "resolved amazon_author_id %r for %r via tier-2b (search)",
                 result, author_name,
             )
             return result
 
         logger.info(
             "amazon_author_id resolution FAILED for %r "
-            "(tier-1 %s, tier-2 search returned no anchor matches)",
+            "(tier-1 %s, tier-2a vanity URL miss, "
+            "tier-2b search returned no anchor matches)",
             author_name,
             "skipped (no known_book_asin)" if not known_book_asin else "miss",
         )
