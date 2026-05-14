@@ -133,6 +133,10 @@ export function MetadataSourcesPanel() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Declared up here (not next to resetToDefaults) so the hook count
+  // is stable across renders — moving it below the loading-state
+  // early return triggers React #310.
+  const [resetting, setResetting] = useState(false);
 
   async function load() {
     try {
@@ -188,7 +192,6 @@ export function MetadataSourcesPanel() {
   // it overwrites the user's customizations (priority order, rate
   // limits, format dropdowns, etc.) wholesale. Distinct from the
   // local `reset()` above (which just discards unsaved draft).
-  const [resetting, setResetting] = useState(false);
   async function resetToDefaults() {
     if (!loaded) return;
     const ok = window.confirm(
