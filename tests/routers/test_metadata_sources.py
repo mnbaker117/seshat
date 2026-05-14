@@ -131,3 +131,63 @@ class TestAmazonFormatLanguageRoundTrip:
         assert amazon["format"] == "hardcover"
         assert amazon["ebook_scan"] is False
         assert amazon["rate_limit"] == 45.0
+
+
+class TestPutReloadsDiscoverySources:
+    """v2.11.1 N9 — the PUT handler must call
+    `app.discovery.lookup.reload_sources()` so a Rate field change
+    actually reaches the running discovery scanner without a
+    container restart.
+
+    UAT 2026-05-13: Mark bumped Amazon Rate 3 → 30 via the panel,
+    saved, then triggered a Sanderson scan. The scan's first
+    Amazon request fired in ~4 seconds (rate=3 + jitter), not the
+    expected ~30s, because the running `amazon` singleton retained
+    its startup-time rate. The dispatcher rebuild only covered the
+    enricher path; the discovery-side singletons in lookup.py were
+    untouched."""
+
+    async def test_put_propagates_amazon_rate_to_singleton(
+        self, isolated_settings,
+    ):
+        from app.discovery import lookup as lookup_module
+
+        # Pre-PUT: rebuild from settings so the test starts from a
+        # known-good baseline matching what app startup would do.
+        lookup_module.reload_sources()
+        baseline_rate = lookup_module.amazon.rate_limit
+
+        async with await _client(_make_app()) as ac:
+            resp = await ac.get("/api/v1/metadata-sources")
+            state = resp.json()["state"]
+            target_rate = baseline_rate + 27.0  # any distinct value
+            state["sources"]["amazon"]["rate_limit"] = target_rate
+            put = await ac.put("/api/v1/metadata-sources", json=state)
+            assert put.status_code == 200, put.text
+
+        # The PUT handler should have re-instantiated the discovery
+        # singletons; the live `amazon` instance now carries the new
+        # rate.
+        assert lookup_module.amazon.rate_limit == target_rate, (
+            f"reload_sources didn't propagate the saved rate_limit. "
+            f"Settings: {target_rate}, runtime: "
+            f"{lookup_module.amazon.rate_limit}"
+        )
+
+    async def test_put_propagates_amazon_format_to_singleton(
+        self, isolated_settings,
+    ):
+        """The format/language config from Stage 5++ also flows
+        through reload_sources — bumping the Format dropdown should
+        affect the next scan."""
+        from app.discovery import lookup as lookup_module
+        lookup_module.reload_sources()
+
+        async with await _client(_make_app()) as ac:
+            resp = await ac.get("/api/v1/metadata-sources")
+            state = resp.json()["state"]
+            state["sources"]["amazon"]["format"] = "paperback"
+            put = await ac.put("/api/v1/metadata-sources", json=state)
+            assert put.status_code == 200, put.text
+
+        assert lookup_module.amazon.format_filter == "paperback"

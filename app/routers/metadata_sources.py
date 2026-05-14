@@ -214,10 +214,33 @@ async def put_state(body: MetadataSourcesState) -> PutResponse:
             "(settings saved — restart container to apply)"
         )
 
+    # v2.11.1 N9: also rebuild the discovery-side source singletons.
+    # The dispatcher rebuild above only covers the enricher path; the
+    # `amazon`, `kobo`, `goodreads`, etc. module-level instances in
+    # `app/discovery/lookup.py` are constructed at startup from the
+    # settings then mutated nowhere — so a Rate field change saved via
+    # this endpoint never reached the running discovery scanner until
+    # the next container restart. UAT 2026-05-13 caught this when
+    # Mark bumped Amazon Rate 3 → 30 and the next scan still fired
+    # at rate=3. The reload also picks up format/language config
+    # introduced in Stage 5++.
+    sources_reloaded = False
+    try:
+        from app.discovery.lookup import reload_sources
+        reload_sources()
+        sources_reloaded = True
+    except Exception:
+        _log.exception(
+            "metadata_sources PUT: discovery source reload failed "
+            "(settings saved — restart container to apply)"
+        )
+
     _log.info(
         "metadata_sources updated: %d sources, ebook priority=%d, "
-        "audiobook priority=%d, dispatcher_rebuilt=%s",
-        len(body.sources), len(ebook), len(audiobook), rebuilt,
+        "audiobook priority=%d, dispatcher_rebuilt=%s, "
+        "sources_reloaded=%s",
+        len(body.sources), len(ebook), len(audiobook),
+        rebuilt, sources_reloaded,
     )
     return PutResponse(ok=True, dispatcher_rebuilt=rebuilt)
 
