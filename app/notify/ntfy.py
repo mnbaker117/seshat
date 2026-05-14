@@ -175,6 +175,36 @@ async def send(
         return False
 
 
+# ─── Per-event gate (v2.11.1 N1) ────────────────────────────
+
+
+def is_event_enabled(event_key: str) -> bool:
+    """Per-event ntfy gate. True iff both the master
+    `per_event_notifications` setting is on AND the per-event
+    `notify_on_{event_key}` setting is on (default True).
+
+    Centralizes the gate logic so every call site stays in sync.
+    Pre-v2.11.1 the master gate was checked at each call site but
+    the per-event sub-toggle was NOT — so ntfy events fired even
+    when the user had explicitly disabled them in Settings →
+    Notifications. UAT-confirmed bug; this helper closes that gap.
+
+    Recognised `event_key` values map to the existing config.py
+    settings (default True if missing):
+      - "grab"               → notify_on_grab
+      - "download_complete"  → notify_on_download_complete
+      - "pipeline_error"     → notify_on_pipeline_error
+
+    Settings are mtime-cached in `app.config.load_settings`, so a
+    per-event call is effectively free.
+    """
+    from app.config import load_settings
+    s = load_settings()
+    if not s.get("per_event_notifications", False):
+        return False
+    return bool(s.get(f"notify_on_{event_key}", True))
+
+
 # ─── Convenience senders ────────────────────────────────────
 
 

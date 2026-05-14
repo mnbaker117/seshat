@@ -941,17 +941,18 @@ async def _dispatch_with_decision(
             {"grab_id": grab_id, "qbit_hash": qbit_hash},
         )
 
-        if deps.per_event_notifications and deps.ntfy_url:
-            try:
-                from app.notify import ntfy as _ntfy
-                await _ntfy.notify_grab(
-                    deps.ntfy_url, deps.ntfy_topic,
-                    announce.torrent_name,
-                    announce.author_blob,
-                    announce.category,
-                )
-            except Exception:
-                _log.exception("per-event notify_grab failed (non-fatal)")
+        if deps.ntfy_url:
+            from app.notify import ntfy as _ntfy
+            if _ntfy.is_event_enabled("grab"):
+                try:
+                    await _ntfy.notify_grab(
+                        deps.ntfy_url, deps.ntfy_topic,
+                        announce.torrent_name,
+                        announce.author_blob,
+                        announce.category,
+                    )
+                except Exception:
+                    _log.exception("per-event notify_grab failed (non-fatal)")
         return DispatchResult(
             action="submit",
             reason="ok",

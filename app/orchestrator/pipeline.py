@@ -328,7 +328,7 @@ async def process_completion(
         # One download-complete notification per torrent (not per
         # group) — bundle children share the same torrent name and
         # spamming the ntfy channel N times would be noisy.
-        if per_event_notifications and ntfy_url and ntfy_topic:
+        if ntfy_url and ntfy_topic and ntfy.is_event_enabled("download_complete"):
             try:
                 await ntfy.notify_download_complete(
                     ntfy_url, ntfy_topic,
@@ -1566,7 +1566,11 @@ async def _fail(
     await pipe_storage.set_state(
         db, run_id, pipe_storage.PIPE_FAILED, error=error,
     )
-    if ntfy_url and ntfy_topic:
+    # v2.11.1 N1: error notifications go through the same master +
+    # per-event gate as the other pipeline events. Pre-fix this call
+    # site bypassed both gates entirely, so users who explicitly
+    # disabled "Pipeline errors" in Settings still received them.
+    if ntfy_url and ntfy_topic and ntfy.is_event_enabled("pipeline_error"):
         try:
             await ntfy.notify_error(ntfy_url, ntfy_topic, event.torrent_name, error)
         except Exception:
