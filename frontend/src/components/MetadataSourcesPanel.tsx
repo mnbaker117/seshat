@@ -176,7 +176,7 @@ export function MetadataSourcesPanel() {
           <strong style={{ color: t.text2 }}>Scan</strong> — sources run during library-side author scanning to find books you don't have yet.
         </div>
         <div>
-          <strong style={{ color: t.text2 }}>Rate (q/s)</strong> — queries per second this source is allowed to issue. Lower = gentler on the upstream, slower scans. Leave at default if unsure.
+          <strong style={{ color: t.text2 }}>Rate (s)</strong> — seconds to wait between requests to this source. Higher = gentler on the upstream, slower scans. Leave at default if unsure.
         </div>
         <div style={{ marginTop: 6, color: t.textDim }}>
           Priority is top-to-bottom; drag rows to reorder. MAM is always first and free — its row is locked.
@@ -322,7 +322,7 @@ function SourceList({ tab, draft, setDraft, known }: {
             "for the primary tier (Goodreads / Hardcover / Audible)."
           }
         >Mandatory</span>
-        <span style={{ textAlign: "center" }}>Rate (q/s)</span>
+        <span style={{ textAlign: "center" }} title="Seconds to wait between requests (NOT queries per second)">Rate (s)</span>
       </div>
 
       {ordered.map((name, i) => {
