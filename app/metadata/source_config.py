@@ -119,7 +119,16 @@ _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, Any]] = {
     # English (Mark's primary discovery target). UI dropdowns under
     # Settings → Sources → Amazon will offer paperback / hardcover /
     # mass_market and the other languages from content.languageFilter.
-    "amazon":      {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": False, "audiobook_scan": False, "mandatory": False, "format": "kindle", "language": "English"},
+    # v2.11.1: audiobook_scan re-enabled now that the Author-Store
+    # flow can server-side filter by audio bindings via /juvec
+    # `authorFilters.format=["audible_audiobook"]`. mediaMatrix maps
+    # ebook-canonical works to their Audible variants for free.
+    # Audible-overlap is non-issue (merge layer dedupes by audible_id).
+    # `audiobook_format` defaults to "audible_audiobook" (the
+    # Audible-distributed digital format — dominant audio offering on
+    # Amazon); UI exposes "Audio CD" / "MP3 CD" / "Preloaded Digital
+    # Audio" for the niches.
+    "amazon":      {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": False, "format": "kindle", "language": "English", "audiobook_format": "audible_audiobook"},
     "hardcover":   {"ebook_enrich": True,  "ebook_scan": True,  "audiobook_enrich": True,  "audiobook_scan": True,  "mandatory": True},
     # Kobo — v2.11.0 ships parallel detail-fetch via asyncio.Semaphore.
     # `concurrency` sets the worker count; each worker still respects

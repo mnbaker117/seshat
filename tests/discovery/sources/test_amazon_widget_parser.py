@@ -373,26 +373,38 @@ class TestFormatMappingTables:
     (`"kindle_edition"`). Both directions must stay in sync."""
 
     def test_filter_to_binding_complete(self):
-        # The four formats we expose in the Settings UI.
+        """Ebook + audiobook filters both present. v2.11.0 shipped
+        the 4 ebook entries; v2.11.1 added the 4 audio entries
+        when Amazon audiobook scan became feasible."""
         assert FILTER_TO_BINDING == {
+            # Ebook
             "kindle": "kindle_edition",
             "paperback": "paperback",
             "hardcover": "hardcover",
             "mass_market": "mass_market",
+            # Audiobook (v2.11.1)
+            "audible_audiobook": "audio_download",
+            "audio_cd": "audioCD",
+            "mp3_cd": "mp3_cd",
+            "preloaded_digital_audio": "preloaded_digital_audio_player",
         }
 
     def test_bidirectional_consistency(self):
         for filter_value, binding_symbol in FILTER_TO_BINDING.items():
             assert BINDING_TO_FILTER[binding_symbol] == filter_value
 
-    def test_audio_bindings_not_in_filter(self):
-        """Audible handles audiobooks — we should never offer the
-        user `audio_download` / `audioCD` / etc. as Amazon discovery
-        formats. The filter table is the gate that enforces it."""
-        for filter_value in FILTER_TO_BINDING:
-            assert "audio" not in filter_value
-            assert filter_value != "audioCD"
-            assert filter_value != "mp3_cd"
+    def test_ebook_audiobook_split_partitions_filter_table(self):
+        """v2.11.1: EBOOK_FILTERS + AUDIOBOOK_FILTERS together cover
+        every key in FILTER_TO_BINDING with no overlap. The split is
+        what the AmazonExtrasRow uses to pick which dropdown to
+        render per tab + what `_active_format_filter()` uses to
+        validate the configured filter against the active scan's
+        content type."""
+        from app.discovery.sources.amazon_widget_parser import (
+            AUDIOBOOK_FILTERS, EBOOK_FILTERS,
+        )
+        assert EBOOK_FILTERS.isdisjoint(AUDIOBOOK_FILTERS)
+        assert (EBOOK_FILTERS | AUDIOBOOK_FILTERS) == set(FILTER_TO_BINDING)
 
     def test_default_languages_includes_observed(self):
         # Should contain everything we've seen in real captures.

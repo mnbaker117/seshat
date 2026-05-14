@@ -200,10 +200,18 @@ def reload_sources():
     )
     # Stage 5++: format + language drive Amazon's server-side
     # authorFilters API on /juvec. Defaults applied if missing.
+    # v2.11.1: audiobook_format added so audiobook scans pick the
+    # right /juvec filter — `_active_format_filter()` inside the
+    # source switches between `format_filter` and
+    # `audiobook_format_filter` based on `_content_type` set by the
+    # dispatcher.
     _amazon_entry = (s.get("metadata_sources") or {}).get("amazon") or {}
     amazon = AmazonSource(
         rate_limit=get_source_rate_limit(s, "amazon"),
         format_filter=_amazon_entry.get("format", "kindle"),
+        audiobook_format_filter=_amazon_entry.get(
+            "audiobook_format", "audible_audiobook",
+        ),
         language=_amazon_entry.get("language", "English"),
     )
     ibdb = IbdbSource(rate_limit=get_source_rate_limit(s, "ibdb"))

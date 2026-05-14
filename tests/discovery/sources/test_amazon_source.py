@@ -557,6 +557,126 @@ class TestCallbacks:
 # ─── close() ─────────────────────────────────────────────────────
 
 
+class TestAudiobookContentType:
+    """v2.11.1 — AmazonSource picks ebook vs audiobook filter based
+    on `self._content_type` (set externally by lookup.py before each
+    scan; same pattern Hardcover already uses for its `reading_format_id`
+    filter).
+
+    Ebook scans → `format_filter` (default 'kindle')
+    Audiobook scans → `audiobook_format_filter` (default 'audible_audiobook')
+    """
+
+    async def test_audiobook_content_type_uses_audio_filter(self):
+        """When `_content_type == "audiobook"`, the /juvec
+        filter-application POST body should carry
+        `authorFilters.format == ["audible_audiobook"]`, not
+        `["kindle"]`."""
+        session = MockSession(
+            get_routes={
+                "/stores/author/B001IGFHW6/allbooks": MockResponse(
+                    200, SANDERSON_HTML,
+                ),
+            },
+            post_responses=[MockResponse(200, _juvec_response_json(
+                asin_list=["B001QKBHG4"],
+                total=1,
+                products=[
+                    _product_dict(
+                        "B001QKBHG4", "Mistborn (Audible)",
+                        binding="audio_download",
+                    ),
+                ],
+            ))],
+        )
+        source = AmazonSource(burst_delay_s=0.0)
+        source._session = session
+        source._session_init_attempted = True
+        source._content_type = "audiobook"
+
+        await source.get_author_books("B001IGFHW6")
+
+        # Filter-application body should carry audible_audiobook.
+        filter_calls = [
+            body for _url, body in session.post_calls
+            if "authorSearch" in body
+        ]
+        assert filter_calls, "expected at least one filter-application POST"
+        assert filter_calls[0]["authorFilters"]["format"] == [
+            "audible_audiobook"
+        ]
+
+    async def test_audiobook_filters_to_audio_binding(self):
+        """The client-side binding filter (defensive trim of products
+        that don't match the server-filter intent) targets the right
+        binding symbol for the audiobook tab — `audio_download`, not
+        `kindle_edition`."""
+        # filter-application returns mixed bindings (simulates a
+        # variant-leak); we verify only audio_download survives.
+        session = MockSession(
+            get_routes={
+                "/stores/author/B001IGFHW6/allbooks": MockResponse(
+                    200, SANDERSON_HTML,
+                ),
+            },
+            post_responses=[MockResponse(200, _juvec_response_json(
+                asin_list=["B001QKBHG4", "B002GYI9C4"],
+                total=2,
+                products=[
+                    _product_dict(
+                        "B001QKBHG4", "Mistborn (Audible)",
+                        binding="audio_download",
+                    ),
+                    _product_dict(
+                        "B002GYI9C4", "Mistborn (Kindle)",
+                        binding="kindle_edition",  # leak-through
+                    ),
+                ],
+            ))],
+        )
+        source = AmazonSource(burst_delay_s=0.0)
+        source._session = session
+        source._session_init_attempted = True
+        source._content_type = "audiobook"
+
+        result = await source.get_author_books("B001IGFHW6")
+        assert result is not None
+        all_books = list(result.books)
+        for s in result.series:
+            all_books.extend(s.books)
+        # Kindle entry should have been trimmed by the
+        # binding-symbol client-side filter.
+        titles = [b.title for b in all_books]
+        assert "Mistborn (Audible)" in titles
+        assert "Mistborn (Kindle)" not in titles
+
+    async def test_ebook_content_type_remains_kindle_default(self):
+        """Default `_content_type = "ebook"` continues to pick the
+        Kindle filter — regression guard so the audiobook switch
+        doesn't accidentally rewrite the ebook path."""
+        session = MockSession(
+            get_routes={
+                "/stores/author/B001IGFHW6/allbooks": MockResponse(
+                    200, SANDERSON_HTML,
+                ),
+            },
+            post_responses=[MockResponse(200, _juvec_response_json(
+                asin_list=[], total=0, products=[],
+            ))],
+        )
+        source = AmazonSource(burst_delay_s=0.0)
+        source._session = session
+        source._session_init_attempted = True
+        # _content_type defaults to "ebook" — don't set it explicitly.
+
+        await source.get_author_books("B001IGFHW6")
+        filter_calls = [
+            body for _url, body in session.post_calls
+            if "authorSearch" in body
+        ]
+        assert filter_calls[0]["authorFilters"]["format"] == ["kindle"]
+
+
 class TestClose:
     async def test_close_closes_session(self):
         session = MockSession()

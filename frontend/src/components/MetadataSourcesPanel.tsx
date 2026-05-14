@@ -38,7 +38,11 @@ interface SourceEntry {
   // v2.11.0 Stage 5++: Amazon-specific config strings that drive
   // the server-side authorFilters API on /juvec. Null for every
   // other source.
+  // `format` = ebook-tab filter; `audiobook_format` = the v2.11.1
+  // addition for audiobook-tab Amazon scans (Audible / Audio CD /
+  // Preloaded Digital Audio Player / MP3 CD).
   format?: string | null;
+  audiobook_format?: string | null;
   language?: string | null;
   // v2.11.1 N5: Kobo-specific. Parallel detail-fetch worker count.
   // Effective request rate is ~concurrency/rate_limit. Null for
@@ -56,6 +60,19 @@ const AMAZON_FORMAT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "hardcover", label: "Hardcover" },
   { value: "mass_market", label: "Mass Market Paperback" },
   { value: "allFormats", label: "All Formats" },
+];
+
+// v2.11.1: audiobook format options. `audible_audiobook` matches
+// the Audible-distributed digital audiobook (the dominant audio
+// format on Amazon — most authors will want this); others are
+// niche physical / hardware variants. Maps to the binding symbols
+// in `app/discovery/sources/amazon_widget_parser.py:FILTER_TO_BINDING`.
+const AMAZON_AUDIOBOOK_FORMAT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "audible_audiobook", label: "Audible Audiobook" },
+  { value: "audio_cd", label: "Audio CD" },
+  { value: "mp3_cd", label: "MP3 CD" },
+  { value: "preloaded_digital_audio", label: "Preloaded Digital Audio Player" },
+  { value: "allFormats", label: "All Audio Formats" },
 ];
 
 // Amazon Author-Store language options. The static list covers the
@@ -341,7 +358,10 @@ function SourceList({ tab, draft, setDraft, known }: {
         // with MAM.
         const canUp = !locked && i > 1;
         const canDown = !locked && i < ordered.length - 1;
-        const showAmazonExtras = name === "amazon" && tab === "ebook";
+        // v2.11.1: Amazon's audiobook scan ships in this release, so
+        // the Amazon extras sub-row also renders on the audiobook
+        // tab — with the audiobook-specific format dropdown.
+        const showAmazonExtras = name === "amazon";
         const showKoboExtras = name === "kobo" && tab === "ebook";
         const hasExtrasRow = showAmazonExtras || showKoboExtras;
         return (
@@ -475,6 +495,7 @@ function SourceList({ tab, draft, setDraft, known }: {
           {showAmazonExtras && (
             <AmazonExtrasRow
               entry={entry}
+              tab={tab}
               onChange={(key, value) => setToggle(name, key, value)}
             />
           )}
@@ -504,12 +525,26 @@ function SourceList({ tab, draft, setDraft, known }: {
 // row to render placeholder cells. A sub-row keeps the grid clean.
 
 function AmazonExtrasRow({
-  entry, onChange,
+  entry, tab, onChange,
 }: {
   entry: SourceEntry;
+  tab: Tab;
   onChange: (key: keyof SourceEntry, value: string) => void;
 }) {
   const t = useTheme();
+  // v2.11.1: Amazon's audiobook scan ships in this release. The
+  // Format dropdown swaps based on which tab the user is on —
+  // Kindle/Paperback/etc. for ebook scans, Audible/Audio CD/etc.
+  // for audiobook scans. Each tab writes its own settings key so
+  // the user can configure both surfaces independently.
+  const isAudiobook = tab === "audiobook";
+  const formatKey: keyof SourceEntry = isAudiobook ? "audiobook_format" : "format";
+  const formatDefault = isAudiobook ? "audible_audiobook" : "kindle";
+  const formatOptions = isAudiobook
+    ? AMAZON_AUDIOBOOK_FORMAT_OPTIONS
+    : AMAZON_FORMAT_OPTIONS;
+  const currentFormat = (isAudiobook ? entry.audiobook_format : entry.format)
+    ?? formatDefault;
   return (
     <div style={{
       display: "flex", gap: 24, alignItems: "center",
@@ -520,15 +555,15 @@ function AmazonExtrasRow({
       <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ color: t.textDim, fontWeight: 600 }}>Format</span>
         <select
-          value={entry.format ?? "kindle"}
-          onChange={e => onChange("format", e.target.value)}
+          value={currentFormat}
+          onChange={e => onChange(formatKey, e.target.value)}
           style={{
             padding: "4px 8px", borderRadius: 6,
             border: `1px solid ${t.border}`, background: t.inp,
             color: t.text2, fontSize: 12, outline: "none",
           }}
         >
-          {AMAZON_FORMAT_OPTIONS.map(o => (
+          {formatOptions.map(o => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
@@ -550,8 +585,9 @@ function AmazonExtrasRow({
         </select>
       </label>
       <span style={{ color: t.textDim, fontSize: 11, fontStyle: "italic" }}>
-        Drives Amazon's Author Store filter — only books matching
-        format + language are returned.
+        Drives Amazon's Author Store filter — only{" "}
+        {isAudiobook ? "audiobooks" : "books"} matching format +
+        language are returned.
       </span>
     </div>
   );

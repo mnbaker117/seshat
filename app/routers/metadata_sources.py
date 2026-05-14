@@ -56,7 +56,11 @@ class SourceEntry(BaseModel):
     # the server-side authorFilters API on /juvec. Other sources
     # leave these None. The frontend renders dropdowns for the
     # Amazon row only.
+    # `format` = ebook-tab format filter; `audiobook_format` = the
+    # parallel knob added in v2.11.1 when AmazonSource gained
+    # audiobook discovery via /juvec format=["audible_audiobook"].
     format: str | None = None
+    audiobook_format: str | None = None
     language: str | None = None
     # v2.11.1 N5 — Kobo-specific. Parallel detail-fetch worker count
     # for the asyncio.Semaphore in `app/discovery/sources/kobo.py`.
@@ -136,6 +140,10 @@ def _state_from_settings(settings: dict) -> MetadataSourcesState:
                 # Amazon-specific. Read with defaults so pre-Stage-5++
                 # entries surface the ship-defaults to the panel.
                 format=entry.get("format") if name == "amazon" else None,
+                audiobook_format=(
+                    entry.get("audiobook_format")
+                    if name == "amazon" else None
+                ),
                 language=entry.get("language") if name == "amazon" else None,
                 # Kobo-specific (v2.11.1 N5). Parallel detail-fetch
                 # worker count.

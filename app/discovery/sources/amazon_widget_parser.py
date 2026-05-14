@@ -457,16 +457,46 @@ def _parse_products(raw_products: list) -> tuple[Product, ...]:
 
 # Server-side filter input value (lowercase, may differ from output
 # binding symbol). Sent in `authorFilters.format` of /juvec POST body.
+#
+# v2.11.1: audio-binding filters added so AmazonSource can serve
+# audiobook discovery scans. `audible_audiobook` is the dominant
+# audio format (matches Audible-distributed digital audiobooks
+# Amazon sells); `audio_cd` / `mp3_cd` / `preloaded_digital_audio`
+# are the niche physical / hardware-bound variants.
+#
+# The filter input → binding symbol mapping is NOT 1:1 — Amazon's
+# /juvec accepts the filter-input value on the request side and
+# emits the binding.symbol value on the response side. Examples:
+#   filter "kindle" → binding "kindle_edition"
+#   filter "audible_audiobook" → binding "audio_download"
+#   filter "audio_cd" → binding "audioCD"
 FILTER_TO_BINDING: dict[str, str] = {
+    # Ebook formats
     "kindle": "kindle_edition",
     "paperback": "paperback",
     "hardcover": "hardcover",
     "mass_market": "mass_market",
+    # Audiobook formats (v2.11.1)
+    "audible_audiobook": "audio_download",
+    "audio_cd": "audioCD",
+    "mp3_cd": "mp3_cd",
+    "preloaded_digital_audio": "preloaded_digital_audio_player",
 }
 
 # Reverse map for converting binding symbol back to filter input value
 # when round-tripping through Settings UI / API.
 BINDING_TO_FILTER: dict[str, str] = {v: k for k, v in FILTER_TO_BINDING.items()}
+
+# Ebook-vs-audiobook split — the AmazonExtrasRow dropdowns split
+# the filter options by tab. The discovery dispatcher also uses
+# this to pick which `format_filter` field on the source to read
+# based on the active scan's content type.
+EBOOK_FILTERS: frozenset[str] = frozenset({
+    "kindle", "paperback", "hardcover", "mass_market",
+})
+AUDIOBOOK_FILTERS: frozenset[str] = frozenset({
+    "audible_audiobook", "audio_cd", "mp3_cd", "preloaded_digital_audio",
+})
 
 
 # Languages observed in Sanderson's `content.languageFilter`. Used as

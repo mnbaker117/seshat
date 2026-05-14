@@ -117,6 +117,7 @@ class AmazonSource(BaseSource):
         rate_limit: float = 30.0,
         *,
         format_filter: str = "kindle",
+        audiobook_format_filter: str = "audible_audiobook",
         language: str = "English",
         burst_delay_s: float = 0.8,
     ):
@@ -127,9 +128,16 @@ class AmazonSource(BaseSource):
                 governs how quickly we move between authors. 30s is
                 the conservative ship-default; can be lowered after
                 live UAT validates the lower request count is safe.
-            format_filter: One of the FILTER_TO_BINDING keys (kindle,
-                paperback, hardcover, mass_market). Drives Amazon's
-                server-side filter on /juvec.
+            format_filter: One of the EBOOK_FILTERS keys (kindle,
+                paperback, hardcover, mass_market). Used during
+                ebook-content-type scans. Drives Amazon's server-side
+                `authorFilters.format` on /juvec.
+            audiobook_format_filter: One of the AUDIOBOOK_FILTERS
+                keys (audible_audiobook, audio_cd, mp3_cd,
+                preloaded_digital_audio). Used during audiobook-
+                content-type scans. v2.11.1 default
+                `audible_audiobook` matches the Audible-distributed
+                digital audiobook format Amazon sells (dominant).
             language: Capitalized language name from Amazon's
                 `content.languageFilter` list (e.g. "English").
             burst_delay_s: Inter-/juvec-POST sleep within one author
@@ -137,10 +145,23 @@ class AmazonSource(BaseSource):
         """
         super().__init__(rate_limit=rate_limit)
         self.format_filter = format_filter
+        self.audiobook_format_filter = audiobook_format_filter
         self.language = language
         self.burst_delay_s = burst_delay_s
         self._session: Any | None = None
         self._session_init_attempted = False
+        # Set externally by lookup.py before each scan; tells the
+        # source whether to use `format_filter` (ebook) or
+        # `audiobook_format_filter` (audiobook). Default "ebook" so
+        # standalone use of the source / tests don't need to set it.
+        self._content_type: str = "ebook"
+
+    def _active_format_filter(self) -> str:
+        """Pick the right format filter for the current scan based
+        on `_content_type` (set by lookup.py before the call)."""
+        if self._content_type == "audiobook":
+            return self.audiobook_format_filter
+        return self.format_filter
 
     # ─── Session management ──────────────────────────────────────
 
@@ -301,9 +322,10 @@ class AmazonSource(BaseSource):
         # Stage 3: filter to the configured format (defensive — the
         # server filter should have done this, but mediaMatrix
         # cross-format alternates may sneak in on edge cases).
-        target_binding = FILTER_TO_BINDING.get(
-            self.format_filter, self.format_filter,
-        )
+        # v2.11.1: `_active_format_filter()` picks ebook vs audiobook
+        # filter based on `self._content_type` set by lookup.py.
+        active_filter = self._active_format_filter()
+        target_binding = FILTER_TO_BINDING.get(active_filter, active_filter)
         filtered = [
             p for p in products if p.binding_symbol == target_binding
         ]
@@ -351,12 +373,18 @@ class AmazonSource(BaseSource):
     ) -> list[Product]:
         """Drive the JuvecClient through filter-application +
         detail-fetch + pagination until we've collected every product
-        for the configured filter (or hit a safety cap)."""
+        for the configured filter (or hit a safety cap).
+
+        v2.11.1: `active_filter` resolved once via
+        `_active_format_filter()` so ebook vs audiobook scans use the
+        right `format_filter` setting throughout the workflow.
+        """
+        active_filter = self._active_format_filter()
         # If the configured filter matches the SSR page's default
         # (allFormats / All Languages), we already have ~85 products
         # in page_data. Otherwise, re-query under the filter.
         default_filter = (
-            self.format_filter == "allFormats"
+            active_filter == "allFormats"
             and self.language == "All Languages"
         )
         if default_filter:
@@ -366,7 +394,7 @@ class AmazonSource(BaseSource):
         else:
             first = await client.fetch_filtered_page(
                 page=1,
-                format_filter=self.format_filter,
+                format_filter=active_filter,
                 language=self.language,
             )
             collected = list(first.products)
@@ -374,8 +402,8 @@ class AmazonSource(BaseSource):
             total_count = first.total_result_count or 0
             logger.debug(
                 "amazon: filter-application returned %d products / %d asins / "
-                "totalResultCount=%d",
-                len(collected), len(asin_list), total_count,
+                "totalResultCount=%d (filter=%r)",
+                len(collected), len(asin_list), total_count, active_filter,
             )
 
         # Detail-fetch any ASINs in the list that aren't already
@@ -388,7 +416,7 @@ class AmazonSource(BaseSource):
                 break
             resp = await client.fetch_asin_batch(
                 batch,
-                format_filter=self.format_filter,
+                format_filter=active_filter,
                 language=self.language,
             )
             collected.extend(resp.products)
@@ -410,7 +438,7 @@ class AmazonSource(BaseSource):
         ):
             resp = await client.fetch_filtered_page(
                 page=page,
-                format_filter=self.format_filter,
+                format_filter=active_filter,
                 language=self.language,
             )
             if not resp.products and not resp.asin_list:
@@ -426,7 +454,7 @@ class AmazonSource(BaseSource):
                     break
                 detail = await client.fetch_asin_batch(
                     batch,
-                    format_filter=self.format_filter,
+                    format_filter=active_filter,
                     language=self.language,
                 )
                 collected.extend(detail.products)

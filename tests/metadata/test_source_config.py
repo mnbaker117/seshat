@@ -504,15 +504,27 @@ class TestAmazonAuthorStoreDefaults:
         assert amazon["ebook_scan"] is True
         assert amazon["ebook_enrich"] is True
 
-    def test_amazon_audiobook_scan_stays_off(self):
-        """The Author-Store flow filters out audio_download bindings —
-        Audible handles audiobook discovery. Both audiobook flags
-        remain default-off."""
+    def test_amazon_audiobook_scan_enabled_v2_11_1(self):
+        """v2.11.1 flipped audiobook_scan + audiobook_enrich on for
+        Amazon. The Author-Store flow can now server-side filter to
+        `audio_download` bindings via /juvec; mediaMatrix already
+        maps ebook-canonical works to their Audible variants. Audible
+        overlap is non-issue (merge layer dedupes by audible_id)."""
         settings: dict = {}
         migrate_legacy_settings(settings)
         amazon = settings["metadata_sources"]["amazon"]
-        assert amazon["audiobook_scan"] is False
-        assert amazon["audiobook_enrich"] is False
+        assert amazon["audiobook_scan"] is True
+        assert amazon["audiobook_enrich"] is True
+
+    def test_amazon_audiobook_format_default(self):
+        """v2.11.1: audiobook_format defaults to `audible_audiobook`
+        — the Audible-distributed digital format Amazon sells. UI
+        offers Audio CD / MP3 CD / Preloaded Digital Audio for the
+        niches."""
+        settings: dict = {}
+        migrate_legacy_settings(settings)
+        amazon = settings["metadata_sources"]["amazon"]
+        assert amazon["audiobook_format"] == "audible_audiobook"
 
     def test_amazon_format_default_kindle(self):
         """Server-side filter input value (not the binding-symbol
