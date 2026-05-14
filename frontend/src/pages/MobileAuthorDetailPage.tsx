@@ -422,20 +422,26 @@ export default function MobileAuthorDetailPage({
     if (!confirm(msg)) return;
     setBusy(true);
     try {
+      // Uniform response type so the `.catch` branch shares the
+      // success-branch shape; otherwise TS union narrowing breaks
+      // the aggregate step's r.deleted / r.skipped / r.count access.
+      type BulkResp = {
+        status?: string;
+        count?: number;
+        deleted?: number;
+        skipped?: number;
+        error?: string;
+      };
       const results = await Promise.all(
-        slugs.map((slug) => {
+        slugs.map((slug): Promise<{ slug: string; r: BulkResp }> => {
           const slugIds = partition.get(slug)!;
-          return api.post<{
-            status?: string;
-            count?: number;
-            deleted?: number;
-            skipped?: number;
-            error?: string;
-          }>(
+          return api.post<BulkResp>(
             `/discovery/books/bulk-${kind}${slugQuery(slug)}`,
             { book_ids: slugIds },
           ).then((r) => ({ slug, r }))
-            .catch((e) => ({ slug, r: { error: (e as Error).message || "failed" } }));
+            .catch((e): { slug: string; r: BulkResp } => ({
+              slug, r: { error: (e as Error).message || "failed" },
+            }));
         }),
       );
       const errors = results.filter((x) => x.r.error);

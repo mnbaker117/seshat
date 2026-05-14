@@ -889,20 +889,27 @@ function DesktopAuthorDetailPage({
       // Fire one bulk-{kind} request per library slug; gather results
       // into per-slug map so the aggregate toast can label the skip
       // count with the right upstream-app name (Calibre / ABS).
+      // Type the response uniformly so the `.catch` branch carries
+      // the same shape as the success branch (all fields optional);
+      // otherwise TS narrows the union and the aggregate step can't
+      // access r.deleted / r.skipped without disjoint discrimination.
+      type BulkResp = {
+        status?: string;
+        count?: number;
+        deleted?: number;
+        skipped?: number;
+        error?: string;
+      };
       const results = await Promise.all(
-        slugs.map((slug) => {
+        slugs.map((slug): Promise<{ slug: string; r: BulkResp }> => {
           const slugIds = partition.get(slug)!;
-          return api.post<{
-            status?: string;
-            count?: number;
-            deleted?: number;
-            skipped?: number;
-            error?: string;
-          }>(
+          return api.post<BulkResp>(
             `/discovery/books/bulk-${kind}${slugQuery(slug)}`,
             { book_ids: slugIds },
           ).then((r) => ({ slug, r }))
-            .catch((e) => ({ slug, r: { error: (e as Error).message || "failed" } }));
+            .catch((e): { slug: string; r: BulkResp } => ({
+              slug, r: { error: (e as Error).message || "failed" },
+            }));
         }),
       );
 
