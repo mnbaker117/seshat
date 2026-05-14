@@ -389,17 +389,38 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
     state._lookup_task = asyncio.create_task(_do())
 
 
-@router.post("/authors/{aid}/lookup")
-async def trigger_author_lookup(aid: int, slug: Optional[str] = None):
-    """Run a source scan for one author in a specific library.
+async def _trigger_single_author_scan(
+    aid: int,
+    slug: Optional[str],
+    content_type: Optional[str],
+    *,
+    full_scan: bool,
+    scan_type_single: str,
+    scan_type_cross: str,
+) -> dict:
+    """Shared body for `/authors/{aid}/lookup` and
+    `/authors/{aid}/full-rescan`.
 
-    `slug=X` temporarily sets the active library to X for the duration
-    of the scan, then restores the original on finish. Needed because
-    `lookup_author` + every downstream helper calls `get_db()` with no
-    slug argument — threading slug through every site is invasive
-    and `_lookup_task` already serializes scan work. The primary-
-    author ID in the URL refers to THIS library's author id, so the
-    flip is required or we resolve the wrong person.
+    Two modes:
+
+    1. **Slug mode (legacy)** — `content_type=None`. Scan the author
+       in a single library (the URL's slug, or the currently active
+       library). Spawns a `single_author` / `single_author_full`
+       lookup task; the runner flips active library for the scan and
+       restores on finish.
+
+    2. **Cross-library mode (v2.12.0)** — `content_type="ebook"` or
+       `"audiobook"`. Resolve the author's name from the URL row,
+       iterate every library of that content_type, and run a scan in
+       each matching library. The author may not exist in every
+       target library; libraries without a matching name are skipped
+       at name-resolution time, not failed.
+
+       The cross-library path is what the new "Scan Ebooks" / "Scan
+       Audiobooks" buttons drive — author detail pages always offer
+       both buttons regardless of which library the author originated
+       from, so an audiobook-library author can be re-discovered in
+       every ebook library and vice-versa.
     """
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
@@ -415,18 +436,81 @@ async def trigger_author_lookup(aid: int, slug: Optional[str] = None):
     finally:
         await db.close()
     name = dict(r)["name"]
+
+    if content_type:
+        # Cross-library mode — iterate every library of the requested
+        # type, looking up THIS library's local author row by name.
+        target_libs = libraries_for(content_type)
+        if not target_libs:
+            return {"status": "ok", "total": 0,
+                    "author": name,
+                    "message": f"No {content_type} libraries found."}
+        pre_resolved: list[tuple[dict, list]] = []
+        for lib in target_libs:
+            tslug = lib.get("slug")
+            if not tslug:
+                continue
+            try:
+                ldb = await get_db(tslug)
+            except Exception as e:
+                logger.warning(f"single-author scan: cannot open lib {tslug}: {e}")
+                continue
+            try:
+                rows = await ldb.execute_fetchall(
+                    "SELECT id, name FROM authors WHERE name = ?", (name,),
+                )
+            finally:
+                await ldb.close()
+            if rows:
+                pre_resolved.append((lib, list(rows)))
+        total_tasks = sum(len(rows) for _, rows in pre_resolved)
+        if total_tasks == 0:
+            return {"status": "ok", "total": 0,
+                    "author": name,
+                    "message": f"'{name}' has no matching row in any {content_type} library."}
+
+        async def _runner_cross():
+            for lib, rows in pre_resolved:
+                tslug = lib.get("slug")
+                if not tslug:
+                    continue
+                if tslug != get_active_library():
+                    _set_active(tslug)
+                for row in rows:
+                    laid = row[0]
+                    state._lookup_progress.update({"current_author": name})
+                    def _on_source(running):
+                        state._lookup_progress["new_books"] = int(running)
+                    try:
+                        new_books = await lookup_author(
+                            laid, name, full_scan=full_scan, on_progress=_on_source,
+                        )
+                        state._lookup_progress.update({
+                            "checked": state._lookup_progress.get("checked", 0) + 1,
+                            "new_books": int(new_books or 0),
+                        })
+                    except Exception as e:
+                        logger.error(f"single-author cross-lib scan error in {tslug}: {e}")
+            if original_slug and original_slug != get_active_library():
+                _set_active(original_slug)
+
+        _spawn_lookup_task(scan_type_cross, total=total_tasks, runner=_runner_cross)
+        return {"status": "started", "author": name, "total": total_tasks,
+                "libraries": len(pre_resolved)}
+
+    # Slug mode (legacy single-library scan).
     flip = bool(slug and slug != original_slug)
 
-    async def _runner():
+    async def _runner_single():
         if flip:
             _set_active(slug)
         try:
             state._lookup_progress.update({"current_author": name})
-            # Surface running new_books count after each source so the
-            # widget climbs in real time instead of jumping 0 → final.
             def _on_source(running):
                 state._lookup_progress["new_books"] = int(running)
-            new_books = await lookup_author(aid, name, on_progress=_on_source)
+            new_books = await lookup_author(
+                aid, name, full_scan=full_scan, on_progress=_on_source,
+            )
             state._lookup_progress.update({
                 "checked": 1, "new_books": int(new_books or 0),
             })
@@ -434,46 +518,61 @@ async def trigger_author_lookup(aid: int, slug: Optional[str] = None):
             if flip and original_slug:
                 _set_active(original_slug)
 
-    _spawn_lookup_task("single_author", total=1, runner=_runner)
-    return {"status": "started", "author": name}
+    _spawn_lookup_task(scan_type_single, total=1, runner=_runner_single)
+    return {"status": "started", "author": name, "total": 1}
+
+
+@router.post("/authors/{aid}/lookup")
+async def trigger_author_lookup(
+    aid: int,
+    slug: Optional[str] = None,
+    content_type: Optional[str] = None,
+):
+    """Run a source scan for one author.
+
+    Two modes:
+
+    - `slug=X` (legacy single-library): temporarily sets the active
+      library to X for the duration of the scan, then restores it on
+      finish. The URL's `aid` is THIS library's author id, so the flip
+      is required or we resolve the wrong person.
+    - `content_type=ebook|audiobook` (v2.12.0 cross-library): resolves
+      the author by name in every matching library and scans each.
+      Powers the new "Scan Ebooks" / "Scan Audiobooks" buttons on the
+      Author Detail page.
+
+    `slug` and `content_type` are mutually compatible — `slug` is used
+    only to resolve the initial author name from the URL aid. The scan
+    itself runs in the slug library (legacy mode) OR in every matching
+    library (cross-library mode).
+    """
+    return await _trigger_single_author_scan(
+        aid, slug, content_type,
+        full_scan=False,
+        scan_type_single="single_author",
+        scan_type_cross="single_author_cross",
+    )
 
 
 @router.post("/authors/{aid}/full-rescan")
-async def trigger_author_full_rescan(aid: int, slug: Optional[str] = None):
-    """Full re-scan for a single author. `slug` scoped the same as /lookup."""
-    s = load_settings()
-    if not s.get("author_scanning_enabled", True):
-        raise HTTPException(400, "Author scanning is disabled — enable it in Settings")
-    from app.discovery.database import set_active_library as _set_active
-    original_slug = get_active_library()
-    target_slug = slug or original_slug
-    db = await get_db(target_slug)
-    try:
-        r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
-        if not r:
-            raise HTTPException(404)
-    finally:
-        await db.close()
-    name = dict(r)["name"]
-    flip = bool(slug and slug != original_slug)
+async def trigger_author_full_rescan(
+    aid: int,
+    slug: Optional[str] = None,
+    content_type: Optional[str] = None,
+):
+    """Full re-scan for a single author.
 
-    async def _runner():
-        if flip:
-            _set_active(slug)
-        try:
-            state._lookup_progress.update({"current_author": name})
-            def _on_source(running):
-                state._lookup_progress["new_books"] = int(running)
-            new_books = await lookup_author(aid, name, full_scan=True, on_progress=_on_source)
-            state._lookup_progress.update({
-                "checked": 1, "new_books": int(new_books or 0),
-            })
-        finally:
-            if flip and original_slug:
-                _set_active(original_slug)
-
-    _spawn_lookup_task("single_author_full", total=1, runner=_runner)
-    return {"status": "started", "author": name}
+    See `/authors/{aid}/lookup` for the two-mode semantics. This
+    endpoint passes `full_scan=True` to `lookup_author`, which forces
+    DETAIL fetches even for books already URL-resolved (the bulk of
+    a full rescan's wall-clock budget).
+    """
+    return await _trigger_single_author_scan(
+        aid, slug, content_type,
+        full_scan=True,
+        scan_type_single="single_author_full",
+        scan_type_cross="single_author_full_cross",
+    )
 
 
 async def _clear_authors_in_library(
