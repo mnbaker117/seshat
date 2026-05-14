@@ -243,6 +243,41 @@ export function MetadataSourcesPanel() {
       {error && <Banner tone="err">{error}</Banner>}
       {msg && <Banner tone="ok">{msg}</Banner>}
 
+      {/* v2.13.0 migration prompt — existing users whose saved
+          goodreads rate is still on the pre-v2.13.0 default (2.0s)
+          should consider bumping to the new 5.0s default for the
+          Phase-A Cloudflare bypass. One-click bump avoids forcing
+          them through the full "Reset to defaults" workflow. */}
+      {draft.sources.goodreads && Number(draft.sources.goodreads.rate_limit ?? 5) < 5 && (
+        <div style={{
+          background: t.accent + "18",
+          border: `1px solid ${t.accent}55`,
+          color: t.text, padding: "10px 14px", borderRadius: 8,
+          fontSize: 13, display: "flex", gap: 12,
+          alignItems: "center", flexWrap: "wrap",
+        }}>
+          <span style={{ flex: 1 }}>
+            <b>v2.13.0:</b> Goodreads's default rate limit is now <b>5.0s</b>{" "}
+            (was 2.0s). The slower pace lets the new Cloudflare bypass run
+            cleanly under burst load. Your current setting is{" "}
+            <b>{draft.sources.goodreads.rate_limit}s</b>.
+          </span>
+          <Btn
+            onClick={() => {
+              setDraft(d => d ? {
+                ...d,
+                sources: {
+                  ...d.sources,
+                  goodreads: { ...d.sources.goodreads, rate_limit: 5.0 },
+                },
+              } : d);
+            }}
+          >
+            Bump to 5.0s
+          </Btn>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 4, borderBottom: `1px solid ${t.border}` }}>
         <TabBtn label="Ebook" active={tab === "ebook"} onClick={() => setTab("ebook")} />
         <TabBtn label="Audiobook" active={tab === "audiobook"} onClick={() => setTab("audiobook")} />

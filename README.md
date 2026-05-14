@@ -32,9 +32,15 @@ enrichment, and Calibre delivery — all from a single unified interface.
 ### Discovery
 
 Sync your Calibre library and find every book you're missing across
-7 metadata sources (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google
-Books, MAM). Manage authors, series, and pen-name aliases. Search MAM
-for matches and see which titles are available.
+9 metadata sources (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google
+Books, Open Library, Audible, MAM). Manage authors, series, and
+pen-name aliases. Search MAM for matches and see which titles are
+available.
+
+Per-source coverage, priority defaults, the Cloudflare bypass behind
+Goodreads, and the resolver chain that maps ISBN/ASIN → Goodreads ID
+without scraping `/search` are all documented in
+[`docs/metadata-sources.md`](docs/metadata-sources.md).
 
 Container restarts run an **incremental sync** by default — Calibre's
 `last_modified` column and Audiobookshelf's `updatedAt` field drive a
