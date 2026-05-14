@@ -1139,18 +1139,34 @@ async def scan_books_mam(data: dict = Body(...), slug: str | None = Query(None))
 
 @router.delete("/books/{bid}")
 async def delete_book(bid: int, slug: str | None = Query(None)):
-    """Delete a book entry — only non-Calibre (discovered/imported) books can be deleted.
+    """Delete a book entry — only non-upstream-managed (discovered /
+    imported) books can be deleted. Library-app-managed books
+    (Calibre, Audiobookshelf, etc.) are rejected here because the
+    next library sync would re-add them anyway.
 
     See `hide` for `slug` query-param rationale (multi-library id
     collision).
     """
     db = await get_db(slug)
     try:
-        row = await (await db.execute("SELECT id, source, owned, calibre_id, series_id FROM books WHERE id=?", (bid,))).fetchone()
+        row = await (await db.execute(
+            "SELECT id, source, owned, calibre_id, audiobookshelf_id, series_id "
+            "FROM books WHERE id=?", (bid,),
+        )).fetchone()
         if not row:
             raise HTTPException(404, "Book not found")
         if row["calibre_id"] and row["source"] == "calibre":
             raise HTTPException(400, "Cannot delete books synced from Calibre. Remove them from Calibre instead.")
+        # v2.12.0 — parallel ABS protection. Pre-v2.12.0 the single-book
+        # delete only checked Calibre, so ABS-managed books would be
+        # removed from Seshat's DB and then re-added on the next ABS
+        # sync (looked like the delete silently reverted).
+        if row["audiobookshelf_id"] and row["source"] == "audiobookshelf":
+            raise HTTPException(
+                400,
+                "Cannot delete books synced from Audiobookshelf. "
+                "Remove them from Audiobookshelf instead.",
+            )
         sid = row["series_id"]
         await db.execute("DELETE FROM book_series_suggestions WHERE book_id=?", (bid,))
         await db.execute("DELETE FROM books WHERE id=?", (bid,))
@@ -1337,15 +1353,30 @@ async def bulk_delete(data: dict = Body(...), slug: str | None = Query(None)):
     db = await get_db(slug)
     try:
         placeholders = ",".join(["?" for _ in book_ids])
-        # Partition the requested IDs into deletable vs Calibre-protected
+        # Partition the requested IDs into deletable vs upstream-protected
         # so we can report "deleted N, skipped M" honestly.
+        #
+        # v2.12.0 — protection now spans BOTH library apps. Pre-v2.12.0
+        # only Calibre-managed books were protected; ABS-managed books
+        # would be removed from Seshat's DB and then re-added on the
+        # next audiobookshelf sync, making Delete look broken to users
+        # of the audiobook page (UAT 2026-05-14: Mark observed deletes
+        # silently reverting). The delete-confirmation copy was already
+        # updated in Phase 1 to say "Audiobookshelf-synced books will
+        # be skipped" on audiobook pages — this commit makes the backend
+        # actually skip them.
         rows = await (await db.execute(
-            f"SELECT id, calibre_id, source, series_id FROM books WHERE id IN ({placeholders})",
+            f"SELECT id, calibre_id, audiobookshelf_id, source, series_id "
+            f"FROM books WHERE id IN ({placeholders})",
             book_ids,
         )).fetchall()
         deletable = [
             r["id"] for r in rows
-            if not (r["calibre_id"] is not None and r["source"] == "calibre")
+            if not (
+                (r["calibre_id"] is not None and r["source"] == "calibre")
+                or (r["audiobookshelf_id"] is not None
+                    and r["source"] == "audiobookshelf")
+            )
         ]
         skipped = len(rows) - len(deletable)
         if not deletable:
