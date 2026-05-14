@@ -454,14 +454,22 @@ class AmazonSource(BaseSource):
         standalone: list[BookResult] = []
         for p in products:
             book = self._product_to_book(p)
+            # lookup.py's `_on_book(title: str)` writes to
+            # `state._lookup_progress["current_book"]`, which is
+            # serialized into the live-scan SSE feed. Passing the
+            # BookResult instead of a string caused React error #31
+            # in v2.11.0 Stage 5++ UAT (frontend tried to render the
+            # dataclass as a child node). Pass the title only.
             if on_book is not None:
                 try:
-                    on_book(book)
+                    on_book(book.title)
                 except Exception as exc:  # callback bug shouldn't kill scan
                     logger.debug("amazon: _on_book callback raised: %s", exc)
+            # `_on_new_candidate()` is a parameterless tick counter
+            # — see `_on_new_candidate` def in app/discovery/lookup.py.
             if on_new_candidate is not None:
                 try:
-                    on_new_candidate(book)
+                    on_new_candidate()
                 except Exception as exc:
                     logger.debug(
                         "amazon: _on_new_candidate callback raised: %s", exc,

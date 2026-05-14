@@ -459,8 +459,14 @@ class TestGetAuthorBooks:
 
 
 class TestCallbacks:
-    async def test_on_book_fires_per_book(self):
-        seen: list[str] = []
+    async def test_on_book_fires_per_book_with_title_string(self):
+        """`_on_book(title: str)` is parameterized with a TITLE
+        string, NOT the BookResult instance — see the def in
+        `app/discovery/lookup.py` (writes
+        `state._lookup_progress["current_book"]` which is serialized
+        into the live-scan SSE feed; passing a dataclass crashes the
+        frontend with React error #31)."""
+        seen_titles: list[str] = []
 
         session = MockSession(
             get_routes={
@@ -480,11 +486,50 @@ class TestCallbacks:
         source = AmazonSource(burst_delay_s=0.0)
         source._session = session
         source._session_init_attempted = True
-        source._on_book = lambda b: seen.append(b.title)
+        source._on_book = lambda title: seen_titles.append(title)
 
         await source.get_author_books("B001IGFHW6")
-        assert "Mistborn" in seen
-        assert "The Way of Kings" in seen
+        # Strings, not BookResult dataclasses.
+        for t in seen_titles:
+            assert isinstance(t, str), (
+                f"on_book must receive a str title; got {type(t).__name__}"
+            )
+        assert "Mistborn" in seen_titles
+        assert "The Way of Kings" in seen_titles
+
+    async def test_on_new_candidate_fires_parameterless(self):
+        """`_on_new_candidate()` is a parameterless tick counter
+        — calling it with an arg raises TypeError, which gets
+        DEBUG-logged + swallowed. Confirm we call it with NO args."""
+        tick_count = [0]
+
+        def on_new_candidate():
+            tick_count[0] += 1
+
+        session = MockSession(
+            get_routes={
+                "/stores/author/B001IGFHW6/allbooks": MockResponse(
+                    200, SANDERSON_HTML,
+                ),
+            },
+            post_responses=[MockResponse(200, _juvec_response_json(
+                asin_list=["B002GYI9C4", "B003"],
+                total=2,
+                products=[
+                    _product_dict("B002GYI9C4", "Mistborn"),
+                    _product_dict("B003", "The Way of Kings"),
+                ],
+            ))],
+        )
+        source = AmazonSource(burst_delay_s=0.0)
+        source._session = session
+        source._session_init_attempted = True
+        source._on_new_candidate = on_new_candidate
+
+        await source.get_author_books("B001IGFHW6")
+        assert tick_count[0] >= 2, (
+            f"expected at least 2 ticks for 2 books; got {tick_count[0]}"
+        )
 
     async def test_callback_exception_does_not_kill_scan(self):
         """A buggy _on_book callback that raises should be logged
@@ -503,7 +548,7 @@ class TestCallbacks:
         source = AmazonSource(burst_delay_s=0.0)
         source._session = session
         source._session_init_attempted = True
-        source._on_book = lambda b: (_ for _ in ()).throw(RuntimeError("buggy"))
+        source._on_book = lambda t: (_ for _ in ()).throw(RuntimeError("buggy"))
 
         result = await source.get_author_books("B001IGFHW6")
         assert result is not None
