@@ -227,11 +227,21 @@ def _edition_format_ids(content_type: Optional[str]) -> list[int]:
 # than $limit rows return. Hardcover's default per-page cap is
 # generous (~250+); we use 100 to keep round-trip sizes sane for
 # very prolific authors (J.N. Chaney 493, Logan Jacobs 326).
+#
+# v2.12.0 — Phase 1.0 probe (Sanderson audiobook): without the
+# `contributions(where: ...)` filter, audiobook scans returned 691
+# books for 99 audiobook hits (592 print-only leaked through as
+# books with empty `editions` arrays). With the filter, audiobook
+# scans return 104 books for 104 audiobook hits — AND surface 5
+# extra valid audiobook editions the unfiltered pagination
+# previously starved out (the wasted print-only slots were filling
+# pages before reaching the deeper audiobook editions).
 AUTHOR_BOOKS_QUERY = FRAGMENTS + """
 query AuthorBooks($id: Int!, $limit: Int!, $offset: Int!, $languages: [String!], $format_ids: [Int!]) {
   authors(where: {id: {_eq: $id}}) {
     id name bio books_count image { url }
     contributions(
+      where: {book: {editions: {reading_format_id: {_in: $format_ids}}}}
       limit: $limit
       offset: $offset
       order_by: {book: {release_date: asc_nulls_last}}
