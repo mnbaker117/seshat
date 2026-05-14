@@ -27,6 +27,7 @@ import { BookSidebar } from "../components/BookSidebar";
 import { ClearMenu } from "../components/ClearMenu";
 import { useViewport } from "../hooks/useViewport";
 import { useMobileCodepath } from "../components/mobile";
+import { toast } from "../lib/toast";
 import MobileMAMPage from "./MobileMAMPage";
 import type {
   Book,
@@ -103,11 +104,18 @@ interface BulkScanMamResponse {
 }
 
 // POST /discovery/books/scan-sources (bulk).
+// v2.11.1 N6: the endpoint kicks off a background task and returns
+// IMMEDIATELY with `{status: "started", total: N}` — it does NOT
+// wait for completion. The pre-v2.11.1 BulkScanSourcesResponse type
+// pretended otherwise (claimed authors_scanned / new_books fields
+// would be present), causing the success alert to fire while the
+// scan was still running with all counts undefined. Type fixed +
+// alert replaced with "started" toast; the actual completion is
+// reported via the scan-status banner poll.
 interface BulkScanSourcesResponse {
   error?: string;
-  authors_scanned?: number;
-  new_books?: number;
-  errors?: number;
+  status?: string;
+  total?: number;
 }
 
 // POST /discovery/send-to-pipeline
@@ -496,18 +504,21 @@ function DesktopMAMPage({ onNav }: { onNav: NavFn }) {
         },
       );
       if (r.error) {
-        alert(`Source scan failed: ${r.error}`);
+        toast.error(`Source scan failed: ${r.error}`);
       } else {
-        alert(
-          `Source scan complete: ${r.authors_scanned || 0} author(s) scanned, ${r.new_books || 0} new books found` +
-            (r.errors ? `, ${r.errors} errors` : ""),
+        // v2.11.1 N6: the endpoint kicks off a background task and
+        // returns immediately. Don't claim completion — say "started"
+        // and let the scan-status banner poll surface actual progress
+        // + completion.
+        toast.info(
+          `Source scan started for ${r.total ?? 0} author(s)`,
         );
+        window.dispatchEvent(new CustomEvent("seshat:scan-started"));
         setSel(new Set());
         setSelMode(false);
-        load(pg);
       }
     } catch (e) {
-      alert(`Source scan failed: ${(e as Error).message || e}`);
+      toast.error(`Source scan failed: ${(e as Error).message || e}`);
     }
     setBusy(false);
   };
