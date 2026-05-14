@@ -408,7 +408,13 @@ function SourceList({ tab, draft, setDraft, known }: {
         // tab — with the audiobook-specific format dropdown.
         const showAmazonExtras = name === "amazon";
         const showKoboExtras = name === "kobo" && tab === "ebook";
-        const hasExtrasRow = showAmazonExtras || showKoboExtras;
+        // v2.13.0 Stage 6 — Goodreads gets a status + probe panel below
+        // its row on both tabs. The Goodreads session-state flag is
+        // global across content types, so we render the same card on
+        // the audiobook tab too (Cloudflare doesn't care which scan
+        // tripped the gate).
+        const showGoodreadsExtras = name === "goodreads";
+        const hasExtrasRow = showAmazonExtras || showKoboExtras || showGoodreadsExtras;
         return (
           <div key={name}>
           <div
@@ -550,6 +556,7 @@ function SourceList({ tab, draft, setDraft, known }: {
               onChange={(key, value) => setToggle(name, key, value)}
             />
           )}
+          {showGoodreadsExtras && <GoodreadsStatusCard />}
           </div>
         );
       })}
@@ -691,6 +698,219 @@ function KoboExtrasRow({
         {" "}{rateLimit}s each). Raising concurrency without raising
         Rate triggers Cloudflare soft-blocks.
       </span>
+    </div>
+  );
+}
+
+
+// ─── Goodreads status + probe panel (v2.13.0 Stage 6 Phase A) ───
+//
+// Renders directly below the Goodreads row in both tabs. Provides:
+//   - Status pill: Active / Soft-blocked / Unknown
+//   - Run probe button — single GET to /book/show/237832459
+//   - Run burst button — 10 GETs against the canonical pool
+//   - Mark as active — manual flag reset after investigation
+//
+// Phase A: NO cookie input fields. The probe is the diagnostic for
+// "is the Chrome120 fingerprint alone enough?" — if Phase A UAT
+// shows 202s under burst, v2.13.1 adds the encrypted cookie panel
+// here.
+
+type GoodreadsState = {
+  state: "active" | "soft_blocked" | "unknown";
+  since: number | null;
+  last_status: number | null;
+};
+
+type ProbeRequestResult = {
+  goodreads_id: string;
+  status: number;
+  body_size_kb: number;
+  wall_ms: number;
+  soft_blocked: boolean;
+};
+
+type ProbeBurstSummary = {
+  requests: number;
+  status_distribution: Record<string, number>;
+  soft_blocks: number;
+  total_wall_s: number;
+  mean_body_kb: number;
+  per_request: ProbeRequestResult[];
+};
+
+type ProbeResponse = {
+  mode: "single" | "burst";
+  state_after: GoodreadsState;
+  single?: ProbeRequestResult;
+  burst?: ProbeBurstSummary;
+};
+
+
+function GoodreadsStatusCard() {
+  const t = useTheme();
+  const [state, setState] = useState<GoodreadsState | null>(null);
+  const [running, setRunning] = useState<null | "single" | "burst">(null);
+  const [lastResult, setLastResult] = useState<ProbeResponse | null>(null);
+  const [err, setErr] = useState<string>("");
+
+  // Initial state fetch + refresh after any probe.
+  useEffect(() => {
+    let cancelled = false;
+    api.get<GoodreadsState>("/v1/metadata/goodreads/state").then(s => {
+      if (!cancelled) setState(s);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  async function runProbe(mode: "single" | "burst") {
+    setRunning(mode);
+    setErr("");
+    try {
+      const r = await api.post<ProbeResponse>(
+        "/v1/metadata/goodreads/test", { mode },
+      );
+      setLastResult(r);
+      setState(r.state_after);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Probe failed");
+    } finally {
+      setRunning(null);
+    }
+  }
+
+  async function clearFlag() {
+    setErr("");
+    try {
+      const r = await api.post<{ state_after: GoodreadsState }>(
+        "/v1/metadata/goodreads/mark-active",
+      );
+      setState(r.state_after);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to clear flag");
+    }
+  }
+
+  const pillColor =
+    state?.state === "active" ? t.ok :
+    state?.state === "soft_blocked" ? t.err : t.textDim;
+  const pillLabel =
+    state?.state === "active" ? "Active" :
+    state?.state === "soft_blocked" ? "Soft-blocked" : "Unknown";
+  const sinceText = state?.since
+    ? new Date(state.since * 1000).toLocaleString()
+    : null;
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 10,
+      padding: "10px 4px 14px 60px",
+      borderBottom: `1px solid ${t.borderL}`,
+      fontSize: 12,
+    }}>
+      {/* Status pill + last-seen */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <span style={{ color: t.textDim, fontWeight: 600 }}>Session state</span>
+        <span style={{
+          fontSize: 11, fontWeight: 700, textTransform: "uppercase",
+          padding: "3px 9px", borderRadius: 99, letterSpacing: 0.5,
+          background: pillColor + "22", color: pillColor,
+        }}>{pillLabel}</span>
+        {state?.last_status != null && (
+          <span style={{ color: t.textDim, fontSize: 11 }}>
+            last HTTP {state.last_status}
+          </span>
+        )}
+        {sinceText && state?.state === "soft_blocked" && (
+          <span style={{ color: t.textDim, fontSize: 11 }}>
+            since {sinceText}
+          </span>
+        )}
+      </div>
+
+      {/* Action buttons */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <Btn
+          onClick={() => runProbe("single")}
+          disabled={running !== null}
+        >
+          {running === "single" ? <Spin /> : "Run probe"}
+        </Btn>
+        <Btn
+          onClick={() => runProbe("burst")}
+          disabled={running !== null}
+        >
+          {running === "burst" ? <Spin /> : "Run burst (10×)"}
+        </Btn>
+        {state?.state === "soft_blocked" && (
+          <Btn onClick={clearFlag} disabled={running !== null}>
+            Mark as active
+          </Btn>
+        )}
+        {running === "burst" && (
+          <span style={{ color: t.textDim, fontSize: 11, fontStyle: "italic" }}>
+            ~50s with default 5s rate-limit
+          </span>
+        )}
+      </div>
+
+      {/* Error banner */}
+      {err && (
+        <div style={{
+          background: t.err + "22", border: `1px solid ${t.err}55`,
+          color: t.err, padding: "6px 10px", borderRadius: 6, fontSize: 12,
+        }}>
+          {err}
+        </div>
+      )}
+
+      {/* Result panel */}
+      {lastResult && (
+        <div style={{
+          background: t.bg3, border: `1px solid ${t.borderL}`,
+          borderRadius: 6, padding: "8px 12px", fontSize: 12,
+        }}>
+          {lastResult.mode === "single" && lastResult.single && (
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+              <span><b>HTTP</b> {lastResult.single.status}</span>
+              <span><b>{lastResult.single.body_size_kb}KB</b></span>
+              <span>{lastResult.single.wall_ms}ms</span>
+              {lastResult.single.soft_blocked && (
+                <span style={{ color: t.err, fontWeight: 600 }}>SOFT-BLOCK</span>
+              )}
+            </div>
+          )}
+          {lastResult.mode === "burst" && lastResult.burst && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <span><b>{lastResult.burst.requests}</b> requests</span>
+                <span style={{
+                  color: lastResult.burst.soft_blocks > 0 ? t.err : t.ok,
+                  fontWeight: 600,
+                }}>
+                  {lastResult.burst.soft_blocks} soft-blocks
+                </span>
+                <span>{lastResult.burst.total_wall_s}s total</span>
+                <span>mean {lastResult.burst.mean_body_kb}KB / response</span>
+              </div>
+              <div style={{ color: t.textDim, fontSize: 11 }}>
+                statuses: {Object.entries(lastResult.burst.status_distribution)
+                  .map(([s, n]) => `${s}×${n}`).join(", ")}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Help text */}
+      <div style={{ color: t.textDim, fontSize: 11, fontStyle: "italic", lineHeight: 1.4 }}>
+        Phase A bypass: curl_cffi Chrome120 TLS impersonation. Run probe
+        for a quick connectivity check; run burst to verify density holds
+        under realistic scan load. Soft-block during the burst means
+        Cloudflare is rejecting on request density — try raising the rate
+        limit above (8s+ is conservative) or wait a few hours for the
+        bot-score to decay, then re-test.
+      </div>
     </div>
   );
 }
