@@ -302,11 +302,64 @@ class TestSortKeys:
         assert out == ("asimov", "foundation")
 
     def test_series_key_nulls_sort_last(self):
+        """v2.11.1 N2: has-series rows sort before no-series rows
+        on ASC. First tuple slot is 0 for has-series, 1 for none,
+        so Python's tuple comparison puts has-series first."""
         key = cx.SORT_KEYS["series"]
         has = key({"series_name": "Mistborn", "series_index": 1.0})
         none = key({"series_name": None})
-        # "mistborn" < "zzz" so the series-having row sorts first
         assert has < none
+        # Slot 0 carries the has-series boolean (0 = has, 1 = none).
+        assert has[0] == 0
+        assert none[0] == 1
+
+    def test_series_key_orders_by_index_within_same_series(self):
+        """Within one series, books order by series_index, then
+        title for the same-index dedup case."""
+        key = cx.SORT_KEYS["series"]
+        book1 = key({
+            "series_name": "Mistborn",
+            "series_index": 1.0,
+            "title": "Final Empire",
+        })
+        book2 = key({
+            "series_name": "Mistborn",
+            "series_index": 2.0,
+            "title": "Well of Ascension",
+        })
+        assert book1 < book2
+
+    def test_series_key_orders_by_series_name_across_series(self):
+        """Different series sort alphabetically by series_name."""
+        key = cx.SORT_KEYS["series"]
+        cosmere_a = key({
+            "series_name": "Alcatraz",
+            "series_index": 1.0,
+        })
+        cosmere_m = key({
+            "series_name": "Mistborn",
+            "series_index": 1.0,
+        })
+        assert cosmere_a < cosmere_m
+
+    def test_series_sort_full_list_null_last_ascending(self):
+        """Integration: sort a mixed list and confirm no-series
+        rows land at the END on ascending sort."""
+        rows = [
+            {"series_name": None, "title": "Standalone One"},
+            {"series_name": "Mistborn", "series_index": 2.0, "title": "Well"},
+            {"series_name": None, "title": "Standalone Two"},
+            {"series_name": "Mistborn", "series_index": 1.0, "title": "Final"},
+            {"series_name": "Alcatraz", "series_index": 1.0, "title": "Evil"},
+        ]
+        sorted_rows = sorted(rows, key=cx.SORT_KEYS["series"])
+        # Has-series rows first, alphabetical by series_name then index
+        assert sorted_rows[0]["series_name"] == "Alcatraz"
+        assert sorted_rows[1]["title"] == "Final"
+        assert sorted_rows[2]["title"] == "Well"
+        # No-series rows at the end
+        assert sorted_rows[3]["series_name"] is None
+        assert sorted_rows[4]["series_name"] is None
 
     def test_name_key_falls_back_to_name(self):
         key = cx.SORT_KEYS["name"]

@@ -103,6 +103,10 @@ function DesktopBooksPage({
   const [vm, setVm] = usePersist<ViewMode>(`bp_${title}_vm`, "grid");
   const [grp, setGrp] = usePersist<string>(`bp_${title}_grp`, "all");
   const [sort, setSort] = usePersist<string>(`bp_${title}_sort`, "title");
+  // v2.11.1 N3: sort direction is a separate state. Persisted alongside
+  // the sort field so toggling between fields keeps the user's chosen
+  // direction. Defaults asc; the chevron toggle below flips it.
+  const [sortDir, setSortDir] = usePersist<string>(`bp_${title}_sort_dir`, "asc");
   const [fmt, setFmt] = usePersist<string>(`bp_${title}_fmt`, "all");
   const [sb, setSb] = useState<Book | null>(null);
   const [sbClosing, setSbClosing] = useState(false);
@@ -172,6 +176,7 @@ function DesktopBooksPage({
       const init: Record<string, string> = {
         search: q,
         sort: sortParam,
+        sort_dir: sortDir,
         per_page: String(perPage),
         page: String(page),
       };
@@ -194,7 +199,7 @@ function DesktopBooksPage({
         });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [q, sortParam, apiPath, grp, mamFilter, fmt, showFormatTabs, showOwnedFilter, ownedFilter, perPage],
+    [q, sortParam, sortDir, apiPath, grp, mamFilter, fmt, showFormatTabs, showOwnedFilter, ownedFilter, perPage],
   );
 
   useEffect(() => {
@@ -421,7 +426,7 @@ function DesktopBooksPage({
         {vm === "list" ? (
           <BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={false} {...viewProps} />
         ) : (
-          <BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps} />
+          <BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={false} {...viewProps} />
         )}
       </Section>
     ));
@@ -431,7 +436,7 @@ function DesktopBooksPage({
         {vm === "list" ? (
           <BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps} />
         ) : (
-          <BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps} />
+          <BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps} />
         )}
       </Section>
     ));
@@ -440,7 +445,12 @@ function DesktopBooksPage({
       vm === "list" ? (
         <BList books={bks} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps} />
       ) : (
-        <BGrid books={bks} onAction={onAction} onBookClick={toggleSb} {...viewProps} />
+        // v2.11.1 N3: pass showAuthor to BGrid so the author-name
+        // caption renders on tile cards in grid view. Without this
+        // BGrid's default-undefined `showAuthor` falls through to
+        // BCard's `showAuthor && book.author_name` truthy-check
+        // and the caption is silently skipped.
+        <BGrid books={bks} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps} />
       );
   }
 
@@ -554,26 +564,55 @@ function DesktopBooksPage({
               }}
             />
             {!isGrouped && (
-              <select
-                value={sort}
-                onChange={(e) => {
-                  setSort(e.target.value);
-                  setPg(1);
-                }}
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${t.border}`,
-                  background: t.inp,
-                  color: t.text2,
-                  fontSize: 12,
-                }}
-              >
-                <option value="title">Sort: Title</option>
-                <option value="author">Sort: Author</option>
-                <option value="date">Sort: Date</option>
-                <option value="added">Sort: Added</option>
-              </select>
+              <>
+                <select
+                  value={sort}
+                  onChange={(e) => {
+                    setSort(e.target.value);
+                    setPg(1);
+                  }}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: `1px solid ${t.border}`,
+                    background: t.inp,
+                    color: t.text2,
+                    fontSize: 12,
+                  }}
+                >
+                  <option value="title">Sort: Title</option>
+                  <option value="author">Sort: Author</option>
+                  <option value="series">Sort: Series</option>
+                  <option value="date">Sort: Publication Date</option>
+                  <option value="added">Sort: Date Added</option>
+                </select>
+                {/* v2.11.1 N3: sort direction toggle. Chevron flips
+                    based on direction; click swaps and refetches. */}
+                <button
+                  onClick={() => {
+                    setSortDir(sortDir === "asc" ? "desc" : "asc");
+                    setPg(1);
+                  }}
+                  title={
+                    sortDir === "asc"
+                      ? "Ascending — click for descending"
+                      : "Descending — click for ascending"
+                  }
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: `1px solid ${t.border}`,
+                    background: t.inp,
+                    color: t.text2,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    minWidth: 28,
+                  }}
+                >
+                  {sortDir === "asc" ? "↑" : "↓"}
+                </button>
+              </>
             )}
             {mamOn ? (
               <select

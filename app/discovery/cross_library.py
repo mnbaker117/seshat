@@ -135,9 +135,18 @@ SORT_KEYS: dict[str, Callable[[dict], Any]] = {
         (r.get("author_sort_name") or r.get("author_name") or "").lower(),
         (r.get("title") or "").lower(),
     ),
+    # v2.11.1 N2: NULL-series rows sort to the END on ASC. First
+    # tuple slot is 0 for has-series, 1 for no-series — so
+    # has-series rows come first ascending. On DESC the reverse=True
+    # in `_sorted_page` flips everything, so no-series moves to the
+    # front (standard SQL `ORDER BY series_name DESC NULLS LAST`-vs-
+    # `NULLS FIRST` choice). Acceptable: the typical use case is
+    # asc-by-series with no-series rows pushed to the end.
     "series": lambda r: (
-        (r.get("series_name") or "zzz").lower(),
+        0 if r.get("series_name") else 1,
+        (r.get("series_name") or "").lower(),
         float(r.get("series_index") or 0.0),
+        (r.get("title") or "").lower(),
     ),
     "date": lambda r: (r.get("pub_date") or "",),
     "added": lambda r: (r.get("first_seen_at") or 0.0,),
