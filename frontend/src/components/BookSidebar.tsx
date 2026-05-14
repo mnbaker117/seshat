@@ -616,6 +616,32 @@ export function BookSidebar({
     google_books: { bg: "#1a3333", fg: "#70c8e8", br: "#2a7788" },
     manual:       { bg: t.bg4,     fg: t.td,      br: t.border },
   };
+  // v2.11.1 N7: fallback URL derivation from the per-source `*_id`
+  // columns. Clearing source-scan data wipes `source_url` JSON but
+  // preserves the ID columns; without this fallback, badges
+  // disappear after a data-clear even though the underlying ID
+  // links are intact (UAT 2026-05-13 on Hasekura).
+  //
+  // Only sources whose stored ID maps cleanly to a canonical URL
+  // are derivable. Hardcover + Kobo URLs use slugs (e.g.
+  // hardcover.app/books/the-way-of-kings) and we only store the
+  // numeric ID, so they can't be derived — badge stays missing,
+  // matching pre-v2.11.1 behaviour.
+  const idDerivedUrl: Partial<Record<SourceKey, (id: string) => string>> = {
+    goodreads: (id) => `https://www.goodreads.com/book/show/${id}`,
+    amazon: (id) => `https://www.amazon.com/dp/${id}`,
+    google_books: (id) =>
+      `https://books.google.com/books?id=${encodeURIComponent(id)}`,
+    ibdb: (id) => `https://ibdb.dev/book/${id}`,
+  };
+  const idColumn: Partial<Record<SourceKey, keyof Book>> = {
+    goodreads: "goodreads_id",
+    amazon: "amazon_id",
+    google_books: "google_books_id",
+    ibdb: "ibdb_id",
+    hardcover: "hardcover_id",  // present for completeness; no deriver
+    kobo: "kobo_id",
+  };
   const metadataEntries: { name: SourceKey; url: string }[] = (() => {
     const order: SourceKey[] = [
       "goodreads", "hardcover", "kobo", "amazon", "ibdb", "google_books",
@@ -628,7 +654,22 @@ export function BookSidebar({
         urls = { [book.source || "unknown"]: book.source_url };
       }
     }
-    return order.filter((k) => urls[k]).map((k) => ({ name: k, url: urls[k] }));
+    const out: { name: SourceKey; url: string }[] = [];
+    for (const k of order) {
+      if (urls[k]) {
+        out.push({ name: k, url: urls[k] });
+        continue;
+      }
+      const builder = idDerivedUrl[k];
+      const idKey = idColumn[k];
+      if (builder && idKey) {
+        const id = book[idKey];
+        if (typeof id === "string" && id) {
+          out.push({ name: k, url: builder(id) });
+        }
+      }
+    }
+    return out;
   })();
 
   // Audiobook-specific block gate: fires when the row came from an
