@@ -694,12 +694,24 @@ function DesktopAuthorDetailPage({
     if (!confirm("Scan this author across every audiobook library?")) return;
     setRef(true);
     try {
-      await api.post("/discovery/authors/scan-sources", {
-        author_ids: [authorIdNum],
-        content_type: "audiobook",
-      });
-      toast.info("Audiobook scan started");
-      window.dispatchEvent(new CustomEvent("seshat:scan-started"));
+      // v2.12.0 — gate the "started" toast on r.total > 0. When the
+      // author has no matching audiobook-library row, the backend
+      // returns {total: 0, message: "..."}; the previous code lied
+      // about the scan starting.
+      const r = await api.post<{status?: string; total?: number; message?: string}>(
+        "/discovery/authors/scan-sources",
+        {
+          author_ids: [authorIdNum],
+          content_type: "audiobook",
+        },
+      );
+      if ((r.total ?? 0) > 0) {
+        toast.info(`Audiobook scan started — ${r.total} library iteration(s)`);
+        window.dispatchEvent(new CustomEvent("seshat:scan-started"));
+      } else {
+        toast.warn(r.message || "No audiobook-library match for this author.");
+        setRef(false);
+      }
     } catch (e) {
       toast.error((e as Error).message || "Scan failed to start");
       setRef(false);
@@ -764,9 +776,18 @@ function DesktopAuthorDetailPage({
       hide: "Hidden", dismiss: "Dismissed", delete: "Deleted",
       "skip-mam": "Marked N/A",
     } as const;
+    // v2.12.0 — context-aware "X-synced" copy. Each library app
+    // owns its books (Calibre / Audiobookshelf / etc.) so the delete
+    // handler can't remove them from this side — it skips them. The
+    // user needs to know WHICH app is blocking the delete. ebook → Calibre,
+    // audiobook → Audiobookshelf (the only two app_types we currently
+    // support; revisit if a third lands).
+    const syncedLabel = a?.active_content_type === "audiobook"
+      ? "Audiobookshelf-synced"
+      : "Calibre-synced";
     const msg =
       kind === "delete"
-        ? `Delete ${ids.length} book(s)? Calibre-synced books will be skipped.`
+        ? `Delete ${ids.length} book(s)? ${syncedLabel} books will be skipped.`
         : kind === "skip-mam"
         ? `Mark ${ids.length} book(s) as Not Applicable for MAM scanning?`
         : `${labels[kind]} ${ids.length} book(s)?`;
@@ -787,7 +808,7 @@ function DesktopAuthorDetailPage({
         toast.error(r.error);
       } else if (kind === "delete") {
         const skipMsg = r.skipped
-          ? `, skipped ${r.skipped} Calibre-synced`
+          ? `, skipped ${r.skipped} ${syncedLabel}`
           : "";
         toast.success(`Deleted ${r.deleted || 0} book(s)${skipMsg}`);
       } else {

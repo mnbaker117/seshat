@@ -366,9 +366,14 @@ export default function MobileAuthorDetailPage({
       hide: "Hidden", dismiss: "Dismissed", delete: "Deleted",
       "skip-mam": "Marked N/A",
     } as const;
+    // v2.12.0 — content-type-aware "X-synced" copy. See
+    // DiscAuthorDetailPage.tsx for the rationale.
+    const syncedLabel = a?.active_content_type === "audiobook"
+      ? "Audiobookshelf-synced"
+      : "Calibre-synced";
     const msg =
       kind === "delete"
-        ? `Delete ${ids.length} book(s)? Calibre-synced books will be skipped.`
+        ? `Delete ${ids.length} book(s)? ${syncedLabel} books will be skipped.`
         : kind === "skip-mam"
         ? `Mark ${ids.length} book(s) as Not Applicable for MAM scanning?`
         : `${labels[kind]} ${ids.length} book(s)?`;
@@ -389,7 +394,7 @@ export default function MobileAuthorDetailPage({
         toast.error(r.error);
       } else if (kind === "delete") {
         const skipMsg = r.skipped
-          ? `, skipped ${r.skipped} Calibre-synced`
+          ? `, skipped ${r.skipped} ${syncedLabel}`
           : "";
         toast.success(`Deleted ${r.deleted || 0} book(s)${skipMsg}`);
       } else {
