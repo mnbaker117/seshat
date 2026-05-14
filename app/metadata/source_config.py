@@ -81,7 +81,7 @@ KNOWN_SOURCES: dict[str, dict[str, Any]] = {
     # naturally minutes apart from snatching cadence). User can
     # tighten the rate via Settings but Amazon discovery is off
     # by default anyway.
-    "amazon":      {"display": "Amazon",        "available_for": ("ebook",),             "default_rate": 30.0},
+    "amazon":      {"display": "Amazon",        "available_for": ("ebook", "audiobook"), "default_rate": 30.0},
     "hardcover":   {"display": "Hardcover",     "available_for": ("ebook", "audiobook"), "default_rate": 1.0},
     "kobo":        {"display": "Kobo",          "available_for": ("ebook",),             "default_rate": 3.0},
     "ibdb":        {"display": "IBDB",          "available_for": ("ebook",),             "default_rate": 1.0},
