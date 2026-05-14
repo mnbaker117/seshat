@@ -147,9 +147,19 @@ async def main(hardcover_api_key: str, google_books_api_key: str) -> int:
     # rate_limit). Catches the 2026-05-12 Hardcover transient issue
     # where the GraphQL beta API throttled mid-batch after ~6 calls,
     # producing 8/14 false FAILs that didn't reproduce on one-shot
-    # probes. Conservative defaults — only adds 1-2s per author.
+    # probes.
+    #
+    # v2.11.1: hardcover bumped 2.0 → 5.0 after the 2026-05-13 Stage 5++
+    # UAT harness ran into the same throttling pattern. 2.0s wasn't
+    # enough — Hardcover still 429ed after ~5-6 authors in a 14-author
+    # run, leaving the back half of the table as FAIL noise. 5.0s
+    # gives 14 × ~5s = +70s wall time, acceptable for a dev tool;
+    # the prior 2.0s ship value remains documented as the bare minimum.
+    # Real production scans don't see this because authors are
+    # processed via the discovery pipeline with much longer natural
+    # spacing between Hardcover requests.
     PER_SOURCE_EXTRA_DELAY = {
-        "hardcover": 2.0,    # GraphQL beta throttling observed
+        "hardcover": 5.0,    # GraphQL beta throttling — see comment above
         "google_books": 1.0, # transient 503s observed
     }
 
