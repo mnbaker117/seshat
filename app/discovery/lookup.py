@@ -2644,13 +2644,27 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
         if not found:
             logger.info(f"  [{source_name}] No author match found")
             return 0
-        if not found.external_id:
+        # v2.12.0 — re-ordered: the external_id check used to fire
+        # BEFORE the has_data check below, which rejected Audible
+        # results entirely (Audible doesn't expose author-level IDs
+        # so it always returns external_id=None, but it DOES
+        # pre-populate `books` from the catalog endpoint). The
+        # external_id is only required for the get_author_books
+        # fallback fetch path; if search_author already returned the
+        # books inline, we don't need an ID.
+        has_data = len(found.books) > 0 or len(found.series) > 0
+        if not found.external_id and not has_data:
             logger.info(f"  [{source_name}] Found author but no external ID")
             return 0
-        logger.info(f"  [{source_name}] Found: '{found.name}' (id={found.external_id})")
+        if found.external_id:
+            logger.info(f"  [{source_name}] Found: '{found.name}' (id={found.external_id})")
+        else:
+            logger.info(
+                f"  [{source_name}] Found: '{found.name}' "
+                f"(no external_id; {len(found.books)} book(s) / "
+                f"{len(found.series)} series pre-populated)"
+            )
 
-        # Some sources (like Hardcover) return full results from search_author
-        has_data = len(found.books) > 0 or len(found.series) > 0
         if has_data:
             full = found
         else:
