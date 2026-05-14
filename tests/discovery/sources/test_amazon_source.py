@@ -82,11 +82,19 @@ def _juvec_response_json(
     total: int | None = None,
     products: list[dict] | None = None,
 ) -> str:
-    body = {"content": {"products": products or []}}
+    """Live response shape (validated 2026-05-13): products + ASINList
+    + totalResultCount at top level, `isSuccess: True`, plus a request-
+    echo `content` field that the parser explicitly ignores."""
+    body: dict = {
+        "products": products or [],
+        "isSuccess": True,
+        "content": {"includeOutOfStock": True},  # request echo
+    }
     if asin_list is not None:
-        body["content"]["ASINList"] = asin_list
+        body["ASINList"] = asin_list
     if total is not None:
-        body["content"]["totalResultCount"] = total
+        body["totalResultCount"] = total
+        body["totalCount"] = total
     raw = json.dumps(body)
     return raw + " " * max(0, 1100 - len(raw))  # bypass thin-body guard
 

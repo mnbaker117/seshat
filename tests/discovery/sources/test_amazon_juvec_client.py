@@ -76,27 +76,30 @@ def page_data():
 
 
 def _wellformed_response(asin_list: list[str] = None, total: int = 645):
-    """Build a /juvec response JSON the parser will accept. Padded
-    to ≥1 KB so the thin-body guard doesn't trip."""
+    """Build a /juvec response JSON the parser will accept. Live
+    response shape (validated 2026-05-13): products + ASINList +
+    totalResultCount at top level, plus a request-echo `content`
+    field. Padded to ≥1 KB so the thin-body guard doesn't trip."""
     body = {
-        "content": {
-            "ASINList": asin_list or [],
-            "totalResultCount": total,
-            "products": [
-                {
-                    "asin": "B002GYI9C4",
-                    "title": {"displayString": "Mistborn"},
-                    "bindingInformation": {
-                        "binding": {
-                            "symbol": "kindle_edition",
-                            "displayString": "Kindle Edition",
-                        },
+        "ASINList": asin_list or [],
+        "totalResultCount": total,
+        "totalCount": total,
+        "isSuccess": True,
+        "products": [
+            {
+                "asin": "B002GYI9C4",
+                "title": {"displayString": "Mistborn"},
+                "bindingInformation": {
+                    "binding": {
+                        "symbol": "kindle_edition",
+                        "displayString": "Kindle Edition",
                     },
-                    "byLine": {"contributors": [{"name": "Brandon Sanderson"}]},
-                    "mediaMatrix": {"items": []},
                 },
-            ],
-        },
+                "byLine": {"contributors": [{"name": "Brandon Sanderson"}]},
+                "mediaMatrix": {"items": []},
+            },
+        ],
+        "content": {"includeOutOfStock": True},  # request echo
     }
     raw = json.dumps(body)
     # Pad if too short

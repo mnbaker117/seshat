@@ -176,36 +176,46 @@ def parse_allbooks_html(html: str) -> AllBooksPageData:
 def parse_juvec_response(json_body: dict) -> JuvecResponse:
     """Parse a /juvec POST response.
 
-    The response wraps a `content` block whose shape mirrors the SSR
-    page's embedded widget JSON. We accept both forms: a top-level
-    `content` key (filter-application + detail-fetch responses both
-    appear to use this) OR the bare content blob (defensive fallback
-    if Amazon's framing layer ever drops the wrapper).
+    Validated 2026-05-13 against the live endpoint:
+    the response carries `products`, `ASINList`, `totalResultCount`,
+    `totalCount`, `isSuccess`, `allProductsReturned` etc. at the
+    TOP LEVEL of the JSON body. There IS a `content` key in the
+    response but it's just an echo of the request's `content` field
+    (`{"includeOutOfStock": true}`) — NOT a wrapper around the data.
+
+    We require at least one of the expected widget-shape fields to
+    be present at top level. If a future Amazon rev wraps the data
+    under a different key (e.g. `data`, `result`), this will raise
+    rather than silently return empty.
     """
-    content = json_body.get("content") if "content" in json_body else json_body
-    if not isinstance(content, dict):
+    if not isinstance(json_body, dict):
         raise ParseError(
-            f"/juvec response had no recognisable content blob; "
-            f"top-level keys = {list(json_body.keys())}"
+            f"/juvec response was not a JSON object "
+            f"(type={type(json_body).__name__})"
         )
-    # If we fell back to the top-level body, require at least one
-    # widget-shape field — guards against a JSON 200 from an unrelated
-    # endpoint or a future framing change we'd want to fail loudly.
-    if "content" not in json_body:
-        expected = ("products", "ASINList", "totalResultCount", "totalCount")
-        if not any(k in content for k in expected):
-            raise ParseError(
-                f"/juvec response has neither a `content` wrapper nor any "
-                f"expected widget fields; top-level keys = {list(json_body.keys())}"
-            )
+    expected = ("products", "ASINList", "totalResultCount", "totalCount")
+    if not any(k in json_body for k in expected):
+        raise ParseError(
+            f"/juvec response has no expected widget fields at top level; "
+            f"top-level keys = {sorted(json_body.keys())}"
+        )
+    # `isSuccess: False` is Amazon's explicit "we processed the request
+    # but it failed" signal — surface as a parse error so the caller
+    # falls back rather than silently treating an empty result as a
+    # legitimate empty catalog.
+    if json_body.get("isSuccess") is False:
+        raise ParseError(
+            f"/juvec response carried isSuccess=False; "
+            f"correctedSearchKeywords={json_body.get('correctedSearchKeywords')!r}"
+        )
     return JuvecResponse(
-        products=_parse_products(content.get("products") or []),
-        asin_list=tuple(str(a) for a in (content.get("ASINList") or [])),
+        products=_parse_products(json_body.get("products") or []),
+        asin_list=tuple(str(a) for a in (json_body.get("ASINList") or [])),
         total_result_count=(
-            int(content["totalResultCount"])
-            if "totalResultCount" in content else None
+            int(json_body["totalResultCount"])
+            if "totalResultCount" in json_body else None
         ),
-        raw_content=content,
+        raw_content=json_body,
     )
 
 

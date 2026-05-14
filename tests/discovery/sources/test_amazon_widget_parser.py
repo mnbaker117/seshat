@@ -15,7 +15,6 @@ inference live and adjusts if Amazon's response framing differs.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -25,8 +24,6 @@ from app.discovery.sources.amazon_widget_parser import (
     BINDING_TO_FILTER,
     DEFAULT_LANGUAGES,
     FILTER_TO_BINDING,
-    FormatVariant,
-    JuvecResponse,
     ParseError,
     Product,
     parse_allbooks_html,
@@ -231,34 +228,41 @@ class TestParseErrors:
 
 
 class TestJuvecResponseParser:
-    """Synthetic fixtures built from the SSR `content` schema —
-    commit 4 validates against a live response and adjusts if
-    Amazon's framing differs.
-    """
+    """Response shape validated 2026-05-13 against the live endpoint
+    via `scripts/probe_amazon_juvec.py`. Products + ASINList +
+    totalResultCount live at the TOP LEVEL of the body. The
+    `content` key in the response is just a request echo — NOT a
+    data wrapper. These tests pin the live shape."""
 
     def test_filter_application_shape(self):
         """When the client POSTs with authorSearch + authorFilters
         (no ASINList), the server returns a fresh filtered ASINList
-        + populated products + totalResultCount for that filter."""
+        + populated products + totalResultCount at top level. The
+        echoed `content` field carries only the request's
+        `includeOutOfStock` flag and is irrelevant for parsing."""
         body = {
-            "content": {
-                "ASINList": ["B002GYI9C4", "B001QKBHG4"],
-                "totalResultCount": 83,
-                "products": [
-                    {
-                        "asin": "B002GYI9C4",
-                        "title": {"displayString": "Mistborn: The Final Empire"},
-                        "bindingInformation": {
-                            "binding": {
-                                "symbol": "kindle_edition",
-                                "displayString": "Kindle Edition",
-                            },
+            "ASINList": ["B002GYI9C4", "B001QKBHG4"],
+            "totalResultCount": 83,
+            "totalCount": 83,
+            "isSuccess": True,
+            "allProductsReturned": True,
+            "products": [
+                {
+                    "asin": "B002GYI9C4",
+                    "title": {"displayString": "Mistborn: The Final Empire"},
+                    "bindingInformation": {
+                        "binding": {
+                            "symbol": "kindle_edition",
+                            "displayString": "Kindle Edition",
                         },
-                        "byLine": {"contributors": [{"name": "Brandon Sanderson"}]},
-                        "mediaMatrix": {"items": []},
                     },
-                ],
-            },
+                    "byLine": {"contributors": [{"name": "Brandon Sanderson"}]},
+                    "mediaMatrix": {"items": []},
+                },
+            ],
+            # Request echo — must NOT be mistaken for the data wrapper.
+            "content": {"includeOutOfStock": True},
+            "requestContext": {"slateToken": "..."},
         }
         parsed = parse_juvec_response(body)
         assert parsed.asin_list == ("B002GYI9C4", "B001QKBHG4")
@@ -268,89 +272,99 @@ class TestJuvecResponseParser:
 
     def test_detail_fetch_shape(self):
         """When the client POSTs with ASINList (no authorSearch), the
-        server returns just the populated products for those ASINs.
-        totalResultCount may be absent — that's fine, returns None."""
+        server returns populated products for those ASINs at top
+        level. totalResultCount may be absent — returns None."""
         body = {
-            "content": {
-                "products": [
-                    {
-                        "asin": "B097KR667N",
-                        "title": {"displayString": "Some Sanderson Book"},
-                        "bindingInformation": {
-                            "binding": {
-                                "symbol": "kindle_edition",
-                                "displayString": "Kindle Edition",
-                            },
+            "products": [
+                {
+                    "asin": "B097KR667N",
+                    "title": {"displayString": "Some Sanderson Book"},
+                    "bindingInformation": {
+                        "binding": {
+                            "symbol": "kindle_edition",
+                            "displayString": "Kindle Edition",
                         },
-                        "byLine": {"contributors": [{"name": "Brandon Sanderson"}]},
-                        "mediaMatrix": {"items": []},
                     },
-                ],
-            },
+                    "byLine": {"contributors": [{"name": "Brandon Sanderson"}]},
+                    "mediaMatrix": {"items": []},
+                },
+            ],
+            "isSuccess": True,
+            "content": {"includeOutOfStock": True},
         }
         parsed = parse_juvec_response(body)
         assert parsed.asin_list == ()
         assert parsed.total_result_count is None
         assert len(parsed.products) == 1
 
-    def test_unwrapped_content_fallback(self):
-        """Defensive: if Amazon ever drops the `content` wrapper,
-        parse the body as content directly. Stops a future framing
-        change from breaking the scan flow silently."""
+    def test_empty_filter_result_is_valid(self):
+        """A filter with no matches returns totalResultCount=0 with
+        empty arrays. Still a successful response — parse cleanly."""
         body = {
-            "products": [],
             "ASINList": [],
+            "products": [],
             "totalResultCount": 0,
+            "totalCount": 0,
+            "isSuccess": True,
         }
         parsed = parse_juvec_response(body)
         assert parsed.products == ()
         assert parsed.asin_list == ()
+        assert parsed.total_result_count == 0
 
     def test_skips_malformed_products(self):
         """A product entry missing title, binding, or asin gets
         DEBUG-logged and skipped — the rest of the batch still
         comes through."""
         body = {
-            "content": {
-                "products": [
-                    {"asin": "B001IGFHW6"},  # missing title + binding
-                    {
-                        "asin": "B002GYI9C4",
-                        "title": {"displayString": "Mistborn"},
-                        "bindingInformation": {
-                            "binding": {
-                                "symbol": "kindle_edition",
-                                "displayString": "Kindle Edition",
-                            },
+            "isSuccess": True,
+            "products": [
+                {"asin": "B001IGFHW6"},  # missing title + binding
+                {
+                    "asin": "B002GYI9C4",
+                    "title": {"displayString": "Mistborn"},
+                    "bindingInformation": {
+                        "binding": {
+                            "symbol": "kindle_edition",
+                            "displayString": "Kindle Edition",
                         },
                     },
-                    {
-                        # No asin
-                        "title": {"displayString": "Ghost"},
-                        "bindingInformation": {
-                            "binding": {
-                                "symbol": "kindle_edition",
-                                "displayString": "Kindle Edition",
-                            },
+                },
+                {
+                    # No asin
+                    "title": {"displayString": "Ghost"},
+                    "bindingInformation": {
+                        "binding": {
+                            "symbol": "kindle_edition",
+                            "displayString": "Kindle Edition",
                         },
                     },
-                ],
-            },
+                },
+            ],
         }
         parsed = parse_juvec_response(body)
         assert len(parsed.products) == 1
         assert parsed.products[0].asin == "B002GYI9C4"
 
-    def test_no_content_raises(self):
-        """If both top-level and `content`-wrapped extraction fail,
-        raise ParseError so the caller can log + return [] instead
-        of silently dropping a scan."""
-        with pytest.raises(ParseError):
+    def test_isSuccess_false_raises(self):
+        """Amazon's explicit failure signal — caller falls back
+        rather than silently treating empty as a real result."""
+        with pytest.raises(ParseError, match="isSuccess=False"):
+            parse_juvec_response({  # type: ignore[arg-type]
+                "isSuccess": False,
+                "products": [],
+                "correctedSearchKeywords": "",
+            })
+
+    def test_no_widget_fields_raises(self):
+        """If none of products / ASINList / totalResultCount /
+        totalCount exist at top level, the shape is unrecognised."""
+        with pytest.raises(ParseError, match="no expected widget fields"):
             parse_juvec_response({"unrelated": "shape"})  # type: ignore[arg-type]
 
-    def test_top_level_content_must_be_dict(self):
-        with pytest.raises(ParseError):
-            parse_juvec_response({"content": "not a dict"})  # type: ignore[arg-type]
+    def test_non_dict_body_raises(self):
+        with pytest.raises(ParseError, match="not a JSON object"):
+            parse_juvec_response("not a dict")  # type: ignore[arg-type]
 
 
 class TestFormatMappingTables:
