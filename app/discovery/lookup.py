@@ -206,13 +206,19 @@ def reload_sources():
     # `audiobook_format_filter` based on `_content_type` set by the
     # dispatcher.
     _amazon_entry = (s.get("metadata_sources") or {}).get("amazon") or {}
+    # `or "kindle"` (not `.get(..., "kindle")`) so a stored null —
+    # which the panel save persists when the user never touched the
+    # dropdown — coerces back to the ship-default. Otherwise the
+    # source receives `format_filter=None` and emits
+    # `authorFilters.format=[null]` on /juvec, which Amazon answers
+    # with an echo-shape empty response (no products / no ASINList).
     amazon = AmazonSource(
         rate_limit=get_source_rate_limit(s, "amazon"),
-        format_filter=_amazon_entry.get("format", "kindle"),
-        audiobook_format_filter=_amazon_entry.get(
-            "audiobook_format", "audible_audiobook",
+        format_filter=_amazon_entry.get("format") or "kindle",
+        audiobook_format_filter=(
+            _amazon_entry.get("audiobook_format") or "audible_audiobook"
         ),
-        language=_amazon_entry.get("language", "English"),
+        language=_amazon_entry.get("language") or "English",
     )
     ibdb = IbdbSource(rate_limit=get_source_rate_limit(s, "ibdb"))
     google_books = GoogleBooksSource(

@@ -210,8 +210,15 @@ async def put_state(body: MetadataSourcesState) -> PutResponse:
     gb_now_on = bool(new_gb.get("ebook_scan") or new_gb.get("ebook_enrich")
                      or new_gb.get("audiobook_scan") or new_gb.get("audiobook_enrich"))
     gb_reenabled = gb_was_off and gb_now_on
+    # `exclude_none=True` strips fields that don't apply to a source
+    # (e.g. Amazon doesn't have `concurrency`; Kobo doesn't have
+    # `format`). Persisting nulls poisons `reload_sources()` callers
+    # that read with `.get(key, default)` — the key exists, so the
+    # default never kicks in and the live source ends up with None
+    # where it expected the ship-default string.
     settings["metadata_sources"] = {
-        name: entry.model_dump() for name, entry in body.sources.items()
+        name: entry.model_dump(exclude_none=True)
+        for name, entry in body.sources.items()
     }
     settings["metadata_priority"] = {
         "ebook": ebook,
