@@ -186,6 +186,155 @@ class TestResolverTier1AutoComplete:
         assert result.soft_blocked is False
 
 
+class TestResolverTier2HardcoverBookMappings:
+    """v2.13.0 — Hardcover GraphQL `book_mappings` resolver tier."""
+
+    async def _setup_hardcover_key(self, monkeypatch, key: str = "test_key"):
+        """Plant a hardcover_api_key in settings for the tier-2 fetch
+        to find. Uses the tmp_path settings.json from the autouse
+        fixture so it's isolated per test."""
+        from app.config import load_settings, save_settings
+        s = dict(load_settings())
+        s["hardcover_api_key"] = key
+        save_settings(s)
+
+    async def test_isbn_hit_returns_goodreads_id(self, monkeypatch):
+        from app.metadata.goodreads_id_resolver import (
+            ResolveQuery, resolve_goodreads_id,
+        )
+        await self._setup_hardcover_key(monkeypatch)
+
+        calls: list[str] = []
+
+        def hardcover_handler(req: httpx.Request) -> httpx.Response:
+            calls.append(str(req.url))
+            assert "hardcover.app" in str(req.url)
+            return httpx.Response(200, json={
+                "data": {
+                    "editions": [{
+                        "book": {
+                            "book_mappings": [{"external_id": "8134945"}],
+                        }
+                    }]
+                }
+            })
+
+        # Patch httpx.AsyncClient inside the resolver module so its
+        # one-off Hardcover client gets our mock transport.
+        import app.metadata.goodreads_id_resolver as gr_mod
+        original_client = httpx.AsyncClient
+
+        def fake_async_client(*args, **kwargs):
+            kwargs.pop("timeout", None)
+            kwargs.pop("headers", None)
+            return original_client(
+                transport=httpx.MockTransport(hardcover_handler),
+                timeout=5.0,
+            )
+        monkeypatch.setattr(gr_mod.httpx, "AsyncClient", fake_async_client)
+
+        # Tier 1 (auto_complete) misses, Tier 2 (Hardcover) hits.
+        def goodreads_handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[])  # tier 1 miss
+
+        # The injected `client` is for Goodreads + OL (NOT Hardcover —
+        # tier 2 builds its own client which our patched AsyncClient
+        # intercepts).
+        transport = httpx.MockTransport(goodreads_handler)
+        async with original_client(transport=transport, timeout=5.0) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(isbn="9780765376671"), client=client,
+            )
+
+        assert result.goodreads_book_id == "8134945"
+        assert result.tier == "hardcover"
+        # One Hardcover GraphQL call was made.
+        assert len(calls) == 1
+
+    async def test_no_api_key_skips_tier(self, monkeypatch):
+        """Without a Hardcover API key the tier silently no-ops and
+        Tier 3 picks up the slack."""
+        from app.metadata.goodreads_id_resolver import (
+            ResolveQuery, resolve_goodreads_id,
+        )
+        # No API key planted — autouse fixture's tmp_path settings.json
+        # is fresh.
+
+        hardcover_calls: list[str] = []
+        original_client = httpx.AsyncClient
+
+        def fake_async_client(*args, **kwargs):
+            # If tier 2 attempts to build a Hardcover client, this
+            # captures the call. We assert it's NEVER called below.
+            hardcover_calls.append("attempted")
+            return original_client(*args, **kwargs)
+        import app.metadata.goodreads_id_resolver as gr_mod
+        monkeypatch.setattr(gr_mod.httpx, "AsyncClient", fake_async_client)
+
+        def goodreads_handler(req: httpx.Request) -> httpx.Response:
+            if "auto_complete" in str(req.url):
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json={
+                "ISBN:9780000000003": {
+                    "identifiers": {"goodreads": ["111"]}
+                }
+            })
+
+        transport = httpx.MockTransport(goodreads_handler)
+        async with original_client(transport=transport, timeout=5.0) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(isbn="9780000000003"), client=client,
+            )
+
+        # Tier 3 (OpenLibrary) recovered the answer.
+        assert result.goodreads_book_id == "111"
+        assert result.tier == "openlibrary"
+        # CRITICAL: tier 2 never attempted to build a Hardcover client.
+        assert hardcover_calls == []
+
+    async def test_book_mappings_empty_falls_through_to_tier3(self, monkeypatch):
+        from app.metadata.goodreads_id_resolver import (
+            ResolveQuery, resolve_goodreads_id,
+        )
+        await self._setup_hardcover_key(monkeypatch)
+
+        def hardcover_handler(req: httpx.Request) -> httpx.Response:
+            # Hardcover found the book but has no Goodreads mapping.
+            return httpx.Response(200, json={
+                "data": {"editions": [{"book": {"book_mappings": []}}]}
+            })
+
+        original_client = httpx.AsyncClient
+
+        def fake_async_client(*args, **kwargs):
+            kwargs.pop("timeout", None)
+            kwargs.pop("headers", None)
+            return original_client(
+                transport=httpx.MockTransport(hardcover_handler),
+                timeout=5.0,
+            )
+        import app.metadata.goodreads_id_resolver as gr_mod
+        monkeypatch.setattr(gr_mod.httpx, "AsyncClient", fake_async_client)
+
+        def fallthrough_handler(req: httpx.Request) -> httpx.Response:
+            if "auto_complete" in str(req.url):
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json={
+                "ISBN:9780000000004": {
+                    "identifiers": {"goodreads": ["222"]}
+                }
+            })
+
+        transport = httpx.MockTransport(fallthrough_handler)
+        async with original_client(transport=transport, timeout=5.0) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(isbn="9780000000004"), client=client,
+            )
+
+        assert result.goodreads_book_id == "222"
+        assert result.tier == "openlibrary"
+
+
 class TestResolverTier3OpenLibrary:
     async def test_isbn_with_goodreads_cross_ref_returns_id(self):
         def handler(req: httpx.Request) -> httpx.Response:

@@ -132,13 +132,32 @@ async def resolve_goodreads_id(
                     )
                 return result
 
-        # ── Tier 2: Hardcover book_mappings (deferred) ─────────
-        # Implemented in v2.11.0 once the Hardcover discovery client
-        # has a `book_mappings` GraphQL query method. Until then we
-        # log a stub so future ops can see this tier was skipped.
-        _log.debug(
-            "resolver: tier2 (hardcover book_mappings) deferred to v2.11.0"
-        )
+        # ── Tier 2: Hardcover book_mappings ─────────────────────
+        # Hardcover's GraphQL `book_mappings` table cross-references
+        # each book to identifiers on other platforms (Goodreads,
+        # Audible, Google Books, etc.). When we have an ISBN or ASIN
+        # we can do a single editions→book→book_mappings join to get
+        # the Goodreads ID without ever touching Goodreads.
+        for ident_kind, ident_value in (("isbn_13", query.isbn), ("asin", query.asin)):
+            if not ident_value:
+                continue
+            tier2 = await _tier2_hardcover_book_mappings(
+                ident_kind, ident_value,
+            )
+            if tier2:
+                _log.debug(
+                    "resolver: tier2 (hardcover book_mappings) hit for %s=%s "
+                    "→ goodreads_id=%s",
+                    ident_kind, ident_value, tier2,
+                )
+                result = ResolveResult(tier2, "hardcover", soft_blocked)
+                if use_cache:
+                    id_cache.put_book_id(
+                        isbn=query.isbn, asin=query.asin,
+                        title=query.title, author=query.author,
+                        book_id=tier2, tier="hardcover",
+                    )
+                return result
 
         # ── Tier 3: Open Library identifiers.goodreads ─────────
         if query.isbn:
@@ -236,6 +255,117 @@ async def _tier1_auto_complete(
             if book_id:
                 return str(book_id)
     return None
+
+
+_HARDCOVER_API = "https://api.hardcover.app/v1/graphql"
+
+# Single-roundtrip GraphQL query: editions filtered by ISBN-13 or ASIN
+# → book → book_mappings restricted to platform "Goodreads". Limits all
+# of editions/book_mappings to 1 so Hardcover doesn't return a giant
+# graph for popular titles with many editions.
+_HARDCOVER_BOOK_MAPPINGS_QUERY = """
+query GoodreadsMapping($ident_kind: editions_bool_exp!) {
+  editions(where: $ident_kind, limit: 1) {
+    book {
+      book_mappings(
+        where: {platform: {name: {_eq: "Goodreads"}}}
+        limit: 1
+      ) {
+        external_id
+      }
+    }
+  }
+}
+"""
+
+
+async def _tier2_hardcover_book_mappings(
+    ident_kind: str, ident_value: str,
+) -> Optional[str]:
+    """Resolve a Goodreads book ID via Hardcover's GraphQL
+    `book_mappings` cross-reference.
+
+    Hardcover's API ships a `book_mappings` table that joins each book
+    to its identifiers on other platforms (Goodreads, Audible, Google
+    Books, etc.). When we have an ISBN-13 or ASIN we can do one GraphQL
+    roundtrip to get the Goodreads cross-ref without ever touching
+    Goodreads itself.
+
+    Args:
+      ident_kind: "isbn_13" or "asin" — the editions-table column
+                  we're filtering on.
+      ident_value: The actual identifier value.
+
+    Returns:
+      The Goodreads book ID string on hit, None on miss / no Hardcover
+      API key configured / any error. Errors are swallowed (returns
+      None) — Tier 3 (OpenLibrary) is the next fall-through.
+    """
+    # Hardcover requires a Bearer token. Without one, this tier no-ops
+    # (Tier 3 OL is free + no-key and covers the same cross-reference
+    # need for many books).
+    from app.config import load_settings
+    from app.secrets import get_secret
+
+    settings = load_settings()
+    api_key = (await get_secret("hardcover_api_key")) or settings.get(
+        "hardcover_api_key", ""
+    )
+    if not api_key:
+        return None
+    token = api_key.strip()
+    if " " not in token:
+        token = f"Bearer {token}"
+
+    # Wrap the identifier into the editions_bool_exp shape Hardcover's
+    # schema expects. Building it caller-side keeps the GraphQL query
+    # a single static string.
+    where_clause: dict = {ident_kind: {"_eq": ident_value}}
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Seshat/2.13",
+                "Authorization": token,
+            },
+        ) as client:
+            resp = await client.post(
+                _HARDCOVER_API,
+                json={
+                    "query": _HARDCOVER_BOOK_MAPPINGS_QUERY,
+                    "variables": {"ident_kind": where_clause},
+                },
+            )
+    except Exception as e:
+        _log.debug("resolver: tier2 hardcover network error: %s", e)
+        return None
+
+    if resp.status_code != 200:
+        _log.debug(
+            "resolver: tier2 hardcover unexpected status %d", resp.status_code,
+        )
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    if "errors" in data:
+        _log.debug("resolver: tier2 hardcover graphql errors: %s", data["errors"])
+        return None
+
+    editions = (data.get("data") or {}).get("editions") or []
+    if not editions:
+        return None
+    book = editions[0].get("book") or {}
+    mappings = book.get("book_mappings") or []
+    if not mappings:
+        return None
+    external_id = mappings[0].get("external_id")
+    if not external_id:
+        return None
+    return str(external_id)
 
 
 async def _tier3_openlibrary(
