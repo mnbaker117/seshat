@@ -265,11 +265,20 @@ async def get_author(aid: int, include_cross_library: bool = False, slug: Option
                 # equivalent to our Python-side normalize_author —
                 # author counts per library are small (low thousands)
                 # so this is fine.
+                #
+                # v2.12.1: query EVERY author row, not just those with
+                # books. The dual-author-row pattern auto-creates stub
+                # rows in the other-type library when an author lands
+                # in either type — stubs have zero books but still need
+                # to surface here so the AuthorDetail page can render
+                # both tabs (otherwise the Ebook / Audiobook tabs
+                # disappear when one side is empty, hiding the cross-
+                # library Scan {Ebooks,Audiobooks} button on top of
+                # smooshing the views together).
                 other_db = await get_db(lib["slug"])
                 try:
                     rows = await (await other_db.execute(
-                        "SELECT id, name FROM authors WHERE id IN "
-                        "(SELECT DISTINCT author_id FROM books)"
+                        "SELECT id, name FROM authors"
                     )).fetchall()
                 finally:
                     await other_db.close()
