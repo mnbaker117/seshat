@@ -271,15 +271,28 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
       // filter approach combined with the `library_slug:id` selection
       // key above keeps both distinct.
       const picked = selectedAuthors();
-      await api.post("/discovery/authors/scan-sources", {
-        author_ids: picked.map((a) => a.id),
-        author_names: picked.map((a) => a.name),
-        ...(scope ? { content_type: scope } : {}),
-      });
-      toast.info("Scan started");
+      // v2.12.0 — gate the "started" toast on actually-started work.
+      // The backend returns {status: "ok", total: 0, message: "No
+      // matching authors..."} when the cross-library author-name
+      // resolver finds zero matches; previously the frontend fired
+      // toast.info("Scan started") regardless, lying about a scan that
+      // never actually ran. Now we read `total` and toast accordingly.
+      const r = await api.post<{status?: string; total?: number; message?: string}>(
+        "/discovery/authors/scan-sources",
+        {
+          author_ids: picked.map((a) => a.id),
+          author_names: picked.map((a) => a.name),
+          ...(scope ? { content_type: scope } : {}),
+        },
+      );
+      if ((r.total ?? 0) > 0) {
+        toast.info(`Scan started — ${r.total} author(s)`);
+        window.dispatchEvent(new CustomEvent("seshat:scan-started"));
+      } else {
+        toast.warn(r.message || "Nothing to scan — no matching authors found.");
+      }
       setSel(new Set());
       setSelMode(false);
-      window.dispatchEvent(new CustomEvent("seshat:scan-started"));
     } catch (e) {
       toast.error((e as Error).message || "Failed");
     }

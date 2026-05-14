@@ -72,6 +72,7 @@ interface ScanSourcesResponse {
   error?: string;
   status?: string;
   total?: number;
+  message?: string;
 }
 
 type ClearType = "source" | "mam" | "both";
@@ -376,12 +377,18 @@ function DesktopBooksPage({
           ...(scope ? { content_type: scope } : {}),
         },
       );
-      toast.info(
-        `Source scan started — ${r.total || 0} authors. Track progress on the Dashboard.`,
-      );
+      // v2.12.0 — gate scan-started toast on r.total > 0; backend
+      // returns total=0 with a {message} when nothing matched.
+      if ((r.total ?? 0) > 0) {
+        toast.info(
+          `Source scan started — ${r.total} authors. Track progress on the Dashboard.`,
+        );
+        window.dispatchEvent(new CustomEvent("seshat:scan-started"));
+      } else {
+        toast.warn(r.message || "Nothing to scan — no matching authors.");
+      }
       setSel(new Set());
       setSelMode(false);
-      window.dispatchEvent(new CustomEvent("seshat:scan-started"));
     } catch (e) {
       toast.error((e as Error).message || "Source scan failed to start");
     }
