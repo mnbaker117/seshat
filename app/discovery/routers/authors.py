@@ -719,6 +719,10 @@ async def scan_authors_sources(data: dict = Body(...)):
     author_ids = data.get("author_ids", [])
     author_names = data.get("author_names")
     content_type = data.get("content_type")
+    logger.info(
+        "scan-sources POST: author_ids=%s names=%s content_type=%r active=%s",
+        author_ids, author_names, content_type, get_active_library(),
+    )
     if not author_ids and not author_names:
         return {"error": "No authors specified"}
 
@@ -781,6 +785,11 @@ async def scan_authors_sources(data: dict = Body(...)):
     # older callers / direct API users.
     target_libs = libraries_for(content_type)
     if not target_libs:
+        logger.warning(
+            "scan-sources: NO %s LIBRARIES FOUND (discovered=%s)",
+            content_type,
+            [(l.get("slug"), l.get("content_type")) for l in state._discovered_libraries],
+        )
         return {"status": "ok", "total": 0,
                 "message": f"No {content_type} libraries found."}
     if author_names:
@@ -827,6 +836,12 @@ async def scan_authors_sources(data: dict = Body(...)):
 
     total_tasks = sum(len(rows) for _, rows in pre_resolved)
     if total_tasks == 0:
+        logger.warning(
+            "scan-sources: NO MATCHING AUTHORS — names=%s target_libs=%s pre_resolved_counts=%s",
+            names,
+            [l.get("slug") for l in target_libs],
+            [(lib.get("slug"), len(rows)) for lib, rows in pre_resolved],
+        )
         return {"status": "ok", "total": 0,
                 "requested": len(names),
                 "message": "No matching authors in target libraries."}
