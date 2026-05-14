@@ -673,8 +673,17 @@ function DesktopAuthorDetailPage({
       return;
     setClearing(true);
     try {
+      // v2.12.0 — when scoping to a content_type, include author_names
+      // alongside author_ids. The cross-library clear path resolves
+      // each target library's local author rows by NAME (the
+      // author_id sent here is scoped to whichever library the page
+      // was loaded from; using it as-is in another library finds 0
+      // rows). Without names the audiobook-scope clear would silently
+      // touch nothing. Mirrors the scan-sources cross-library
+      // collision-avoidance pattern from earlier.
       await api.post("/discovery/authors/clear-scan-data", {
         author_ids: [authorIdNum],
+        ...(a?.name && scope ? { author_names: [a.name] } : {}),
         clear_source: type === "source" || type === "both",
         clear_mam: type === "mam" || type === "both",
         ...(scope ? { content_type: scope } : {}),
