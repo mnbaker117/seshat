@@ -7,6 +7,40 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.13.1] — 2026-05-14
+
+Priority promotion: Goodreads restored to #2 (ebook) / #3 (audiobook)
+after v2.13.0's bypass + author-id backfill made it reliably reachable
+again. The v2.11.0 demotion (Goodreads #4) was a Cloudflare-defensive
+move; with curl_cffi Chrome120 impersonation + the Phase-1/2 backfill
+giving 88% author `goodreads_id` coverage on real-world libraries,
+that defensive posture is no longer needed.
+
+### Changed
+
+- **`_DEFAULT_EBOOK_PRIORITY`** — new order:
+  `mam → goodreads → hardcover → openlibrary → google_books →
+   kobo → amazon → ibdb → audible`
+- **`_DEFAULT_AUDIOBOOK_PRIORITY`** — new order:
+  `mam → audible → goodreads → hardcover → openlibrary →
+   google_books → amazon → kobo → ibdb`
+
+### Migration
+
+Existing installs keep their saved priority order — no automatic
+migration. Users who want the v2.13.1 defaults click **Settings →
+Sources → Reset to defaults**. The reset is reversible (one PUT
+back to the desired custom order if they change their mind).
+
+### Tests
+
+- Updated `test_reset_restores_default_priority_order` to pin the
+  new ordering (Goodreads at slot 2).
+
+Suite: 2604 passed / 7 skipped (unchanged from v2.13.0).
+
+---
+
 ## [2.13.0] — 2026-05-14
 
 Stage 6 Goodreads Cloudflare bypass (Phase A). Closes the long-deferred

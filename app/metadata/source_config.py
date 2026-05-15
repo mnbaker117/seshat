@@ -161,32 +161,39 @@ _DEFAULT_NEW_INSTALL_STATE: dict[str, dict[str, Any]] = {
 # Default priority order used on fresh installs. MAM always first —
 # it's free and authoritative.
 #
-# v2.11.0 reshuffle — backed by the post-resolver-fix validation
-# harness on 2026-05-13 (`docs/validation/sources-20260513-112040.md`):
-#   - Hardcover #2 (was #4) — 14/14 = 100% hit rate with harness
-#     throttle-hardening, fast (~2s/author), best ratings/social
-#     signal. Yesterday's "Hardcover blind to indie" verdict was
-#     pure harness artifact; HC actually has Robyn Bee + Hasekura
-#     + every other benchmark author.
-#   - OpenLibrary #3 (was #8) — 13/14 = 93% hit rate, free, the
-#     only source that recovered Hasekura's full 94-book biblio
-#     via cross-script aggregation. Strongest indie + translated
-#     coverage.
-#   - Goodreads stays at #4 (was #2) — depth gain not coverage
-#     critical once we have HC+OL+GB+Kobo covering 13/14 without
-#     it. When Phase 5.5 cookies land it adds depth, but the new
-#     priority order doesn't assume it's available.
-#   - Amazon dropped from discovery list — enricher only (see
-#     _DEFAULT_NEW_INSTALL_STATE.amazon.ebook_scan=False).
-#   - IBDB last — niche, downstream-filtered to ~1 book per author
-#     in real production scans.
+# v2.13.1 reshuffle — Goodreads restored to #2 (ebook) / #3 (audiobook)
+# after the v2.13.0 Stage-6 Cloudflare bypass + Phase-1/2 author-id
+# backfill landed. The v2.11.0 demotion was based on Goodreads being
+# Cloudflare-blocked; with curl_cffi Chrome120 impersonation that
+# constraint is gone, and live UAT 2026-05-14 confirmed 0 soft-blocks
+# across ~24 minutes of sustained burst traffic + 88% author
+# `goodreads_id` coverage across Mark's 740-author library.
+#
+# Goodreads earns the #2 ebook slot back because:
+#   - Most complete book/series catalog (especially KDP indie/self-pub)
+#   - Authoritative for series + series-position data
+#   - The bypass + author backfill make it reliably reachable now
+# Hardcover slides to #3 — still the cleanest API + best ratings/social
+# signal, just no longer the leader when Goodreads is online.
+# OpenLibrary #4 — indie/translated strength preserved.
+#
+# Audiobook chain: Audible stays #2 (primary audiobook source);
+# Goodreads slots #3 ahead of Hardcover for the same coverage reason
+# as the ebook chain.
+#
+# Existing installs keep their saved priority order — no migration
+# fires unless the user hits the "Reset to defaults" button in
+# Settings → Metadata Sources. Banner in v2.13.1 nudges fresh
+# defaults adoption for users who want the new shape.
+#
+# Pre-v2.13.0 demotion history is in v2.11.0's CHANGELOG entry.
 _DEFAULT_EBOOK_PRIORITY: list[str] = [
-    "mam", "hardcover", "openlibrary", "goodreads",
+    "mam", "goodreads", "hardcover", "openlibrary",
     "google_books", "kobo", "amazon", "ibdb", "audible",
 ]
 _DEFAULT_AUDIOBOOK_PRIORITY: list[str] = [
-    "mam", "audible", "hardcover", "openlibrary",
-    "goodreads", "google_books", "amazon", "kobo", "ibdb",
+    "mam", "audible", "goodreads", "hardcover", "openlibrary",
+    "google_books", "amazon", "kobo", "ibdb",
 ]
 
 

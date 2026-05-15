@@ -247,22 +247,26 @@ class TestResetToDefaults:
     async def test_reset_restores_default_priority_order(
         self, isolated_settings,
     ):
-        """User rearranged Hardcover to slot 5; reset restores the
-        v2.11.0 ordering (mam, hardcover, openlibrary, goodreads,
+        """User rearranged Goodreads to slot 5; reset restores the
+        v2.13.1 ordering (mam, goodreads, hardcover, openlibrary,
         google_books, kobo, amazon, ibdb, audible)."""
         async with await _client(_make_app()) as ac:
             resp = await ac.get("/api/v1/metadata-sources")
             state = resp.json()["state"]
-            # Custom: move hardcover to the end.
-            new_order = [n for n in state["priority"]["ebook"] if n != "hardcover"] + ["hardcover"]
+            # Custom: move goodreads to the end.
+            new_order = [n for n in state["priority"]["ebook"] if n != "goodreads"] + ["goodreads"]
             state["priority"]["ebook"] = new_order
             await ac.put("/api/v1/metadata-sources", json=state)
 
             reset = await ac.post("/api/v1/metadata-sources/reset")
         priority = reset.json()["state"]["priority"]["ebook"]
-        # Hardcover should be back at slot 2 (rank index 1).
+        # v2.13.1 — Goodreads back at slot 2 (rank index 1) ahead of
+        # Hardcover. The Stage-6 Cloudflare bypass + author-id
+        # backfill made it reliably reachable again.
         assert priority[0] == "mam"
-        assert priority[1] == "hardcover"
+        assert priority[1] == "goodreads"
+        assert priority[2] == "hardcover"
+        assert priority[3] == "openlibrary"
 
     async def test_reset_propagates_to_singletons(
         self, isolated_settings,
