@@ -30,7 +30,7 @@ Three things to know before reading:
 """
 import asyncio, time, re, logging, json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 from difflib import SequenceMatcher
 import aiosqlite
 from app.config import load_settings
@@ -2650,6 +2650,19 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
+# v2.13.0 — sources whose `authors.{name}_id` column exists in the
+# books-DB schema. When that column is populated for a given author,
+# `_try_source` skips the `search_author()` call and goes straight to
+# `get_author_books(stored_id)`. Wraps every source that uses the
+# dynamic `UPDATE authors SET {source}_id = ?` write pattern in
+# lookup.py. Excluded: `mam` (uses a different ID lookup path),
+# `audible` (no author-level ID column), `openlibrary` (uses
+# `openlibrary_id` on books not authors).
+_AUTHOR_ID_COLUMN_SOURCES = frozenset({
+    "goodreads", "hardcover", "amazon", "kobo", "ibdb", "google_books",
+})
+
+
 async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, hidden_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None, link_type_by_id=None, start_at=0):
     """Try a single source with validation and detailed logging.
 
@@ -2664,14 +2677,58 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}' (resuming from book {start_at})...")
         else:
             logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
-        # Hardcover needs `owned_titles` to search by book title, and
-        # `owned_series_names` so its per-book series picker can prefer
-        # candidates that match what Calibre already has (this is what
-        # stops "Mistborn Saga: Original Trilogy" from beating "The
-        # Mistborn Saga" as the picked series). Both attributes are
-        # stashed on the source instance by lookup_author before this
-        # runs.
-        if hasattr(source, '_owned_titles'):
+
+        # v2.13.0 — when authors.{source}_id is already populated in
+        # our DB, skip search_author entirely and go straight to
+        # get_author_books(stored_id). Two wins:
+        #   1. Avoids the policy-locked search_author no-op for
+        #      goodreads (the /search endpoint is robots-disallowed,
+        #      so the source has always returned None; before this,
+        #      that meant the source could never recover its enrichment
+        #      role for source-scans even when we knew the author id
+        #      from a previous resolution).
+        #   2. Saves one HTTP roundtrip for any other source that's
+        #      already resolved this author (the search_author call
+        #      would just re-look-up something we already know).
+        # Constrained to known sources whose `{name}_id` column
+        # actually exists on the authors table; everything else
+        # falls through to the legacy search_author path unchanged.
+        stored_id: Optional[str] = None
+        if source_name in _AUTHOR_ID_COLUMN_SOURCES and author_id is not None:
+            try:
+                _db = await get_db()
+                try:
+                    cur = await _db.execute(
+                        f"SELECT {source_name}_id FROM authors WHERE id = ?",
+                        (author_id,),
+                    )
+                    row = await cur.fetchone()
+                    if row and row[0]:
+                        stored_id = str(row[0])
+                finally:
+                    await _db.close()
+            except Exception as e:
+                logger.debug(
+                    f"  [{source_name}] stored-id lookup failed (non-fatal): {e}"
+                )
+
+        if stored_id:
+            # Fabricate an AuthorResult so the rest of this function
+            # proceeds through its get_author_books path naturally.
+            from app.discovery.sources.base import AuthorResult
+            found = AuthorResult(name=author_name, external_id=stored_id)
+            logger.info(
+                f"  [{source_name}] short-circuit: stored id={stored_id} "
+                f"(skipping search_author)"
+            )
+        elif hasattr(source, '_owned_titles'):
+            # Hardcover needs `owned_titles` to search by book title,
+            # and `owned_series_names` so its per-book series picker
+            # can prefer candidates that match what Calibre already
+            # has (this is what stops "Mistborn Saga: Original
+            # Trilogy" from beating "The Mistborn Saga" as the picked
+            # series). Both attributes are stashed on the source
+            # instance by lookup_author before this runs.
             found = await source.search_author(
                 author_name,
                 owned_titles=source._owned_titles,
