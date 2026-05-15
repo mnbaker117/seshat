@@ -51,12 +51,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
+from app.config import CALIBRE_DB_PATH
 from app.discovery.database import get_db
 from app.metadata import goodreads_session
+from app.metadata.author_names import normalize_author_name
 from app.metadata.goodreads_id_resolver import (
     ResolveQuery, resolve_goodreads_id,
 )
@@ -116,6 +119,60 @@ async def _pick_seed_book(author_id: int) -> Optional[dict]:
         return record
     finally:
         await db.close()
+
+
+def _parse_all_authors_from_html(html: str) -> list[tuple[str, str]]:
+    """Extract every (name, goodreads_id) pair from a /book/show/{id}
+    page's JSON-LD `author[]` block.
+
+    Used by the Phase-2 cross-DB Calibre backfill: when a Seshat
+    author has no books in Seshat's books table but appears as a
+    co-author on a Calibre book with a goodreads identifier, we
+    fetch the book detail page and need to pick the author that
+    matches by name (not "the first one").
+
+    Returns a list of (name, id) tuples in JSON-LD order. Empty
+    list if no parseable authors.
+    """
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for script in soup.select("script[type='application/ld+json']"):
+        try:
+            data = json.loads(script.string or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        authors_ld = data.get("author")
+        if not authors_ld:
+            continue
+        candidates: list[dict] = (
+            authors_ld if isinstance(authors_ld, list) else [authors_ld]
+        )
+        for a in candidates:
+            if not isinstance(a, dict):
+                continue
+            name = a.get("name") or ""
+            url_id: Optional[str] = None
+            for key in ("url", "sameAs", "@id"):
+                url = a.get(key)
+                if not url:
+                    continue
+                m = _AUTHOR_URL_RX.search(str(url))
+                if m:
+                    url_id = m.group(1)
+                    break
+            if not name or not url_id:
+                continue
+            if url_id in seen:
+                continue
+            seen.add(url_id)
+            out.append((str(name), url_id))
+    return out
 
 
 def _parse_author_id_from_html(html: str) -> Optional[str]:
@@ -208,6 +265,138 @@ async def _persist_author_goodreads_id(author_id: int, goodreads_id: str) -> Non
         await db.close()
 
 
+def _pick_calibre_book_with_goodreads_for(
+    author_name: str, calibre_db_path: Optional[str] = None,
+) -> Optional[str]:
+    """Phase-2 helper: directly query Calibre's metadata.db for any
+    book co-authored by `author_name` that carries a `goodreads`
+    identifier. Returns the goodreads_book_id (digit string) or None.
+
+    Used when Seshat's `books` table has NO row attributable to this
+    author — typically a co-author or pen-name alias whose books
+    Seshat attributed to the primary author only. Calibre's
+    `books_authors_link` is N:N so it sees the contributor; Seshat's
+    single `author_id` column on `books` does not.
+
+    Read-only against Calibre's DB. No writes ever.
+    """
+    cal_path = calibre_db_path or CALIBRE_DB_PATH
+    if not cal_path:
+        return None
+    try:
+        conn = sqlite3.connect(cal_path)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        # Calibre author name matching: try exact first, then case-
+        # insensitive. We'd love a normalize-pass match but Calibre's
+        # author names are user-entered and may differ in punctuation
+        # from Seshat's normalized form. Two queries is cheap; the
+        # alternative is dragging Seshat's normalizer into a SQL UDF.
+        for sql in (
+            "SELECT i.val FROM identifiers i "
+            "JOIN books_authors_link bal ON bal.book = i.book "
+            "JOIN authors a ON a.id = bal.author "
+            "WHERE i.type = 'goodreads' AND a.name = ? LIMIT 1",
+            "SELECT i.val FROM identifiers i "
+            "JOIN books_authors_link bal ON bal.book = i.book "
+            "JOIN authors a ON a.id = bal.author "
+            "WHERE i.type = 'goodreads' AND LOWER(a.name) = LOWER(?) LIMIT 1",
+        ):
+            row = conn.execute(sql, (author_name,)).fetchone()
+            if row and row[0]:
+                return str(row[0]).strip()
+        return None
+    finally:
+        conn.close()
+
+
+async def resolve_author_via_calibre_coauthor(
+    author_id: int, author_name: str,
+) -> Optional[str]:
+    """Phase-2 backfill path: resolve an author's goodreads_id via a
+    Calibre book they appear on as ANY author (not just primary).
+
+    Steps:
+      1. Query Calibre's metadata.db for any book this author
+         contributed to that carries a `goodreads` identifier.
+      2. Fetch /book/show/{book_id} via the bypass.
+      3. Parse ALL author[] entries from JSON-LD.
+      4. Match by normalized name to find the right entry.
+      5. Persist to authors.goodreads_id.
+
+    Returns the resolved id or None. Never raises.
+    """
+    try:
+        book_id = _pick_calibre_book_with_goodreads_for(author_name)
+        if not book_id:
+            return None
+
+        session = await goodreads_session.get_session()
+        url = f"https://www.goodreads.com/book/show/{book_id}"
+        try:
+            resp = await session.get(url)
+        except Exception as e:
+            _log.info(
+                "backfill-phase2: HTTP error fetching %s for author_id=%d: %s",
+                url, author_id, e,
+            )
+            return None
+
+        if goodreads_session.is_cloudflare_soft_block(resp):
+            _log.info(
+                "backfill-phase2: soft-blocked fetching %s — abort.", url,
+            )
+            return None
+        status = getattr(resp, "status_code", 0)
+        if status >= 400:
+            _log.debug(
+                "backfill-phase2: %s returned HTTP %d for author_id=%d",
+                url, status, author_id,
+            )
+            return None
+
+        html = getattr(resp, "text", "") or (
+            (getattr(resp, "content", b"") or b"").decode("utf-8", "ignore")
+        )
+        all_authors = _parse_all_authors_from_html(html)
+        if not all_authors:
+            _log.info(
+                "backfill-phase2: no author entries in JSON-LD at %s "
+                "for author_id=%d", url, author_id,
+            )
+            return None
+
+        target_norm = normalize_author_name(author_name)
+        match: Optional[str] = None
+        for cand_name, cand_id in all_authors:
+            if normalize_author_name(cand_name) == target_norm:
+                match = cand_id
+                break
+        if not match:
+            _log.info(
+                "backfill-phase2: %d author(s) found at %s but none "
+                "matched %r (normalized): %r",
+                len(all_authors), url, author_name,
+                [n for n, _ in all_authors],
+            )
+            return None
+
+        await _persist_author_goodreads_id(author_id, match)
+        _log.info(
+            "backfill-phase2: author_id=%d %r ← goodreads_id=%s "
+            "(via Calibre book %s; %d author entries on page)",
+            author_id, author_name, match, book_id, len(all_authors),
+        )
+        return match
+    except Exception:
+        _log.exception(
+            "backfill-phase2: unexpected error resolving author_id=%d "
+            "%r (non-fatal)", author_id, author_name,
+        )
+        return None
+
+
 async def backfill_missing_author_ids(*, limit: Optional[int] = None) -> dict:
     """Sweep every author missing `goodreads_id` whose books have at
     least one resolvable identifier, and resolve via
@@ -270,11 +459,12 @@ async def backfill_missing_author_ids(*, limit: Optional[int] = None) -> dict:
     finally:
         await db.close()
 
-    if not rows:
-        _log.info("backfill: no authors need goodreads_id resolution")
-        return stats
-
     candidates = [(int(r[0]), str(r[1])) for r in rows]
+    if not candidates:
+        _log.info(
+            "backfill: no Phase-1 candidates (no author needs a "
+            "books-table reverse-lookup) — proceeding to Phase 2"
+        )
     if limit is not None:
         candidates = candidates[:limit]
 
@@ -317,6 +507,89 @@ async def backfill_missing_author_ids(*, limit: Optional[int] = None) -> dict:
         stats["considered"], stats["resolved"],
         stats["missed"], stats["skipped_soft_blocked"],
     )
+
+    # ── Phase 2: cross-DB Calibre-direct sweep ────────────────────
+    # Catches the co-author / pen-name-alias gap where a Seshat author
+    # exists but has zero books in Seshat's books table (Calibre's
+    # books_authors_link is N:N but Seshat's books.author_id is 1:1, so
+    # secondary contributors get an authors row and nothing else). We
+    # query Calibre's metadata.db directly for any book they
+    # contributed to that carries a `goodreads` identifier, fetch
+    # /book/show, and match by normalized name.
+    if goodreads_session.is_soft_blocked():
+        _log.info(
+            "backfill-phase2: skipping (session state is soft_blocked "
+            "from Phase 1)"
+        )
+        return stats
+
+    phase2_stats = {"considered": 0, "resolved": 0, "missed": 0,
+                    "skipped_soft_blocked": 0}
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            SELECT a.id, a.name FROM authors a
+            WHERE (a.goodreads_id IS NULL OR a.goodreads_id = '')
+            ORDER BY a.id
+            """
+        )
+        phase2_rows = await cur.fetchall()
+    finally:
+        await db.close()
+
+    phase2_candidates = [(int(r[0]), str(r[1])) for r in phase2_rows]
+    if limit is not None:
+        # Honor the same limit across both phases combined (best-effort).
+        remaining = max(0, limit - stats["considered"])
+        phase2_candidates = phase2_candidates[:remaining]
+
+    if phase2_candidates:
+        _log.info(
+            "backfill-phase2: sweeping %d remaining author(s) via "
+            "Calibre cross-DB co-author lookup",
+            len(phase2_candidates),
+        )
+        for author_id, name in phase2_candidates:
+            if goodreads_session.is_soft_blocked():
+                phase2_stats["skipped_soft_blocked"] = (
+                    len(phase2_candidates) - phase2_stats["considered"]
+                )
+                _log.info(
+                    "backfill-phase2: aborting — session state is "
+                    "soft_blocked. %d deferred.",
+                    phase2_stats["skipped_soft_blocked"],
+                )
+                break
+            phase2_stats["considered"] += 1
+            try:
+                resolved = await resolve_author_via_calibre_coauthor(
+                    author_id, name,
+                )
+            except Exception:
+                _log.exception(
+                    "backfill-phase2: unhandled error on author_id=%d %r "
+                    "(non-fatal)", author_id, name,
+                )
+                phase2_stats["missed"] += 1
+                continue
+            if resolved:
+                phase2_stats["resolved"] += 1
+            else:
+                phase2_stats["missed"] += 1
+        _log.info(
+            "backfill-phase2: sweep complete. considered=%d resolved=%d "
+            "missed=%d skipped_soft_blocked=%d",
+            phase2_stats["considered"], phase2_stats["resolved"],
+            phase2_stats["missed"], phase2_stats["skipped_soft_blocked"],
+        )
+
+    # Roll Phase-2 stats into the overall return value.
+    stats["considered"] += phase2_stats["considered"]
+    stats["resolved"] += phase2_stats["resolved"]
+    stats["missed"] += phase2_stats["missed"]
+    stats["skipped_soft_blocked"] += phase2_stats["skipped_soft_blocked"]
+    stats["phase2_resolved"] = phase2_stats["resolved"]
     return stats
 
 

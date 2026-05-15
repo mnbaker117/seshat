@@ -342,21 +342,160 @@ class TestBackfillSweep:
         c = await _insert_author("No-Books")
         await _insert_book("Z", c)  # no IDs
 
-        # Patch resolve_author_goodreads_id to no-op (we're just
-        # validating the candidate selection).
-        called_ids: list[int] = []
+        # Patch both backfill paths to no-op (we're validating the
+        # Phase-1 candidate selection here; Phase 2 has its own test).
+        called_phase1: list[int] = []
+        called_phase2: list[int] = []
         import app.discovery.goodreads_author_backfill as backfill_mod
 
-        async def fake_resolve(aid):
-            called_ids.append(aid)
+        async def fake_p1(aid):
+            called_phase1.append(aid)
             return None
+
+        async def fake_p2(aid, name):
+            called_phase2.append(aid)
+            return None
+
         monkeypatch.setattr(
-            backfill_mod, "resolve_author_goodreads_id", fake_resolve,
+            backfill_mod, "resolve_author_goodreads_id", fake_p1,
+        )
+        monkeypatch.setattr(
+            backfill_mod, "resolve_author_via_calibre_coauthor", fake_p2,
         )
 
+        await backfill_missing_author_ids()
+        # Phase 1 considers only authors with resolvable book rows.
+        assert called_phase1 == [b]
+        # Phase 2 considers EVERY remaining author missing goodreads_id
+        # (it doesn't care about Seshat's books table — it queries
+        # Calibre directly).
+        assert set(called_phase2) == {b, c}
+
+    async def test_phase2_resolves_via_calibre_coauthor(
+        self, discovery_db, monkeypatch, tmp_path,
+    ):
+        """The Phase-2 sweep should fire for authors with NO Seshat
+        books-table rows when they have a Calibre book."""
+        from app.discovery.goodreads_author_backfill import (
+            backfill_missing_author_ids,
+        )
+        # Author exists in Seshat but has zero books rowed to them
+        # (the co-author case).
+        a = await _insert_author("Co-Author")
+        # No _insert_book call — exactly the empty-books-table scenario.
+
+        # Build a minimal Calibre metadata.db at a known path.
+        cal_db = tmp_path / "metadata.db"
+        conn = __import__("sqlite3").connect(str(cal_db))
+        conn.executescript("""
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books (id INTEGER PRIMARY KEY);
+            CREATE TABLE books_authors_link (book INTEGER, author INTEGER);
+            CREATE TABLE identifiers (book INTEGER, type TEXT, val TEXT);
+            INSERT INTO authors (id, name) VALUES (1, 'Co-Author');
+            INSERT INTO books (id) VALUES (42);
+            INSERT INTO books_authors_link VALUES (42, 1);
+            INSERT INTO identifiers VALUES (42, 'goodreads', '12345');
+        """)
+        conn.commit()
+        conn.close()
+
+        # Point CALIBRE_DB_PATH at our fake DB.
+        from app import config as app_config
+        monkeypatch.setattr(app_config, "CALIBRE_DB_PATH", str(cal_db))
+        import app.discovery.goodreads_author_backfill as backfill_mod
+        monkeypatch.setattr(backfill_mod, "CALIBRE_DB_PATH", str(cal_db))
+
+        # Stub /book/show to return a JSON-LD with matching author.
+        from app.metadata import goodreads_session as gs
+
+        calls: list[str] = []
+
+        class StubSession:
+            async def get(self, url, **kwargs):
+                calls.append(url)
+                html = """
+                <script type="application/ld+json">
+                {"author":[{"@type":"Person","name":"Primary Author",
+                            "url":"https://www.goodreads.com/author/show/111"},
+                           {"@type":"Person","name":"Co-Author",
+                            "url":"https://www.goodreads.com/author/show/222"}]}
+                </script>
+                """
+                return SimpleNamespace(
+                    status_code=200, content=html.encode("utf-8"), text=html,
+                )
+
+        stub_instance = StubSession()
+
+        async def _get_session(rate_limit=None):
+            return stub_instance
+        monkeypatch.setattr(gs, "get_session", _get_session)
+
         stats = await backfill_missing_author_ids()
-        assert stats["considered"] == 1
-        assert called_ids == [b]
+        assert stats["phase2_resolved"] == 1
+        # And the author's goodreads_id is the CO-AUTHOR's, not the
+        # primary's — name-matching worked.
+        from app.discovery.database import get_db
+        db = await get_db()
+        try:
+            row = await (await db.execute(
+                "SELECT goodreads_id FROM authors WHERE id = ?", (a,),
+            )).fetchone()
+        finally:
+            await db.close()
+        assert row[0] == "222"
+        # And we hit the right book. Calibre stores the GOODREADS-side
+        # book id in identifiers.val, so the URL uses 12345 (not the
+        # local Calibre book row id 42).
+        assert any("/book/show/12345" in u for u in calls), \
+            f"expected /book/show/12345 in calls, got {calls}"
+
+    async def test_phase2_skips_when_no_calibre_book_for_author(
+        self, discovery_db, monkeypatch, tmp_path,
+    ):
+        """If Calibre doesn't have the author at all, Phase 2 returns
+        None without firing any HTTP."""
+        from app.discovery.goodreads_author_backfill import (
+            backfill_missing_author_ids,
+        )
+        await _insert_author("Nobody")
+
+        cal_db = tmp_path / "metadata.db"
+        conn = __import__("sqlite3").connect(str(cal_db))
+        conn.executescript("""
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books (id INTEGER PRIMARY KEY);
+            CREATE TABLE books_authors_link (book INTEGER, author INTEGER);
+            CREATE TABLE identifiers (book INTEGER, type TEXT, val TEXT);
+        """)
+        conn.commit()
+        conn.close()
+
+        from app import config as app_config
+        monkeypatch.setattr(app_config, "CALIBRE_DB_PATH", str(cal_db))
+        import app.discovery.goodreads_author_backfill as backfill_mod
+        monkeypatch.setattr(backfill_mod, "CALIBRE_DB_PATH", str(cal_db))
+
+        # Track that the bypass was NOT called.
+        from app.metadata import goodreads_session as gs
+
+        class TrackingSession:
+            calls: list[str] = []
+
+            async def get(self, url, **kwargs):
+                self.__class__.calls.append(url)
+                return SimpleNamespace(status_code=200, content=b"", text="")
+
+        async def _get_session(rate_limit=None):
+            return TrackingSession()
+        monkeypatch.setattr(gs, "get_session", _get_session)
+
+        stats = await backfill_missing_author_ids()
+        # Phase 2 considered the author but didn't find a Calibre book.
+        assert stats["phase2_resolved"] == 0
+        # No HTTP fired.
+        assert TrackingSession.calls == []
 
     async def test_aborts_on_soft_block(self, discovery_db, monkeypatch):
         """If the session flips to soft_blocked mid-sweep, the rest
