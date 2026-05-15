@@ -89,11 +89,85 @@ Phase B — only built if Phase A UAT shows persistent 202s.
 - `notify_on_goodreads_canary_failed` (default True) joins the
   v2.12.0 per-event ntfy toggle family.
 
+### Added — stored-id short-circuit + author backfill (mid-UAT expansion)
+
+The original v2.13.0 design shipped the bypass infrastructure. UAT on
+2026-05-14 surfaced that source-scans still couldn't drive Goodreads
+to fire HTTP — `search_author` is policy-locked to no-op and the
+discovery flow never short-circuited to `get_author_books(stored_id)`
+even when `authors.goodreads_id` was populated. The mid-UAT expansion
+closes that wiring and adds the missing v2.11.0 promise (author-id
+reverse-lookup from owned books).
+
+- **`_try_source` stored-id short-circuit** in `app/discovery/lookup.py`.
+  When `authors.{source}_id` is populated and the source is in
+  `_AUTHOR_ID_COLUMN_SOURCES = {"goodreads", "amazon"}`, fabricates an
+  AuthorResult and skips `search_author()` — Goodreads's policy-locked
+  no-op no longer gates `get_author_books`. Scoped to goodreads +
+  amazon only: Hardcover / Kobo / IBDB / Google Books all pre-populate
+  books inline from their search_author and would lose that data if
+  short-circuited (verified by UAT regression).
+- **Calibre identifier mining** in `app/discovery/calibre_sync.py`.
+  Pre-v2.13.0 the sync only mined ISBN from Calibre's `identifiers`
+  table. The full mining now harvests every useful Calibre identifier
+  type — `goodreads`, `amazon`, `mobi-asin`, `asin`, `google`, `kobo`,
+  `audible`, `fictiondb`, `hardcover`, `openlibrary` — and lands them
+  in the matching `books.{source}_id` columns via the new
+  `_apply_calibre_ids` helper. Only fills empty slots, never clobbers
+  other-source writes. Mark's library: jumped 0 → 2859 books with a
+  stored goodreads_id (96% of his Calibre rows).
+- **`app/discovery/goodreads_author_backfill.py`** — author-id
+  reverse-lookup module. Two complementary code paths:
+  - **`resolve_author_goodreads_id(author_id)`** (Phase 1): picks the
+    strongest-identifier book for this author from Seshat's books
+    table, derives a goodreads_book_id directly (book.goodreads_id) or
+    via the resolver chain (ISBN/ASIN → tier 1 auto_complete / tier 2
+    Hardcover book_mappings / tier 3 OL), fetches /book/show/{id} via
+    the bypass, parses `author[].url` from JSON-LD, persists to
+    `authors.goodreads_id`.
+  - **`resolve_author_via_calibre_coauthor(author_id, author_name)`**
+    (Phase 2, cross-DB): catches co-authors and pen-name aliases whose
+    Calibre books exist (Calibre's N:N `books_authors_link` preserves
+    them) but Seshat's 1:1 `books.author_id` attributed to the primary
+    author only — leaving Seshat with author rows but zero attributed
+    books. Queries Calibre's `metadata.db` directly, picks any book
+    they contributed to with a `goodreads` identifier, fetches
+    /book/show, parses ALL JSON-LD `author[]` entries via new
+    `_parse_all_authors_from_html`, name-matches via Seshat's
+    `normalize_author_name`, persists.
+  - **`backfill_missing_author_ids()`** sweeps both phases as a single
+    fire-and-forget task after every Calibre sync completion. Rate-
+    limited via `goodreads_session`; bails early on soft-block;
+    returns stats with phase2 broken out.
+- **`_resolve_calibre_db_path()`** helper — discovers the per-library
+  metadata.db path via `state._discovered_libraries` instead of the
+  legacy single-library fallback constant. Fixes a UAT-caught miss
+  where Phase 2 tried `/calibre/metadata.db` (doesn't exist on
+  multi-library installs) instead of `/calibre/calibre-library/metadata.db`.
+
+### Live UAT results on Mark's library
+
+| Metric | Before v2.13.0 | After Phase 1 | After Phase 2 |
+|---|---|---|---|
+| Authors with `goodreads_id` | 507 / 740 (68%) | 585 / 740 (79%) | **650 / 740 (88%)** |
+| Resolved this run | — | +78 | +65 |
+| Soft-blocks during sweep | — | 0 | 0 |
+| Sustained Goodreads traffic | — | ~9 min | ~15 min |
+
+Remaining 90 are the genuine long tail: 3 books with no Goodreads
+author profile (parser-confirmed), and ~87 authors whose Calibre
+metadata also lacks a goodreads identifier on any of their books.
+
 ### Tests
 
-+52 across 5 new test files / classes — covering the session module
-(15), id_cache (18), the new resolver tier (3), the probe endpoint
-(9), and the canary scheduler (5). Suite at 2585 passed / 7 skipped.
+Final suite: **2604 passed / 7 skipped**. New coverage:
+- `test_goodreads_session.py` — 15 tests (session module)
+- `test_id_cache.py` — 18 tests (cache module)
+- `test_goodreads_id_resolver.py` — +3 Hardcover tier 2 tests
+- `test_goodreads_session_router.py` — 9 router tests
+- `test_goodreads_canary.py` — 5 scheduler tests
+- `test_enricher.py` — +2 dispatcher-skip tests
+- `test_goodreads_author_backfill.py` — 19 tests (Phase 1 + Phase 2)
 
 ### Known limitations
 
@@ -106,6 +180,10 @@ Phase B — only built if Phase A UAT shows persistent 202s.
   bibliography caching (the 7-day scope) is wired but not yet
   consumed by `app/discovery/sources/goodreads.py` — held for a
   future patch.
+- The ~87 truly orphaned authors (no goodreads identifier on any
+  Calibre book) cannot be filled without either (a) running source
+  scans on each so Hardcover/Amazon/OL pick up an identifier first,
+  or (b) a future Hardcover-author-search fallback.
 - Backfilling CHANGELOG entries for v2.11.0 / v2.12.0 / v2.12.1 /
   v2.12.2 is out of this arc's scope.
 
