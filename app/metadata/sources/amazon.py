@@ -108,7 +108,7 @@ class AmazonSource(MetaSource):
         return await asyncio.to_thread(self._fetch_sync, url, params)
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         if not title:
             return None

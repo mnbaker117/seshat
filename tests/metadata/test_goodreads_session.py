@@ -66,6 +66,15 @@ class TestSoftBlockDetection:
         # Defensive: caller may pass None on transport exceptions.
         assert not gr_session_module.is_cloudflare_soft_block(None)
 
+    def test_403_is_soft_block_v2_13_2(self, gr_session_module):
+        # CloudFront 403 on auto_complete / /author/list/ — flip to
+        # soft_blocked so the dispatcher skips remaining tiers.
+        assert gr_session_module.is_cloudflare_soft_block(_make_resp(403))
+
+    def test_429_is_soft_block_v2_13_2(self, gr_session_module):
+        # CloudFront throttle — slow down + flip the session flag.
+        assert gr_session_module.is_cloudflare_soft_block(_make_resp(429))
+
 
 class TestRuntimeStateFlag:
     """The three flat keys must persist across load/save round-trips."""

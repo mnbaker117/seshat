@@ -110,9 +110,21 @@ class MetaSource:
     # ── abstract surface ────────────────────────────────────
 
     async def search_book(
-        self, title: str, author: str
+        self,
+        title: str,
+        author: str,
+        *,
+        isbn: str = "",
+        asin: str = "",
+        author_goodreads_id: str = "",
     ) -> Optional[MetaRecord]:
         """Search this source for a book matching title + author.
+
+        Optional keyword args carry extra identifiers when the caller
+        knows them. Sources that don't use a particular identifier
+        accept it (with `**_`) and ignore it. Today only GoodreadsSource
+        consumes them — its resolver chain (T1-T5) needs `isbn`/`asin`
+        for tiers 1-3 and `author_goodreads_id` for tiers 4-5.
 
         Return the best match as a `MetaRecord`, or None if nothing
         plausible came back. The enricher scores the result; sources

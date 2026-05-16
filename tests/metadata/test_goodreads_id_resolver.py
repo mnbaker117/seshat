@@ -6,6 +6,8 @@ with a tiered chain of robots-clean lookups:
   Tier 1 — /book/auto_complete?q={isbn_or_asin}
   Tier 2 — Hardcover book_mappings (deferred to v2.11.0; stubbed here)
   Tier 3 — Open Library identifiers.goodreads
+  Tier 4 — /book/auto_complete?q={title}, post-filtered by author_goodreads_id (v2.13.2)
+  Tier 5 — /author/list/{author_id} bibliography walk (v2.13.2; tests in test_goodreads_bibliography.py)
 """
 from __future__ import annotations
 
@@ -398,7 +400,9 @@ class TestResolverNoSearchRegression:
         # Regression-proof the policy: this whole module exists to
         # AVOID `/search` for `*` user-agents (robots-disallowed).
         # Even when every tier misses, no `/search` URL should ever
-        # appear in the call list.
+        # appear in the call list. T4 / T5 are also covered — passing
+        # an author_goodreads_id activates them, and they must use
+        # `auto_complete` / `/author/list/` rather than `/search`.
         calls: list[str] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -412,6 +416,7 @@ class TestResolverNoSearchRegression:
                     asin="B0000000",
                     title="Some Book",
                     author="Some Author",
+                    author_goodreads_id="38550",
                 ),
                 client=client,
             )
@@ -420,3 +425,139 @@ class TestResolverNoSearchRegression:
             assert "goodreads.com/search" not in url, (
                 f"resolver leaked a /search call: {url}"
             )
+
+
+class TestResolverTier4AutoCompleteTitle:
+    """v2.13.2 — title-search tier with author_goodreads_id post-filter."""
+
+    async def test_title_hits_with_author_filter(self):
+        # The endpoint is the same `auto_complete` URL T1 uses; only
+        # the query string differs (title vs identifier). Match by
+        # author.id == author_goodreads_id.
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "openlibrary" in url or "hardcover" in url:
+                return httpx.Response(404)
+            if "auto_complete" in url and "Mistborn" in url:
+                return httpx.Response(200, json=[
+                    {"bookId": "68428", "title": "Mistborn",
+                     "author": {"id": 38550, "name": "Brandon Sanderson"},
+                     "ratingsCount": 1000000},
+                ])
+            return httpx.Response(404)
+
+        async with _make_client(handler) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(
+                    title="Mistborn",
+                    author="Brandon Sanderson",
+                    author_goodreads_id="38550",
+                ),
+                client=client,
+            )
+
+        assert result.goodreads_book_id == "68428"
+        assert result.tier == "auto_complete_title"
+
+    async def test_no_author_id_skips_t4(self):
+        # T4 must no-op when author_goodreads_id is empty — we don't
+        # accept unconstrained title matches.
+        calls: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(str(req.url))
+            return httpx.Response(404)
+
+        async with _make_client(handler) as client:
+            await resolve_goodreads_id(
+                ResolveQuery(title="Mistborn", author="Brandon Sanderson"),
+                client=client,
+            )
+
+        # No auto_complete title call without an author_id anchor.
+        for url in calls:
+            assert "auto_complete" not in url, (
+                f"T4 leaked a call without author_goodreads_id: {url}"
+            )
+
+    async def test_wrong_author_results_rejected(self):
+        # All 5 results have a different author.id — T4 must filter
+        # them out and return None (chain falls through to T5).
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "openlibrary" in url or "hardcover" in url:
+                return httpx.Response(404)
+            if "auto_complete" in url:
+                # Parody by Sarandon Branderson (different author.id)
+                return httpx.Response(200, json=[
+                    {"bookId": "34821107", "title": "The Annoyomancer",
+                     "author": {"id": 16688353, "name": "Sarandon Branderson"},
+                     "ratingsCount": 5},
+                ])
+            # T5 also misses for this test's purposes.
+            return httpx.Response(404)
+
+        async with _make_client(handler) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(
+                    title="Mistborn",
+                    author="Brandon Sanderson",
+                    author_goodreads_id="38550",
+                ),
+                client=client,
+            )
+
+        assert result.goodreads_book_id is None
+
+    async def test_multiple_matches_picks_highest_rated(self):
+        # When several T4 results match the author, prefer the most-
+        # rated one (canonical edition).
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "openlibrary" in url or "hardcover" in url:
+                return httpx.Response(404)
+            if "auto_complete" in url:
+                return httpx.Response(200, json=[
+                    {"bookId": "boxed", "author": {"id": 38550},
+                     "ratingsCount": 62000},
+                    {"bookId": "canonical", "author": {"id": 38550},
+                     "ratingsCount": 1027854},
+                    {"bookId": "wellof", "author": {"id": 38550},
+                     "ratingsCount": 691000},
+                ])
+            return httpx.Response(404)
+
+        async with _make_client(handler) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(
+                    title="Mistborn",
+                    author_goodreads_id="38550",
+                ),
+                client=client,
+            )
+
+        assert result.goodreads_book_id == "canonical"
+        assert result.tier == "auto_complete_title"
+
+    async def test_t4_403_flips_soft_block(self):
+        # CloudFront 403 on the auto_complete endpoint should mark
+        # the session soft_blocked (v2.13.2 detector expansion).
+        from app.metadata import goodreads_session
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "openlibrary" in str(req.url) or "hardcover" in str(req.url):
+                return httpx.Response(404)
+            return httpx.Response(403)
+
+        async with _make_client(handler) as client:
+            result = await resolve_goodreads_id(
+                ResolveQuery(
+                    title="Mistborn",
+                    author_goodreads_id="38550",
+                ),
+                client=client,
+            )
+
+        assert result.goodreads_book_id is None
+        assert result.soft_blocked is True
+        assert goodreads_session.is_soft_blocked() is True

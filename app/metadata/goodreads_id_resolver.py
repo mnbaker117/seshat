@@ -12,11 +12,10 @@ robots-clean lookups in priority order:
        Identifier-based, not free-text. Handles most ebook imports
        since almost every epub/azw3 carries ISBN in file metadata.
 
-    2. Hardcover GraphQL `book_mappings` (DEFERRED to v2.11.0)
-       — purpose-built for goodreads cross-references. Requires the
-       Hardcover discovery-source client which doesn't exist yet at
-       v2.10.4. Returns None for now; the chain falls through to
-       tier 3.
+    2. Hardcover GraphQL `book_mappings` — purpose-built for goodreads
+       cross-references. One GraphQL roundtrip joins editions →
+       book → book_mappings to pull the Goodreads ID without ever
+       touching Goodreads itself. Requires a Hardcover API key.
 
     3. Open Library `?bibkeys=ISBN:{isbn}&jscmd=data&format=json`
        — returns `identifiers.goodreads` for some records. Free,
@@ -24,18 +23,33 @@ robots-clean lookups in priority order:
        but it's a useful gap-filler for older / well-cataloged
        books.
 
-If all three tiers miss, return None — the caller (typically the
+    4. /book/auto_complete?format=json&q={title} (v2.13.2) — same
+       endpoint as tier 1, but free-text title search. Goodreads'
+       internal autocomplete returns up to 5 ranked book results
+       with `bookId`, `workId`, and `author.id`. We post-filter
+       results by the caller-supplied `author_goodreads_id` so an
+       unrelated book that happens to share a title (boxed sets,
+       parodies, same-name novels) cannot be picked. When the
+       caller has no author_goodreads_id, this tier returns None
+       — unconstrained title matches are too risky.
+
+    5. /author/list/{author_goodreads_id} bibliography walk
+       (v2.13.2) — page-by-page, schema.org/Book microdata extract,
+       fuzzy title-match against the caller's title. Cached in the
+       `author_bib` scope of `id_cache` (7-day TTL) so a Sanderson
+       lookup pays the page walk once, not per-book. Implemented in
+       `app.metadata.goodreads_bibliography`.
+
+If all five tiers miss, return None — the caller (typically the
 Goodreads source) skips and the enricher dispatcher moves to the
 next source in the priority chain. We do NOT fall back to the
 disallowed `/search` endpoint, even though kiwidude's Calibre
 plugin does. Holding a higher standard is a deliberate choice.
-
-The full strategy is documented in
-`memory/project_seshat_metadata_overhaul.md` Phase 1.5.
 """
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
@@ -59,18 +73,26 @@ _DEFAULT_HEADERS = {
 
 @dataclass
 class ResolveQuery:
-    """What we know about a book that needs a goodreads_book_id."""
+    """What we know about a book that needs a goodreads_book_id.
+
+    `author_goodreads_id` (v2.13.2) anchors the title-search and
+    bibliography tiers (T4, T5). When unset, those tiers no-op —
+    we won't accept an unconstrained title match.
+    """
     title: str = ""
     author: str = ""
     isbn: str = ""
     asin: str = ""
+    author_goodreads_id: str = ""
 
 
 @dataclass
 class ResolveResult:
     """Outcome of a resolver chain attempt."""
     goodreads_book_id: Optional[str]
-    tier: Optional[str]  # "auto_complete", "hardcover", "openlibrary", or None on miss
+    # "auto_complete" (T1 ISBN/ASIN) | "hardcover" | "openlibrary"
+    # | "auto_complete_title" (T4) | "bibliography" (T5) | None on miss
+    tier: Optional[str]
     soft_blocked: bool = False  # True if a tier responded with a 202 / Cloudflare gate
 
 
@@ -176,6 +198,59 @@ async def resolve_goodreads_id(
                     )
                 return result
 
+        # ── Tier 4: Goodreads auto_complete by title ───────────
+        # (v2.13.2) Free-text title query through the same robots-
+        # permitted auto_complete endpoint as T1. Filter by the
+        # caller-supplied author_goodreads_id so a same-titled book
+        # by a different author can never be picked. No author_id →
+        # no T4 (unconstrained title matches are too risky).
+        if query.title and query.author_goodreads_id:
+            tier4 = await _tier4_auto_complete_title(
+                client, query.title, query.author_goodreads_id,
+            )
+            if tier4 == "_soft_blocked":
+                soft_blocked = True
+            elif tier4:
+                _log.debug(
+                    "resolver: tier4 (auto_complete title) hit for title=%r "
+                    "author_id=%s → goodreads_id=%s",
+                    query.title, query.author_goodreads_id, tier4,
+                )
+                result = ResolveResult(tier4, "auto_complete_title", soft_blocked)
+                if use_cache:
+                    id_cache.put_book_id(
+                        isbn=query.isbn, asin=query.asin,
+                        title=query.title, author=query.author,
+                        book_id=tier4, tier="auto_complete_title",
+                    )
+                return result
+
+        # ── Tier 5: Author bibliography walk ───────────────────
+        # (v2.13.2) When T4 missed but we have an author_goodreads_id,
+        # walk /author/list/{id} pages and fuzzy-match titles. Cached
+        # per-author so we only pay the page walk once.
+        if query.title and query.author_goodreads_id:
+            from app.metadata.goodreads_bibliography import find_book_in_bibliography
+            tier5 = await find_book_in_bibliography(
+                query.author_goodreads_id, query.title,
+            )
+            if tier5 == "_soft_blocked":
+                soft_blocked = True
+            elif tier5:
+                _log.debug(
+                    "resolver: tier5 (bibliography) hit for title=%r "
+                    "author_id=%s → goodreads_id=%s",
+                    query.title, query.author_goodreads_id, tier5,
+                )
+                result = ResolveResult(tier5, "bibliography", soft_blocked)
+                if use_cache:
+                    id_cache.put_book_id(
+                        isbn=query.isbn, asin=query.asin,
+                        title=query.title, author=query.author,
+                        book_id=tier5, tier="bibliography",
+                    )
+                return result
+
         # Full miss across all tiers — cache the negative so the next
         # scan with the same identifier doesn't re-probe Goodreads.
         # Skip cache-write on soft-block so a transient Cloudflare gate
@@ -255,6 +330,98 @@ async def _tier1_auto_complete(
             if book_id:
                 return str(book_id)
     return None
+
+
+async def _tier4_auto_complete_title(
+    client: httpx.AsyncClient,
+    title: str,
+    author_goodreads_id: str,
+) -> Optional[str]:
+    """Resolve a goodreads_book_id by title, anchored to a known author.
+
+    (v2.13.2) Hits the same `/book/auto_complete?format=json&q=...`
+    endpoint as T1 but with the URL-encoded title as the query.
+    Goodreads' autocomplete returns up to 5 ranked results, each a
+    dict with `bookId`, `workId`, `author.id`, `author.name`,
+    `title`, `ratingsCount`, etc.
+
+    The 5 results are ranked by Goodreads' relevance/popularity
+    function, which empirically polluted with parodies and boxed
+    sets when the query was `title + author`. Title-only is cleaner;
+    we then post-filter by `author_goodreads_id` to reject results
+    by other authors.
+
+    Returns:
+      - The Goodreads book ID string when at least one result has
+        `author.id == author_goodreads_id`. When multiple match,
+        pick the highest `ratingsCount` (most-popular edition).
+      - The string `"_soft_blocked"` if the response looks like the
+        Cloudflare 202 / empty-body interstitial.
+      - None on any other miss / network error / parse error.
+    """
+    if not title or not author_goodreads_id:
+        return None
+
+    from app.metadata import goodreads_session  # avoid circular import
+
+    encoded_title = urllib.parse.quote(title.strip())
+    try:
+        resp = await client.get(_GOODREADS_AUTO_COMPLETE + encoded_title)
+    except Exception as e:
+        _log.debug("resolver: tier4 auto_complete network error: %s", e)
+        return None
+
+    if goodreads_session.is_cloudflare_soft_block(resp):
+        goodreads_session.mark_soft_blocked(last_status=resp.status_code)
+        _log.info(
+            "resolver: tier4 auto_complete soft-blocked (status=%d, "
+            "empty body) — Goodreads session state flipped to soft_blocked",
+            resp.status_code,
+        )
+        return "_soft_blocked"
+
+    if resp.status_code != 200:
+        _log.debug(
+            "resolver: tier4 auto_complete unexpected status %d",
+            resp.status_code,
+        )
+        return None
+
+    try:
+        data = resp.json()
+    except Exception:
+        _log.debug("resolver: tier4 auto_complete non-JSON response")
+        return None
+
+    if not isinstance(data, list):
+        return None
+
+    # Filter to results matching the anchor author. Compare as strings
+    # because Goodreads returns author.id as int but author_goodreads_id
+    # is stored as a string in our DB.
+    target = str(author_goodreads_id).strip()
+    matches: list[dict] = []
+    for hit in data:
+        if not isinstance(hit, dict):
+            continue
+        author = hit.get("author") or {}
+        author_id = author.get("id")
+        if author_id is None:
+            continue
+        if str(author_id).strip() == target and hit.get("bookId"):
+            matches.append(hit)
+
+    if not matches:
+        return None
+
+    # When multiple matches (e.g. boxed-set + individual book by the
+    # same author), prefer the most-rated one — that's the canonical
+    # edition most callers want.
+    matches.sort(
+        key=lambda h: int(h.get("ratingsCount") or 0),
+        reverse=True,
+    )
+    return str(matches[0]["bookId"])
 
 
 _HARDCOVER_API = "https://api.hardcover.app/v1/graphql"

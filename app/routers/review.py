@@ -417,12 +417,18 @@ async def re_enrich(review_id: int, body: SaveRequest) -> ReviewItem:
             row.book_format or "", grab_category,
         )
 
+        # v2.13.2: anchor Goodreads' T4/T5 resolver tiers with the
+        # author's stored goodreads_id when known. Empty string when
+        # not — those tiers no-op cleanly.
+        from app.metadata.author_lookup import get_goodreads_id_for_author
+        author_goodreads_id = await get_goodreads_id_for_author(author)
         result = await enricher.enrich(
             title=title,
             author=author,
             mam_torrent_id=mam_torrent_id,
             mam_token=_get_mam_token(),
             audiobook=is_audiobook,
+            author_goodreads_id=author_goodreads_id,
         )
 
         if result is None:

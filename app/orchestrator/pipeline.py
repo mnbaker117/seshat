@@ -837,6 +837,11 @@ async def _prepare_group(
     if enriched is None and metadata_enricher is not None:
         grab_category = grab.category if grab else ""
         is_audiobook = _is_audiobook_grab(book_format, grab_category)
+        # v2.13.2: anchor GoodreadsSource's T4/T5 resolver tiers with
+        # the author's stored goodreads_id when we have one. Empty
+        # string is fine — the resolver tiers no-op on absent anchor.
+        from app.metadata.author_lookup import get_goodreads_id_for_author
+        author_goodreads_id = await get_goodreads_id_for_author(metadata.author)
         try:
             enriched = await metadata_enricher.enrich(
                 title=metadata.title,
@@ -850,6 +855,7 @@ async def _prepare_group(
                 mam_token="" if is_bundle else _get_mam_token(),
                 audiobook=is_audiobook,
                 skip_mam=is_bundle,
+                author_goodreads_id=author_goodreads_id,
             )
         except Exception:
             _log.exception(

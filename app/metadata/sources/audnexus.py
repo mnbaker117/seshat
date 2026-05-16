@@ -55,7 +55,7 @@ class AudnexusSource(MetaSource):
         self.region = region if region in VALID_REGIONS else "us"
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         """No title/author search available on Audnexus — see module docstring."""
         return None

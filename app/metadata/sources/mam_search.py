@@ -54,7 +54,7 @@ class MamSearchSource(MetaSource):
         self._torrent_id = torrent_id
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         if not self._token:
             return None

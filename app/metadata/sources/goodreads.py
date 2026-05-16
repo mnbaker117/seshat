@@ -1,31 +1,30 @@
 """
 Goodreads metadata source.
 
-Book-centric scraper. Historically two-pass:
+Book-centric, two-pass:
 
-  1. `/search?q={title author}&search_type=books` — find a candidate
-     book id by title + author.
-  2. `/book/show/{book_id}` — fetch the detail page for rich fields.
+  1. **Resolve a `goodreads_book_id`** via the ethical resolver chain
+     in `app.metadata.goodreads_id_resolver`. Five tiers in priority:
 
-**v2.10.4 — `/search` calls dropped.** Goodreads' robots.txt
-explicitly disallows `/search` for the `*` user-agent. This source
-no longer hits it. Free-text `search_book(title, author)` calls
-now return None with an informational log; the enricher's
-dispatcher just moves to the next source.
+       T1  /book/auto_complete?q={isbn or asin}        (existing)
+       T2  Hardcover book_mappings                      (existing)
+       T3  OpenLibrary identifiers.goodreads            (existing)
+       T4  /book/auto_complete?q={title} + author_id    (v2.13.2)
+       T5  /author/list/{author_id} bibliography walk   (v2.13.2)
 
-The `/book/show/{id}` path (which IS robots-permitted) remains
-functional — see `_merge_detail_page()` and the manual paste-URL
-import path at `app/discovery/routers/import_export.py`.
+  2. **Fetch `/book/show/{book_id}`** through `GoodreadsSession`
+     (curl_cffi chrome120 impersonation + 5s+jitter rate limit +
+     Cloudflare soft-block detection) and parse the HTML via
+     `_merge_detail_page()` for the rich fields.
 
-v2.11.0 will wire the ethical `goodreads_id_resolver` chain
-(`/book/auto_complete` → Hardcover `book_mappings` → Open Library
-`identifiers.goodreads`) so this source can recover its enrichment
-role for books where we can resolve a goodreads_id from sanctioned
-APIs without ever hitting `/search`.
+`/search` is **never** hit — robots.txt disallows it for `*`
+user-agents. We hold a higher standard than the Calibre kiwidude
+plugin (which scrapes `/search` with a rotated browser UA).
 
-This source also detects Cloudflare's 202-with-empty-body soft-
-block and logs distinctly (so future "Goodreads cookies expired"
-vs "Goodreads doesn't have this book" diagnostics aren't muddled).
+When the resolver chain returns no `goodreads_book_id` (no ISBN/ASIN
+matched any of T1-T3, AND we have no stored author goodreads_id to
+anchor T4/T5), `search_book` cleanly returns None and the enricher
+dispatcher moves on to the next source.
 """
 from __future__ import annotations
 
@@ -43,8 +42,9 @@ _log = logging.getLogger("seshat.metadata.goodreads")
 
 _BASE = "https://www.goodreads.com"
 
-# Goodreads will serve the bot page if the User-Agent looks like a
-# headless client, so we claim a normal Firefox UA.
+# Legacy header constant — preserved as the class default for any
+# direct httpx fallback path. The hot path now goes through
+# `GoodreadsSession` which manages its own headers.
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
@@ -53,6 +53,7 @@ _DEFAULT_HEADERS = {
     "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
 
 def _is_cloudflare_soft_block(resp) -> bool:
     """Detect Goodreads' Cloudflare 202-with-empty-body interstitial.
@@ -76,34 +77,129 @@ class GoodreadsSource(MetaSource):
     default_timeout = 45.0
 
     async def search_book(
-        self, title: str, author: str  # noqa: ARG002 — required by MetaSource interface
+        self,
+        title: str,
+        author: str,
+        *,
+        isbn: str = "",
+        asin: str = "",
+        author_goodreads_id: str = "",
+        **_,
     ) -> Optional[MetaRecord]:
-        """Free-text title+author search — DISABLED in v2.10.4.
+        """Resolve via the ID-resolver chain, then fetch /book/show.
 
-        Goodreads' robots.txt explicitly disallows `/search` for the
-        `*` user-agent. This method previously hit that endpoint to
-        find a candidate book_id, then enriched via `/book/show`.
-        Holding a higher standard than Calibre's kiwidude plugin
-        (which scrapes `/search` anyway with a rotated browser UA),
-        we now skip cleanly and let the enricher's dispatcher move
-        on to the next source in the priority chain.
-
-        The ethical resolver chain at
-        `app/metadata/goodreads_id_resolver.py` (Tier 1
-        `/book/auto_complete` + Tier 3 Open Library) is available
-        for callers that have an ISBN/ASIN, but wiring it into the
-        enricher requires extending the source interface to pass
-        identifiers, which is v2.11.0 scope.
+        See module docstring for the tier order. Returns None when:
+          - title is empty (defensive)
+          - the resolver returned no goodreads_book_id (insufficient
+            identifiers — no ISBN/ASIN matched T1-T3 and no author
+            goodreads_id was supplied to anchor T4/T5)
+          - the resolver flagged a Cloudflare soft-block (the
+            session-state flip is already done by the resolver; the
+            enricher's dispatcher gate at the next call will skip
+            Goodreads cleanly)
+          - the /book/show/{id} fetch failed
         """
         if not title:
             return None
+
+        from app.metadata.goodreads_id_resolver import (
+            ResolveQuery, resolve_goodreads_id,
+        )
+
+        query = ResolveQuery(
+            title=title,
+            author=author,
+            isbn=isbn or "",
+            asin=asin or "",
+            author_goodreads_id=author_goodreads_id or "",
+        )
+        result = await resolve_goodreads_id(query)
+
+        if result.soft_blocked:
+            _log.info(
+                "goodreads: resolver hit a soft-block while looking up "
+                "title=%r — returning None (session state already flipped)",
+                title,
+            )
+            return None
+
+        if not result.goodreads_book_id:
+            _log.info(
+                "goodreads: resolver miss for title=%r author=%r "
+                "(isbn=%s asin=%s author_id=%s) — no tier produced a book_id",
+                title, author, isbn or "-", asin or "-",
+                author_goodreads_id or "-",
+            )
+            return None
+
+        record = await _fetch_and_parse_book(
+            result.goodreads_book_id, title=title, author=author,
+        )
+        if record is None:
+            return None
+
+        # Tag the record so downstream merge + scoring see a Goodreads
+        # contribution. The enricher does the confidence scoring; we
+        # don't self-score.
+        record.source = self.name
+        record.source_url = f"{_BASE}/book/show/{result.goodreads_book_id}"
+        record.external_id = str(result.goodreads_book_id)
         _log.info(
-            "goodreads: search_book skipped — /search is robots-disallowed; "
-            "v2.11.0 will wire goodreads_id_resolver (auto_complete / "
-            "Open Library) to recover this path ethically (title=%r)",
-            title,
+            "goodreads: resolved title=%r → book_id=%s via tier=%s",
+            title, result.goodreads_book_id, result.tier or "?",
+        )
+        return record
+
+
+async def _fetch_and_parse_book(
+    book_id: str, *, title: str, author: str,
+) -> Optional[MetaRecord]:
+    """Fetch `/book/show/{book_id}` and merge fields into a MetaRecord.
+
+    Routes through `GoodreadsSession` so curl_cffi impersonation,
+    rate-limit jitter, and soft-block detection are uniform across
+    every Goodreads HTML fetch in the app.
+    """
+    from app.metadata import goodreads_session
+
+    record = MetaRecord(title=title, authors=[author] if author else [])
+
+    url = f"{_BASE}/book/show/{book_id}"
+    session = await goodreads_session.get_session()
+    try:
+        resp = await session.get(url)
+    except Exception as e:
+        _log.debug("goodreads: /book/show fetch error for %s: %s", book_id, e)
+        return None
+
+    if goodreads_session.is_cloudflare_soft_block(resp):
+        # `session.get()` already flipped the state flag; this path is
+        # an informational log only.
+        _log.info(
+            "goodreads: /book/show/%s soft-blocked — Goodreads session "
+            "state flipped to soft_blocked",
+            book_id,
         )
         return None
+
+    status = getattr(resp, "status_code", None)
+    if status != 200:
+        _log.debug(
+            "goodreads: /book/show/%s unexpected status %s", book_id, status,
+        )
+        return None
+
+    body = getattr(resp, "text", None) or ""
+    if not body:
+        return None
+
+    try:
+        _merge_detail_page(record, body)
+    except Exception:
+        _log.exception("goodreads: failed to parse /book/show/%s", book_id)
+        return None
+
+    return record
 
 
 # ─── HTML parser for /book/show/{id} (robots-permitted) ────────

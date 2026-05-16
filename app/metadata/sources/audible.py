@@ -64,7 +64,7 @@ class AudibleSource(MetaSource):
         return f"https://api.audible{tld}/1.0/catalog/products"
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         if not title:
             return None

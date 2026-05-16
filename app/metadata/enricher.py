@@ -264,6 +264,7 @@ class MetadataEnricher:
         mam_token: str = "",
         audiobook: bool = False,
         skip_mam: bool = False,
+        author_goodreads_id: str = "",
     ) -> Optional[MetaRecord]:
         """Run the priority list and return the best merged record.
 
@@ -286,6 +287,12 @@ class MetadataEnricher:
         Hardcover / Audible for per-child fields and let the parent
         grab's MAM URL flow through unchanged via the bundle_parent_grab_id
         audit trail.
+
+        `author_goodreads_id` (v2.13.2) anchors GoodreadsSource's T4/T5
+        resolver tiers (auto_complete title-search + bibliography
+        walk). When omitted, those tiers no-op and Goodreads can only
+        contribute via the identifier-based T1-T3. Callers (the
+        pipeline) look this up from the seshat authors table.
 
         Returns None when every source returned None or errored.
         """
@@ -374,8 +381,17 @@ class MetadataEnricher:
                         "status": "soft_blocked",
                     })
                     continue
+            # Pull whatever identifiers prior sources have populated on
+            # the in-progress merged record so Goodreads' resolver
+            # tiers (T1-T5) can use them. Empty strings when nothing
+            # has populated yet (first source in the chain, or no
+            # source surfaced an isbn/asin so far).
+            current_isbn = (merged.isbn if merged else None) or ""
+            current_asin = (merged.asin if merged else None) or ""
             result = await self._safe_search(
                 src, title=title, author=author, max_wait=remaining,
+                isbn=current_isbn, asin=current_asin,
+                author_goodreads_id=author_goodreads_id,
             )
             # Title-variant fallback. When a source returns no match
             # for the raw title, retry with the series/edition-stripped
@@ -403,6 +419,8 @@ class MetadataEnricher:
                         result = await self._safe_search(
                             src, title=cleaned, author=author,
                             max_wait=remaining_after,
+                            isbn=current_isbn, asin=current_asin,
+                            author_goodreads_id=author_goodreads_id,
                         )
             if result is None:
                 # Emit at INFO so the log stream shows the full chain —
@@ -479,6 +497,9 @@ class MetadataEnricher:
     async def _safe_search(
         self, source: MetaSource, *, title: str, author: str,
         max_wait: Optional[float] = None,
+        isbn: str = "",
+        asin: str = "",
+        author_goodreads_id: str = "",
     ) -> Optional[MetaRecord]:
         # Clamp per-source timeout to the remaining global budget so a
         # slow late-stage source can't single-handedly blow the per-book
@@ -488,7 +509,11 @@ class MetadataEnricher:
             timeout = min(timeout, max(0.5, max_wait))
         try:
             return await asyncio.wait_for(
-                source.search_book(title, author),
+                source.search_book(
+                    title, author,
+                    isbn=isbn, asin=asin,
+                    author_goodreads_id=author_goodreads_id,
+                ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:

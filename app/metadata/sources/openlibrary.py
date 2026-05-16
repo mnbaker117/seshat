@@ -57,7 +57,7 @@ class OpenLibrarySource(MetaSource):
         super().__init__(rate_limit=rate_limit)
 
     async def search_book(
-        self, title: str, author: str,
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         """Look up a single book by title + author on Open Library.
 

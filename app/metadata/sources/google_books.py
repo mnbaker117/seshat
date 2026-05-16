@@ -37,7 +37,7 @@ class GoogleBooksSource(MetaSource):
         self._api_key = api_key
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         if not title:
             return None

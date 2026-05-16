@@ -105,7 +105,7 @@ class HardcoverSource(MetaSource):
         return data.get("data", {})
 
     async def search_book(
-        self, title: str, author: str
+        self, title: str, author: str, **_,
     ) -> Optional[MetaRecord]:
         if not self._api_key:
             return None

@@ -76,17 +76,30 @@ _JITTER_RANGE = (0.0, 1.0)
 
 
 def is_cloudflare_soft_block(resp: Any) -> bool:
-    """Detect Goodreads' Cloudflare 202-with-empty-body interstitial.
+    """Detect signals that we should stop hitting Goodreads for now.
 
-    Cloudflare returns HTTP 202 Accepted with an empty body when its
-    bot-manager wants the client to solve a JS challenge. Real browsers
-    do; httpx/requests don't. A 2xx response with a 0-byte body also
-    counts (defensive — some interstitial variants return 200 + empty).
+    Catches three patterns, all of which mean "back off":
+      - **HTTP 202 + empty body**: Cloudflare's JS-challenge gate
+        on the HTML page surface. Real browsers solve it; httpx /
+        curl_cffi don't.
+      - **HTTP 2xx + empty body**: defensive — some interstitial
+        variants return 200 with a zero-length body.
+      - **HTTP 403 / 429** (v2.13.2): AWS CloudFront's bot-rate
+        gate on the JSON `auto_complete` endpoint and on the
+        `/author/list/` HTML pages. 403 means our request shape /
+        IP got flagged; 429 means we exceeded the rolling rate
+        cap. Either way, slowing down is the right move and the
+        soft-block flag flip lets the dispatcher skip remaining
+        Goodreads tiers cleanly.
+
+    Function name kept as `is_cloudflare_soft_block` for call-site
+    stability; semantically it's now a broader "should we flip the
+    session to soft_blocked" predicate.
     """
     if resp is None:
         return False
     status = getattr(resp, "status_code", None)
-    if status == 202:
+    if status in (202, 403, 429):
         return True
     if status is not None and 200 <= status < 300:
         body = getattr(resp, "content", None) or b""

@@ -7,6 +7,111 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.13.2] — 2026-05-16
+
+Goodreads enrichment rewire. Day-1 production logs after v2.13.1's
+priority promotion showed Goodreads at **0/5 hit-rate** on per-book
+enrichment — the enricher only invoked `search_book(title, author)`
+which fell through to the disabled `/search` stub. The existing
+`goodreads_id_resolver` chain (auto_complete + Hardcover + OpenLibrary)
+was built for v2.13.0's discovery-side author backfill but never wired
+into per-book metadata enrichment. v2.13.2 closes that gap and adds
+two new tiers that exploit the v2.13.0 author-id backfill.
+
+### Added
+
+- **Resolver tier 4** — `/book/auto_complete?format=json&q={title}`
+  with author-id post-filter. Same endpoint T1 uses for ISBN/ASIN;
+  empirically cleaner with a title-only query (title+author polluted
+  results with parodies and boxed sets). Picks the highest-`ratingsCount`
+  result when multiple match the anchor author. Gated on
+  `author_goodreads_id` being set — unconstrained title matches are
+  too risky.
+- **Resolver tier 5** — `/author/list/{author_goodreads_id}`
+  bibliography walker. Lazy page-by-page, schema.org/Book microdata
+  parse, fuzzy title match via existing `title_similarity()`. Reuses
+  the v2.13.0-reserved `id_cache.author_bib` 7-day cache scope; meta
+  header tracks `pages_walked` + `fully_indexed` so subsequent lookups
+  for different titles by the same author resume from the prior walk
+  (and skip HTTP entirely once fully indexed).
+  - **`app/metadata/goodreads_bibliography.py`** — new module.
+  - Pagination cap: 50 pages (1500 entries; Sanderson is 14).
+  - Title-match threshold: 0.85.
+- **`app/metadata/author_lookup.py`** — cross-library lookup helper
+  that walks every discovered library's `authors` table for a given
+  name and returns the first non-empty `goodreads_id`. Required
+  because per-book enrichment runs library-agnostic (acquisition
+  linkback happens later in the pipeline).
+
+### Changed
+
+- **`MetaSource.search_book()` signature** extended with
+  `isbn=""`, `asin=""`, `author_goodreads_id=""` kwargs. All 11
+  concrete sources accept (and most ignore via `**_`) the extras.
+  Only `GoodreadsSource` consumes them today.
+- **`GoodreadsSource.search_book()`** fully rewritten. Builds a
+  `ResolveQuery`, runs the T0–T5 resolver chain, on hit fetches
+  `/book/show/{book_id}` through `GoodreadsSession` (uniform
+  curl_cffi + soft-block + rate-limit), parses via the existing
+  `_merge_detail_page()`, returns a `MetaRecord` tagged with
+  `source="goodreads"`, `source_url`, and `external_id=book_id`.
+  The misleading `"v2.11.0 will wire..."` log line that Mark spotted
+  on day 1 is gone.
+- **Enricher plumbing** — `MetadataEnricher.enrich()` accepts
+  `author_goodreads_id`; `_safe_search()` and both call sites
+  forward `isbn` + `asin` from the in-progress merged record (prior
+  sources' contributions) plus the resolved `author_goodreads_id`.
+- **Pipeline + review-router callers** call the new
+  `get_goodreads_id_for_author()` helper and pass the result into
+  `enricher.enrich()`. Empty string when the author isn't backfilled
+  — T4/T5 no-op cleanly in that case.
+- **`is_cloudflare_soft_block()`** (in `goodreads_session`) extended
+  to also flag HTTP 403 and 429. AWS CloudFront's bot-rate gate on
+  `/book/auto_complete` and `/author/list/` returns these instead of
+  Cloudflare's 202-with-empty-body, but the right action is the
+  same: flip session to `soft_blocked` so the dispatcher skips
+  remaining Goodreads tiers cleanly. Function name kept for
+  call-site stability.
+
+### Deferred (not in v2.13.2)
+
+- **Edition disambiguation via `/work/editions/{work_id}`** —
+  investigated and dropped. The page is React-hydrated (7KB shell,
+  no edition data in the static HTML), Rails-style `.json` suffix
+  returns 404, and no documented JSON endpoint exists. T1-T3 already
+  do edition-accurate ISBN/ASIN matching when MAM provides an
+  identifier; the only case where Phase 3 would add value is when
+  MAM's ISBN misses T1-T3 but the work exists on Goodreads — narrow
+  edge with marginal metadata-quality upside (page count / pub date
+  per-edition vs canonical). Revisit if UAT surfaces real mismatches.
+- **Title-only fallback when `author_goodreads_id` is unknown** —
+  wrong-book risk outweighs coverage gain. Authors with no stored
+  goodreads_id (12% of Mark's library) simply skip T4/T5; T1-T3
+  still run on whatever ISBN/ASIN MAM supplies.
+
+### Tests
+
+- 17 new tests across three files:
+  - `tests/metadata/test_goodreads_id_resolver.py` — T4 hit /
+    author-id filter / wrong-author rejection / multi-match
+    highest-rated tiebreaker / 403 soft-block flip; the no-search
+    regression test now also exercises T4/T5.
+  - `tests/metadata/test_goodreads_bibliography.py` — page parser /
+    early-stop on page 1 / multi-page walk / exhaustion marks
+    fully_indexed / fully_indexed cache skips HTTP / soft-block
+    returns marker without poisoning cache / 403 treated as
+    soft-block / empty inputs no-op.
+  - `tests/metadata/test_goodreads_session.py` — `is_cloudflare_soft_block`
+    extended to cover 403 + 429.
+- Updated `tests/metadata/test_enricher.py` fake-source `search_book`
+  methods to accept `**_` so they tolerate the new identifier kwargs
+  the enricher now forwards.
+
+Suite: targeted slices passing (47 Goodreads + 33 enricher + 16 pipeline
++ 336 metadata + canary). Full suite gated by the 30-min interactive cap.
+
+---
+
 ## [2.13.1] — 2026-05-14
 
 Priority promotion: Goodreads restored to #2 (ebook) / #3 (audiobook)

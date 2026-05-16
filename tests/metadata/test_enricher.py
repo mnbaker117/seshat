@@ -28,7 +28,7 @@ class _FakeSource(MetaSource):
         self._result = result
         self.call_count = 0
 
-    async def search_book(self, title, author):
+    async def search_book(self, title, author, **_):
         self.call_count += 1
         return self._result
 
@@ -51,7 +51,7 @@ class _TitleAwareSource(MetaSource):
         self._map = title_to_result
         self.titles_seen: list[str] = []
 
-    async def search_book(self, title, author):
+    async def search_book(self, title, author, **_):
         self.titles_seen.append(title)
         return self._map.get(title)
 
@@ -62,7 +62,7 @@ class _SlowSource(MetaSource):
     def __init__(self):
         super().__init__(rate_limit=0)
 
-    async def search_book(self, title, author):
+    async def search_book(self, title, author, **_):
         await asyncio.sleep(10)  # intentionally longer than timeout
         return None
 
@@ -73,7 +73,7 @@ class _ExplodingSource(MetaSource):
     def __init__(self):
         super().__init__(rate_limit=0)
 
-    async def search_book(self, title, author):
+    async def search_book(self, title, author, **_):
         raise RuntimeError("simulated scraper failure")
 
 
