@@ -137,8 +137,10 @@ type SourceKey =
   | "hardcover"
   | "kobo"
   | "amazon"
+  | "audible"
   | "ibdb"
   | "google_books"
+  | "openlibrary"
   | "manual";
 
 interface BadgeColor {
@@ -602,6 +604,23 @@ export function BookSidebar({
     });
   })();
 
+  // Audiobook-specific block gate: fires when the row came from an
+  // audiobook source OR carries any of the audiobook-only fields.
+  // The second arm handles legacy cache rows that don't have a
+  // library_slug stamp yet.
+  //
+  // Hoisted above the metadata-badge block so the Audible badge's
+  // asin fallback can reference it: ABS-sourced audiobooks usually
+  // have `asin` set but no `audible_id` (no discovery scan yet).
+  const isAudiobookRow = !!(
+    book.content_type === "audiobook" ||
+    book.audiobookshelf_id ||
+    book.narrator ||
+    book.duration_sec ||
+    book.asin ||
+    book.audio_formats
+  );
+
   // Metadata source badges. Parse `book.source_url` as either a JSON
   // object `{goodreads: url, hardcover: url, ...}` or a bare URL string
   // (legacy single-source shape) — the single-source flavor keys by
@@ -612,8 +631,10 @@ export function BookSidebar({
     hardcover:    { bg: "#1a3355", fg: "#70a8e8", br: "#2a5588" },
     kobo:         { bg: "#1a4533", fg: "#70e8a8", br: "#2a8855" },
     amazon:       { bg: "#3d2e1a", fg: "#f0a83c", br: "#7a5c2a" },
+    audible:      { bg: "#3d2010", fg: "#f08838", br: "#7a4218" },
     ibdb:         { bg: "#2a1a3d", fg: "#c070e8", br: "#5a2a88" },
     google_books: { bg: "#1a3333", fg: "#70c8e8", br: "#2a7788" },
+    openlibrary:  { bg: "#3a1d1a", fg: "#e87a6a", br: "#88332a" },
     manual:       { bg: t.bg4,     fg: t.td,      br: t.border },
   };
   // v2.11.1 N7: fallback URL derivation from the per-source `*_id`
@@ -631,15 +652,25 @@ export function BookSidebar({
   const idDerivedUrl: Partial<Record<SourceKey, (id: string) => string>> = {
     goodreads: (id) => `https://www.goodreads.com/book/show/${id}`,
     amazon: (id) => `https://www.amazon.com/dp/${id}`,
+    audible: (id) => `https://www.audible.com/pd/${id}`,
     google_books: (id) =>
       `https://books.google.com/books?id=${encodeURIComponent(id)}`,
     ibdb: (id) => `https://ibdb.dev/book/${id}`,
+    // OL keys can be work-keys (OL...W) or edition-keys (OL...M).
+    // Works live under /works/, editions under /books/; suffix-route
+    // so both URL imports and discovery-source writes resolve.
+    openlibrary: (id) =>
+      id.endsWith("M")
+        ? `https://openlibrary.org/books/${id}`
+        : `https://openlibrary.org/works/${id}`,
   };
   const idColumn: Partial<Record<SourceKey, keyof Book>> = {
     goodreads: "goodreads_id",
     amazon: "amazon_id",
+    audible: "audible_id",
     google_books: "google_books_id",
     ibdb: "ibdb_id",
+    openlibrary: "openlibrary_id",
   };
   // v2.12.0 — slug-based fallback for Hardcover + Kobo.
   const slugDerivedUrl: Partial<Record<SourceKey, (slug: string) => string>> = {
@@ -652,7 +683,8 @@ export function BookSidebar({
   };
   const metadataEntries: { name: SourceKey; url: string }[] = (() => {
     const order: SourceKey[] = [
-      "goodreads", "hardcover", "kobo", "amazon", "ibdb", "google_books",
+      "goodreads", "hardcover", "kobo", "amazon", "audible",
+      "ibdb", "google_books", "openlibrary",
     ];
     let urls: Record<string, string> = {};
     try {
@@ -685,24 +717,22 @@ export function BookSidebar({
         const slug = book[slugKey];
         if (typeof slug === "string" && slug) {
           out.push({ name: k, url: slugBuilder(slug) });
+          continue;
         }
+      }
+      // Audible-only fallback: ABS-sourced audiobook rows usually
+      // carry the ASIN in `asin` (from Audnexus) but lack a
+      // populated `audible_id` until a discovery scan runs. Treat
+      // `asin` on audiobook rows as Audible's ID — same value, just
+      // a different column path. Guarded on isAudiobookRow because
+      // ebook rows put a Kindle mobi-asin in `asin`, which would
+      // resolve to an unrelated product on audible.com.
+      if (k === "audible" && isAudiobookRow && book.asin) {
+        out.push({ name: "audible", url: `https://www.audible.com/pd/${book.asin}` });
       }
     }
     return out;
   })();
-
-  // Audiobook-specific block gate: fires when the row came from an
-  // audiobook source OR carries any of the audiobook-only fields.
-  // The second arm handles legacy cache rows that don't have a
-  // library_slug stamp yet.
-  const isAudiobookRow = !!(
-    book.content_type === "audiobook" ||
-    book.audiobookshelf_id ||
-    book.narrator ||
-    book.duration_sec ||
-    book.asin ||
-    book.audio_formats
-  );
 
   const sourceLabel = book.owned
     ? book.source === "audiobookshelf" || book.audiobookshelf_id

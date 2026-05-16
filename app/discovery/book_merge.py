@@ -41,6 +41,13 @@ _IDENTITY_FIELDS = (
     "amazon_id",
     "google_books_id",
     "ibdb_id",
+    # v2.14.0 — caught by the BookSidebar badge audit: these columns
+    # are populated by their discovery sources + Calibre identifier
+    # mining but were silently dropped during book merges because the
+    # merge layer didn't know about them. Newly-added Audible /
+    # OpenLibrary badges now make that data loss visible.
+    "openlibrary_id",
+    "audible_id",
     "audiobookshelf_id",
     # v2.12.0 — slug companions to *_id for slug-based source URLs.
     # See BookSidebar idDerivedUrl fallback.

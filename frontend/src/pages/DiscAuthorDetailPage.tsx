@@ -35,6 +35,7 @@ import type {
   NavFn,
   PenNameLink,
   PenNamesResponse,
+  ScanStatusResponse,
   Series,
 } from "../types";
 
@@ -742,19 +743,52 @@ function DesktopAuthorDetailPage({
   const scanEbookSources = () => _crossLibraryAuthorScan("ebook");
   const scanAudiobookSources = () => _crossLibraryAuthorScan("audiobook");
 
-  // Listen for scan completion (broadcast by the unified poller in
-  // App-level Dashboard) and refresh this page's author data + book
-  // grid.
+  // v2.14.0 — page-local scan-completion poll. UAT 2026-05-14 surfaced
+  // that after triggering an audiobook scan, this page didn't refresh
+  // when the scan finished: spinners stayed up and newly-merged books
+  // didn't appear until manual reload. Root cause: the prior
+  // implementation listened for `seshat:scan-completed`, but that
+  // event is never dispatched anywhere in the frontend — the
+  // app-wide unified poller it referenced only runs while the user
+  // is on the Dashboard.
+  //
+  // Fix: poll `/discovery/scan-status` directly while on this page
+  // (3s cadence, mirrors `DiscBooksPage`'s MAM-scan poller). On a
+  // running→idle transition for `lookup` or `mam`, clear the
+  // corresponding local spinner state, call `loadA()` to refresh the
+  // author + book data, and bump `rk` so child series components
+  // re-mount with fresh keys.
   useEffect(() => {
-    const onDone = () => {
-      loadA();
-      setRk((k) => k + 1);
-      setRef(false);
-      setMamRef(false);
+    let active = true;
+    let prevLookup = false;
+    let prevMam = false;
+    const tick = async () => {
+      try {
+        const r = await api.get<ScanStatusResponse>("/discovery/scan-status");
+        if (!active) return;
+        const scans = r.scans || [];
+        const lookupRunning = scans.some((s) => s.kind === "lookup" && s.running);
+        const mamRunning = scans.some((s) => s.kind === "mam" && s.running);
+        const lookupDone = prevLookup && !lookupRunning;
+        const mamDone = prevMam && !mamRunning;
+        if (lookupDone || mamDone) {
+          if (lookupDone) setRef(false);
+          if (mamDone) setMamRef(false);
+          loadA();
+          setRk((k) => k + 1);
+        }
+        prevLookup = lookupRunning;
+        prevMam = mamRunning;
+      } catch {
+        /* ignore — scan-status is non-critical */
+      }
     };
-    window.addEventListener("seshat:scan-completed", onDone);
-    return () =>
-      window.removeEventListener("seshat:scan-completed", onDone);
+    tick();
+    const id = window.setInterval(tick, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
   }, [loadA]);
 
   const onAction = async (act: BookAction, id: number, slug?: string) => {
@@ -1774,8 +1808,70 @@ function PerLibraryBlocks({
     }
   };
 
+  // v2.14.0 — jump-to-section nav for Combined mode. UAT 2026-05-14
+  // surfaced: with multi-hundred-item Combined tabs (e.g. Sanderson:
+  // ~400 entries), the boundary between the Ebook block and the
+  // Audiobook block disappears into the scroll. The mini-nav scrolls
+  // straight to the first block of each content_type. Only renders
+  // when blocksToRender has >1 block AND the user is on Combined.
+  const showJumpNav = hasTabs && fmtTab === "combined" && blocksToRender.length > 1;
+  const jumpTargets: { label: string; slug: string; color: string }[] = (() => {
+    if (!showJumpNav) return [];
+    const seen = new Set<string>();
+    const out: { label: string; slug: string; color: string }[] = [];
+    for (const b of blocksToRender) {
+      const key = b.content_type;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        label: b.label,
+        slug: b.slug,
+        color: b.content_type === "audiobook" ? t.pur || t.accent : t.accent,
+      });
+    }
+    return out;
+  })();
+  const jumpTo = (slug: string) => {
+    const el = document.getElementById(`block-${slug}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
     <>
+      {showJumpNav && jumpTargets.length > 1 ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            background: t.bg4,
+            border: `1px solid ${t.border}`,
+            borderRadius: 6,
+            fontSize: 13,
+          }}
+        >
+          <span style={{ color: t.tf, fontWeight: 500 }}>Jump to:</span>
+          {jumpTargets.map((j) => (
+            <button
+              key={j.slug}
+              onClick={() => jumpTo(j.slug)}
+              style={{
+                padding: "4px 12px",
+                background: j.color + "22",
+                color: j.color,
+                border: `1px solid ${j.color}44`,
+                borderRadius: 5,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {j.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {blocksToRender.map((block) => {
         const series = block.data?.series || [];
         const standalone = block.data?.standalone_books || [];
@@ -1793,10 +1889,15 @@ function PerLibraryBlocks({
         return (
           <div
             key={block.slug}
+            id={`block-${block.slug}`}
             style={{
               display: "flex",
               flexDirection: "column",
               gap: 16,
+              // Leave room for the sticky author header so smooth-
+              // scrolling lands the section heading below it instead
+              // of clipped underneath.
+              scrollMarginTop: 200,
             }}
           >
             {showHdr || showScan ? (
@@ -1812,15 +1913,15 @@ function PerLibraryBlocks({
                   <>
                     <div
                       style={{
-                        width: 4,
-                        height: 18,
+                        width: 6,
+                        height: 26,
                         background: color,
-                        borderRadius: 2,
+                        borderRadius: 3,
                       }}
                     />
                     <span
                       style={{
-                        fontSize: 13,
+                        fontSize: 16,
                         fontWeight: 700,
                         color,
                         textTransform: "uppercase",

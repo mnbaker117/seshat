@@ -160,6 +160,8 @@ export interface Book {
   amazon_id?: string | null;
   ibdb_id?: string | null;
   google_books_id?: string | null;
+  openlibrary_id?: string | null;
+  audible_id?: string | null;
   // v2.12.0 — slug companions for sources whose URLs are slug-based.
   // BookSidebar uses them to reconstruct working URLs when source_url
   // JSON is missing.

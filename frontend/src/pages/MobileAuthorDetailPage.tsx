@@ -28,6 +28,7 @@ import type {
   NavFn,
   PenNameLink,
   PenNamesResponse,
+  ScanStatusResponse,
   Series,
 } from "../types";
 
@@ -292,6 +293,43 @@ export default function MobileAuthorDetailPage({
       .then((r) => setMamOn(!!r.enabled))
       .catch(() => {});
   }, []);
+
+  // v2.14.0 — page-local scan-completion poll. Mirrors the desktop
+  // DiscAuthorDetailPage poll: on a running→idle transition for
+  // `lookup` or `mam`, clear the corresponding local spinner state
+  // and call `loadA()` so the user sees the new state without a
+  // manual reload. See the desktop poll for full context.
+  useEffect(() => {
+    let active = true;
+    let prevLookup = false;
+    let prevMam = false;
+    const tick = async () => {
+      try {
+        const r = await api.get<ScanStatusResponse>("/discovery/scan-status");
+        if (!active) return;
+        const scans = r.scans || [];
+        const lookupRunning = scans.some((s) => s.kind === "lookup" && s.running);
+        const mamRunning = scans.some((s) => s.kind === "mam" && s.running);
+        const lookupDone = prevLookup && !lookupRunning;
+        const mamDone = prevMam && !mamRunning;
+        if (lookupDone || mamDone) {
+          if (lookupDone) setRef(false);
+          if (mamDone) setMamRef(false);
+          loadA();
+        }
+        prevLookup = lookupRunning;
+        prevMam = mamRunning;
+      } catch {
+        /* ignore — scan-status is non-critical */
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [loadA]);
 
   useEffect(() => {
     if (!authorIdNum) return;
@@ -625,20 +663,41 @@ export default function MobileAuthorDetailPage({
                 : "Select"}
           </button>
         ) : null;
+      const hdrColor = block.content_type === "audiobook" ? t.pur || t.accent : t.accent;
       return (
-        <div key={block.slug}>
+        <div
+          key={block.slug}
+          id={`block-${block.slug}`}
+          style={{ scrollMarginTop: 80 }}
+        >
           {hasMultiLib && fmtTab === "combined" && (
             <div
               style={{
-                fontSize: 12,
-                color: t.tg,
-                fontWeight: 700,
-                textTransform: "uppercase",
-                letterSpacing: "0.04em",
-                padding: "12px 4px 6px",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "16px 4px 8px",
               }}
             >
-              {block.label}
+              <div
+                style={{
+                  width: 5,
+                  height: 22,
+                  background: hdrColor,
+                  borderRadius: 3,
+                }}
+              />
+              <span
+                style={{
+                  fontSize: 14,
+                  color: hdrColor,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                {block.label}
+              </span>
             </div>
           )}
           {(block.data.series || []).map((s) => (
@@ -1015,6 +1074,67 @@ export default function MobileAuthorDetailPage({
           ))}
         </div>
       )}
+
+      {/* v2.14.0 — Jump-to-section nav for Combined mode. Same intent
+         as the desktop equivalent: long Combined lists hide the
+         Ebook/Audiobook boundary, so offer a one-tap scroll. Only
+         renders when Combined view has more than one block. */}
+      {hasMultiLib && fmtTab === "combined" && blocks.length > 1 ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 10px",
+            background: t.bg4,
+            border: `1px solid ${t.border}`,
+            borderRadius: 6,
+            fontSize: 13,
+            overflowX: "auto",
+            scrollbarWidth: "none",
+          }}
+        >
+          <span style={{ color: t.tf, fontWeight: 500, whiteSpace: "nowrap" }}>
+            Jump to:
+          </span>
+          {(() => {
+            const seen = new Set<string>();
+            const out: { label: string; slug: string; color: string }[] = [];
+            for (const b of blocks) {
+              if (seen.has(b.content_type)) continue;
+              seen.add(b.content_type);
+              out.push({
+                label: b.label,
+                slug: b.slug,
+                color: b.content_type === "audiobook" ? t.pur || t.accent : t.accent,
+              });
+            }
+            return out.map((j) => (
+              <button
+                key={j.slug}
+                onClick={() => {
+                  const el = document.getElementById(`block-${j.slug}`);
+                  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+                style={{
+                  padding: "6px 14px",
+                  background: j.color + "22",
+                  color: j.color,
+                  border: `1px solid ${j.color}44`,
+                  borderRadius: 5,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  minHeight: 32,
+                }}
+              >
+                {j.label}
+              </button>
+            ));
+          })()}
+        </div>
+      ) : null}
 
       {/* Series sections + standalone */}
       {fmtTab === "combined" ? renderBlocks(blocks) : activeBlock ? renderBlocks([activeBlock]) : null}

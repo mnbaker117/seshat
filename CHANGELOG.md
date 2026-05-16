@@ -7,6 +7,92 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.14.0] — 2026-05-16
+
+Author Detail UX polish — three concrete pain points carried over from
+v2.12.1 UAT 2026-05-14, bundled as a single minor: missing source
+badges (OpenLibrary + Audible), no jump-to-section nav on long Combined
+tabs, and the Author Detail page failing to refresh when a scan
+completes. Backlog items #A, #C, #D from the v2.14.x candidate list.
+
+### Added — #A source-badge audit
+
+- **OpenLibrary badge** in BookSidebar. `openlibrary_id` is populated
+  by the OpenLibrary discovery source and by Calibre identifier
+  mining (`openlibrary` / `ol` types), but the previous badge map
+  didn't include it — so cross-source URL panels silently omitted
+  the OL link even when the data was there. URL builder is suffix-
+  aware: work-keys (`OL…W`) → `/works/{id}`, edition-keys (`OL…M`)
+  → `/books/{id}`.
+- **Audible badge** in BookSidebar. Primary column is `audible_id`
+  (populated by Audnexus / Calibre `audible:` type). For audiobook
+  rows with no source-scanned `audible_id` (the common ABS-only
+  case), falls back to `asin` — for an audiobook row, ASIN *is* the
+  Audible identifier. Guarded on `isAudiobookRow` so an ebook row's
+  `mobi-asin` doesn't accidentally resolve to an unrelated product
+  on audible.com.
+
+### Added — #C Combined-tab jump-to-section nav
+
+- **Jump-to nav** on Author Detail's Combined tab (desktop + mobile).
+  UAT 2026-05-14 surfaced that with multi-hundred-item Combined views
+  (Sanderson: ~400 entries), the boundary between Ebook and Audiobook
+  blocks vanished into the scroll. The new nav renders a "Jump to:"
+  row above the blocks with one button per content type; click
+  smooth-scrolls to that block. Only renders when ≥2 blocks are
+  visible. Each block gets an `id` anchor + `scrollMarginTop` so the
+  scroll lands the section heading below the sticky author header
+  instead of clipped underneath.
+- **Stronger section delineation**: per-content-type headers in
+  Combined mode now use a wider color bar and larger label so the
+  boundary is visible without relying on the nav.
+
+### Fixed — #D scan-completion refresh
+
+- **Author Detail now refreshes when a scan finishes.** The page
+  used to listen for a `seshat:scan-completed` window event that the
+  frontend never dispatches anywhere — the orphan listener was a
+  vestige of a refactor. After clicking Re-sync / Scan Ebooks /
+  Scan Audiobooks / Scan MAM, the user had to manually reload the
+  page to see merged books or to clear the scan-button spinner.
+- Replaced with a 3-second page-local poll of `/discovery/scan-status`
+  (same cadence and pattern as `DiscBooksPage`'s MAM-scan poller).
+  On a running→idle transition for `lookup` or `mam`, the page
+  clears the corresponding spinner state, calls `loadA()` to refresh
+  author + book data, and bumps the re-mount key so child series
+  components pick up the new state. Mobile equivalent ships the
+  same poll.
+
+### Fixed — book_merge latent bug
+
+- **`_IDENTITY_FIELDS`** in `app/discovery/book_merge.py` now
+  includes `openlibrary_id` and `audible_id`. These columns were
+  populated by their respective discovery sources but absent from
+  the merge layer's identity field list — book merges silently
+  dropped them when the value lived only on the loser row. The
+  newly-added badges would have made that data loss user-visible.
+
+### Internal
+
+- `Book` TypeScript interface gains `openlibrary_id` and `audible_id`
+  fields. The `b.*` SELECT in `_BOOKS_SELECT` already exposed them
+  on the wire; the type just wasn't claiming them.
+- `pyproject.toml` `version` field jumps from 2.13.1 → 2.14.0; the
+  v2.13.2 bump was missed at release time (no runtime impact —
+  nothing reads pyproject's version at runtime; the field is a
+  build artifact).
+
+### Sources audited (no changes needed)
+
+- Goodreads, Hardcover, Kobo, Amazon, IBDB, Google Books — all
+  had complete badge coverage prior to this release.
+- Fictiondb / FantasticFiction — DB columns exist but no live
+  discovery source writes to them, so no badge needed. FantasticFiction
+  was dropped from the schema in an earlier migration; Fictiondb
+  remains an empty column reserved for a future source.
+
+---
+
 ## [2.13.2] — 2026-05-16
 
 Goodreads enrichment rewire. Day-1 production logs after v2.13.1's
