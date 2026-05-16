@@ -210,11 +210,21 @@ class TestClassifyIdentifier:
     def test_whitespace_only_returns_empty_pair(self):
         assert _classify_identifier("   ") == ("", "")
 
-    def test_non_string_returns_empty_pair(self):
-        # Defensive — MAM API field is always string-or-None today,
-        # but the parser shouldn't crash on unexpected shapes.
-        assert _classify_identifier(123) == ("", "")
+    def test_unparseable_types_returns_empty_pair(self):
+        # Defensive — dict / list / bool inputs aren't valid
+        # identifiers; drop without crashing.
         assert _classify_identifier(["B0XXXXX"]) == ("", "")
+        assert _classify_identifier({"isbn": "x"}) == ("", "")
+        assert _classify_identifier(True) == ("", "")
+        assert _classify_identifier(False) == ("", "")
+
+    def test_int_isbn_from_mam_response(self):
+        # CRITICAL — UAT 2026-05-16 surfaced this: MAM returns bare-
+        # digit ISBNs as JSON integers (no quotes), so the classifier
+        # MUST accept int input. ASINs always arrive as strings
+        # because they contain letters.
+        assert _classify_identifier(9798902092261) == ("9798902092261", "")
+        assert _classify_identifier(9781234567890) == ("9781234567890", "")
 
     def test_bare_isbn_13(self):
         # Failure Frame Vol 13 — confirmed via probe 2026-05-16.

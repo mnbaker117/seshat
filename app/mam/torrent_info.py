@@ -263,13 +263,24 @@ def _classify_identifier(raw) -> tuple[str, str]:
     `9798902092261`, `979-8895615560`) and prefixed ASIN entries
     (e.g. `ASIN:B0H1XKSFHQ`).
 
+    Note (v2.13.2 UAT): MAM serializes bare-digit ISBNs as JSON
+    INTEGERS (no quotes), so this accepts int inputs too. ASINs
+    always arrive as strings because they contain letters.
+
     Classification:
-      - None / empty / non-string         → ("", "")
+      - None / empty / dict / list / bool → ("", "")
+      - bare int                          → treat as ISBN (digits-only)
       - case-insensitive "ASIN:" prefix   → ("", stripped uppercase)
       - bare 10-char `B0XXXXXXXX` pattern → ("", uppercased) — defensive
       - case-insensitive "ISBN:" prefix   → (stripped digits-only, "")
       - anything else                     → treat as ISBN, digits-only
     """
+    if isinstance(raw, bool):
+        # bool is a subclass of int — explicitly reject it before the
+        # int branch below promotes True to "1".
+        return "", ""
+    if isinstance(raw, int):
+        raw = str(raw)
     if not isinstance(raw, str):
         return "", ""
     text = raw.strip()
