@@ -696,6 +696,16 @@ export function BookSidebar({
     }
     const out: { name: SourceKey; url: string }[] = [];
     for (const k of order) {
+      // v2.16.0 Gap 2 — Hardcover regenerates slugs when titles change
+      // on their side, so stored slug-based URLs (and `hardcover_slug`)
+      // can go stale and 404. The singular `/book/<id>` form is a
+      // stable permalink that 302s to the current canonical slug
+      // (probed live 2026-05-17). When we know `hardcover_id`, always
+      // prefer it — even over a stored source_url that may be stale.
+      if (k === "hardcover" && typeof book.hardcover_id === "string" && book.hardcover_id) {
+        out.push({ name: k, url: `https://hardcover.app/book/${book.hardcover_id}` });
+        continue;
+      }
       if (urls[k]) {
         out.push({ name: k, url: urls[k] });
         continue;
