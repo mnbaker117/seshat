@@ -13,6 +13,7 @@ import Toaster from "./components/Toaster";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { LibrarySyncBanner } from "./components/LibrarySyncBanner";
 import { InstallPrompt } from "./components/InstallPrompt";
+import { JumpToTop } from "./components/JumpToTop";
 import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SseEventsProvider } from "./providers/SseEventsProvider";
 import { useViewport } from "./hooks/useViewport";
@@ -488,6 +489,7 @@ export default function App() {
         <SeshatApp />
         <Toaster />
         <InstallPrompt />
+        <JumpToTop />
       </SseEventsProvider>
     </ThemeProvider>
   );
