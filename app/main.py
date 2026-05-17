@@ -77,6 +77,7 @@ from app.routers.metadata_sources import router as metadata_sources_router
 from app.routers.goodreads_session import router as goodreads_session_router
 from app.routers.migration import router as migration_router
 from app.routers.review import router as review_router
+from app.routers.search import router as search_router
 from app.routers.settings import router as settings_router
 from app.routers.sse import router as sse_router
 from app.routers.works import router as works_router
@@ -1189,6 +1190,7 @@ app.include_router(metadata_sources_router)
 app.include_router(goodreads_session_router)
 app.include_router(migration_router)
 app.include_router(review_router)
+app.include_router(search_router)
 app.include_router(settings_router)
 app.include_router(sse_router)
 app.include_router(tentative_router)
