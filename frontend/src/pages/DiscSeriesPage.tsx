@@ -102,6 +102,24 @@ export default function SeriesManagerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
+  // v2.15.1 — listen for `seshat:focus` events with kind=series from
+  // the global navbar search. The event detail already carries the
+  // series name (forwarded by App's navFromSearch from the
+  // SearchNavTarget). Pre-fill the search input with that name so
+  // the list narrows to just that series; the existing 250ms
+  // debounce flushes the fetch automatically.
+  useEffect(() => {
+    function onFocus(e: Event) {
+      const detail = (e as CustomEvent<{
+        kind?: string; name?: string;
+      }>).detail;
+      if (detail?.kind !== "series" || !detail.name) return;
+      setSearchInput(detail.name);
+    }
+    window.addEventListener("seshat:focus", onFocus);
+    return () => window.removeEventListener("seshat:focus", onFocus);
+  }, []);
+
   const total = data?.total ?? 0;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + PAGE_SIZE, total);

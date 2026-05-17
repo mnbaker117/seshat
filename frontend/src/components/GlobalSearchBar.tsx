@@ -157,7 +157,7 @@ export type SearchNavTarget =
   | { kind: "page"; page_id: string; section?: "discovery" | "pipeline" }
   | { kind: "settings-section"; section_id: string }
   | { kind: "author"; author_id: number; library_slug?: string | null }
-  | { kind: "series"; series_id: number; library_slug?: string | null; author_id?: number | null }
+  | { kind: "series"; series_id: number; name?: string; library_slug?: string | null; author_id?: number | null }
   | { kind: "book"; book_id: number; library_slug?: string | null; author_id?: number | null };
 
 interface GlobalSearchBarProps {
@@ -257,6 +257,7 @@ function buildRows(
         target: {
           kind: "series",
           series_id: s.id,
+          name: s.name,
           author_id: s.author_id ?? null,
           library_slug: s.library_slug,
         },

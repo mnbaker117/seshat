@@ -21,7 +21,7 @@ type S = Record<string, unknown>;
 const SettingsSearchContext = createContext<string>("");
 function useSettingsSearch(): string { return useContext(SettingsSearchContext); }
 
-function matchSearch(needle: string, haystacks: (string | undefined)[]): boolean {
+function matchSearch(needle: string, haystacks: (string | null | undefined)[]): boolean {
   if (!needle) return true;
   const n = needle.toLowerCase();
   for (const h of haystacks) {
@@ -32,14 +32,26 @@ function matchSearch(needle: string, haystacks: (string | undefined)[]): boolean
 
 // ── Shared field components ───────────────────────────────────
 
-function SF({ label, desc, example, children, warn, wide }: {
+function SF({ label, desc, example, children, warn, wide, searchAlso }: {
   label: string; desc?: string; example?: string; children: ReactNode; warn?: string; wide?: boolean;
+  // v2.15.1 — extra match strings. Call sites that want the search
+  // to find this SF by the underlying settings key or its current
+  // value pass them here. Default omitted; match is still permissive
+  // since section name/keywords also count.
+  searchAlso?: (string | undefined | null)[];
 }) {
   const t = useTheme();
   const search = useSettingsSearch();
-  // Self-hide when a search is active and this field's label/desc/
-  // example doesn't match. Search-empty case is the default render.
-  if (search && !matchSearch(search, [label, desc, example])) return null;
+  const sect = useCurrentSection();
+  if (search) {
+    const haystacks = [
+      label, desc, example,
+      sect?.label,
+      ...(sect?.keywords ?? []),
+      ...(searchAlso ?? []),
+    ];
+    if (!matchSearch(search, haystacks)) return null;
+  }
   return (
     <div style={{
       display: "grid",
@@ -47,6 +59,15 @@ function SF({ label, desc, example, children, warn, wide }: {
       alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${t.borderL}`, gap: "6px 16px",
     }}>
       <div style={{ minWidth: 0 }}>
+        {search && sect && (
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: t.tf,
+            textTransform: "uppercase", letterSpacing: "0.05em",
+            marginBottom: 4,
+          }}>
+            {sect.label}
+          </div>
+        )}
         <div style={{ fontSize: 15, fontWeight: 600, color: t.text }}>{label}</div>
         {desc && <div style={{ fontSize: 13, color: t.textDim, marginTop: 3, lineHeight: 1.5 }}>{desc}</div>}
         {example && <div style={{ fontSize: 12, color: t.accent, marginTop: 2, fontStyle: "italic" }}>{example}</div>}
@@ -479,23 +500,63 @@ function fmt12(h: number): string { const ampm = h >= 12 ? "PM" : "AM"; const h1
 
 // ── Section definitions ───────────────────────────────────────
 
-const SECTIONS = [
+interface SettingsSection {
+  id: string;
+  label: string;
+  group: string;
+  // v2.15.1 — extra match terms for the in-page search. When the
+  // user types one of these, every SF in this section matches even
+  // if its own label/desc doesn't. Lets users find "ntfy" → land
+  // on Notifications, "qbit" → Download Client, etc.
+  keywords?: string[];
+}
+
+const SECTIONS: SettingsSection[] = [
   { id: "pipeline", label: "Pipeline", group: "Pipeline" },
-  { id: "review", label: "Review & Enrichment", group: "Pipeline" },
-  { id: "policy", label: "Grab Policy", group: "Pipeline" },
-  { id: "budget", label: "Snatch Budget", group: "Pipeline" },
-  { id: "mam", label: "MyAnonamouse", group: "Pipeline" },
-  { id: "client", label: "Download Client", group: "Pipeline" },
-  { id: "sinks", label: "Sinks & Delivery", group: "Pipeline" },
-  { id: "notifications", label: "Notifications", group: "Pipeline" },
-  { id: "sources", label: "Metadata Sources", group: "Discovery" },
-  { id: "scanning", label: "Author Scanning", group: "Discovery" },
-  { id: "library", label: "Library Management", group: "Discovery" },
-  { id: "audiobookshelf", label: "Audiobookshelf", group: "Discovery" },
-  { id: "discmam", label: "Discovery MAM", group: "Discovery" },
-  { id: "operational", label: "Operational", group: "Shared" },
-  { id: "data", label: "Data Management", group: "Shared" },
+  { id: "review", label: "Review & Enrichment", group: "Pipeline",
+    keywords: ["enrichment", "metadata"] },
+  { id: "policy", label: "Grab Policy", group: "Pipeline",
+    keywords: ["grab", "ratio", "wedge"] },
+  { id: "budget", label: "Snatch Budget", group: "Pipeline",
+    keywords: ["cap", "queue"] },
+  { id: "mam", label: "MyAnonamouse", group: "Pipeline",
+    keywords: ["session", "irc"] },
+  { id: "client", label: "Download Client", group: "Pipeline",
+    keywords: ["qbittorrent", "qbit", "transmission"] },
+  { id: "sinks", label: "Sinks & Delivery", group: "Pipeline",
+    keywords: ["calibre", "cwa", "audiobookshelf", "abs", "delivery"] },
+  { id: "notifications", label: "Notifications", group: "Pipeline",
+    keywords: ["ntfy", "notify", "alerts"] },
+  { id: "sources", label: "Metadata Sources", group: "Discovery",
+    keywords: ["goodreads", "hardcover", "amazon", "kobo", "openlibrary", "audible", "ibdb"] },
+  { id: "scanning", label: "Author Scanning", group: "Discovery",
+    keywords: ["scan", "discover"] },
+  { id: "library", label: "Library Management", group: "Discovery",
+    keywords: ["libraries", "calibre"] },
+  { id: "audiobookshelf", label: "Audiobookshelf", group: "Discovery",
+    keywords: ["abs", "audio"] },
+  { id: "discmam", label: "Discovery MAM", group: "Discovery",
+    keywords: ["mam"] },
+  { id: "operational", label: "Operational", group: "Shared",
+    keywords: ["logging", "verbose", "theme"] },
+  { id: "data", label: "Data Management", group: "Shared",
+    keywords: ["clear", "wipe", "delete"] },
 ];
+
+// v2.15.1 — each section's content is wrapped in SectionScope which
+// publishes the section's id/label/keywords via CurrentSectionContext.
+// SF reads both that + the search query and decides whether to render.
+const CurrentSectionContext = createContext<SettingsSection | null>(null);
+function useCurrentSection(): SettingsSection | null { return useContext(CurrentSectionContext); }
+
+function SectionScope({ id, children }: { id: string; children: ReactNode }) {
+  const sect = SECTIONS.find((s) => s.id === id);
+  return (
+    <CurrentSectionContext.Provider value={sect ?? null}>
+      {children}
+    </CurrentSectionContext.Provider>
+  );
+}
 
 // ── Main Settings Page ────────────────────────────────────────
 
@@ -518,20 +579,19 @@ function DesktopSettingsPage() {
   const [testingNtfy, setTestingNtfy] = useState(false);
   const [ntfyResult, setNtfyResult] = useState<string | null>(null);
   const [buildSha, setBuildSha] = useState("");
-  // v2.15.0 #B — Settings page search. Two-tier UX: the global
-  // navbar search handles cross-section navigation (it knows about
-  // section names + keywords); the in-page search filters fields
-  // within the currently-active section. Each SF reads the search
-  // string via SettingsSearchContext and self-hides if its label/
-  // desc/example doesn't match. We deliberately don't render all
-  // sections during search — each custom section component
-  // (MetadataSourcesPanel, LibrarySection, AudiobookshelfSection,
-  // etc.) has its own data-fetch effects, and render-all would fire
-  // every fetch on every search.
+  // v2.15.0 #B / v2.15.1 — Settings page search. Renders ALL sections
+  // when a search is active so a match in any section surfaces
+  // without the user having to click each section first. Each SF
+  // reads the search string + its enclosing section's metadata via
+  // SettingsSearchContext + CurrentSectionContext, and self-hides if
+  // none of {label, desc, example, section name, section keywords}
+  // match. Custom section components (MetadataSourcesPanel etc.)
+  // fire their data-fetch effects once per search-session activation
+  // — they're idempotent so the cost is small.
   const [settingsSearch, setSettingsSearch] = useState("");
   const searchActive = settingsSearch.trim().length > 0;
   function showSection(id: string): boolean {
-    return section === id;
+    return section === id || searchActive;
   }
 
   // Listen for seshat:focus events with kind=settings-section so the
@@ -597,7 +657,7 @@ function DesktopSettingsPage() {
           <div key={g}>
             <div style={{ fontSize: 11, fontWeight: 700, color: t.td, textTransform: "uppercase", letterSpacing: "0.06em", padding: "14px 20px 6px" }}>{g}</div>
             {SECTIONS.filter(sec => sec.group === g).map(sec => (
-              <div key={sec.id} onClick={() => setSection(sec.id)} style={{
+              <div key={sec.id} onClick={() => { setSection(sec.id); setSettingsSearch(""); }} style={{
                 padding: "9px 20px", fontSize: 14, cursor: "pointer",
                 color: section === sec.id ? t.accent : t.text2,
                 background: section === sec.id ? t.abg : "transparent",
@@ -619,12 +679,11 @@ function DesktopSettingsPage() {
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, gap: 12 }}>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>
-            {SECTIONS.find(sec => sec.id === section)?.label || "Settings"}
-            {searchActive && (
-              <span style={{ marginLeft: 10, fontSize: 13, fontWeight: 500, color: t.tf }}>
-                · filtering <span style={{ color: t.accent }}>“{settingsSearch}”</span>
-              </span>
-            )}
+            {searchActive
+              ? <>Settings <span style={{ marginLeft: 10, fontSize: 13, fontWeight: 500, color: t.tf }}>
+                  · filtering <span style={{ color: t.accent }}>“{settingsSearch}”</span>
+                </span></>
+              : (SECTIONS.find(sec => sec.id === section)?.label || "Settings")}
           </h1>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {/* v2.15.0 #B — in-page search. When active, every section
@@ -669,26 +728,26 @@ function DesktopSettingsPage() {
           </div>
         </div>
 
-        {/* When search is active and the current section has zero
-           matches, the rendered section body collapses to (almost)
-           empty space. This banner tells the user that the in-page
-           search is single-section-scoped so they don't think the
-           search is broken — the navbar search (⌘K) handles
-           cross-section discovery. */}
+        {/* Search is cross-section: when active, every section's
+           content renders and each field's label, description,
+           section name, and section keywords are searchable. Each
+           rendered field shows its source section as a small chip
+           so the user can see where a match came from. */}
         {searchActive && (
           <div style={{
             padding: "10px 14px", marginBottom: 16, fontSize: 12,
             background: t.bg2, border: `1px solid ${t.borderL}`,
             borderRadius: 6, color: t.textDim,
           }}>
-            Filtering fields in this section only. For cross-section
-            matches use the navbar search (⌘K) at the top of the page.
+            Searching across all sections. Each match shows its source
+            section above the field name. Clear the search to return
+            to single-section view.
           </div>
         )}
 
         {/* ── Section content ── */}
 
-        {showSection("pipeline") && <>
+        {showSection("pipeline") && <SectionScope id="pipeline"><>
           <SF label="IRC Listener" desc="Connects to MAM's #announce channel and processes every new torrent through the filter gate.">
             <STog on={(s.mam_irc_enabled as boolean) ?? true} onToggle={() => upd("mam_irc_enabled", !(s.mam_irc_enabled ?? true))} label />
           </SF>
@@ -698,9 +757,9 @@ function DesktopSettingsPage() {
           <SF label="Dry Run" desc="Filter + policy run normally but nothing is downloaded. The announce log records what would have happened." warn={s.dry_run ? "Active — no torrents will be downloaded" : undefined}>
             <STog on={!!s.dry_run} onToggle={() => upd("dry_run", !s.dry_run)} label />
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("review") && <>
+        {showSection("review") && <SectionScope id="review"><>
           <SF label="Manual Review Queue" desc="Every downloaded book enters a review queue for your approval before Calibre delivery.">
             <STog on={(s.review_queue_enabled as boolean) ?? true} onToggle={() => upd("review_queue_enabled", !(s.review_queue_enabled ?? true))} label />
           </SF>
@@ -713,9 +772,9 @@ function DesktopSettingsPage() {
               <span style={{ fontSize: 12, color: t.textDim }}>days</span>
             </div>
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("policy") && <>
+        {showSection("policy") && <SectionScope id="policy"><>
           {/* Three independent toggles + one number fit much nicer
               as a single compact grid row than four stacked SFs.
               Each cell has a short label on the left and its control
@@ -742,9 +801,9 @@ function DesktopSettingsPage() {
               </div>
             </div>
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("budget") && <>
+        {showSection("budget") && <SectionScope id="budget"><>
           <SF label="Budget Cap" desc="Max active snatches. New grabs queue when full.">
             <input type="number" min={1} value={s.snatch_budget_cap as number ?? 200} onChange={e => upd("snatch_budget_cap", parseInt(e.target.value) || 200)} style={nist} />
           </SF>
@@ -765,9 +824,9 @@ function DesktopSettingsPage() {
           <SF label="Delayed Torrents Path" desc="Overflow folder for FIFO-rotated grabs.">
             <input value={(s.delayed_torrents_path as string) || ""} onChange={e => upd("delayed_torrents_path", e.target.value)} placeholder="/delayed-torrents" style={{ ...ist, width: 220 }} />
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("mam") && <>
+        {showSection("mam") && <SectionScope id="mam"><>
           <SF label="IRC Nickname" desc="Seshat's nickname on MAM's IRC server.">
             <input value={(s.mam_irc_nick as string) || ""} onChange={e => upd("mam_irc_nick", e.target.value)} placeholder="YourNick_seshat" style={{ ...ist, width: 200 }} />
           </SF>
@@ -782,9 +841,9 @@ function DesktopSettingsPage() {
               <CredField key={c.key} item={c} onSaved={loadCreds} desc={desc} />
             );
           })}
-        </>}
+        </></SectionScope>}
 
-        {showSection("client") && <>
+        {showSection("client") && <SectionScope id="client"><>
           <SF label="Client Type" desc="Which torrent client to connect to.">
             <select value={(s.download_client_type as string) || "qbittorrent"} onChange={e => upd("download_client_type", e.target.value)}
               style={{ ...ist, width: 180, cursor: "pointer", appearance: "auto" }}>
@@ -834,9 +893,9 @@ function DesktopSettingsPage() {
               />
             </SF>
           ) : null}
-        </>}
+        </></SectionScope>}
 
-        {showSection("sinks") && <>
+        {showSection("sinks") && <SectionScope id="sinks"><>
           <SF label="Default Sink" desc="Where approved books are delivered after review.">
             <select value={(s.default_sink as string) || "cwa"} onChange={e => upd("default_sink", e.target.value)}
               style={{ ...ist, width: 260, cursor: "pointer", appearance: "auto" }}>
@@ -885,9 +944,9 @@ function DesktopSettingsPage() {
               </SF>
             </div>
           </details>
-        </>}
+        </></SectionScope>}
 
-        {showSection("notifications") && <>
+        {showSection("notifications") && <SectionScope id="notifications"><>
           {/* ntfy endpoint — server URL + topic collapsed into one
               row since they always move together, plus an inline
               test button so the configured-vs-working distinction
@@ -967,9 +1026,9 @@ function DesktopSettingsPage() {
               <button onClick={() => setUse12h(!use12h)} style={{ background: "none", border: "none", color: t.accent, cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{use12h ? "24h" : "12h"}</button>
             </div>
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("sources") && <>
+        {showSection("sources") && <SectionScope id="sources"><>
           {/* Hardcover API key — lives with the other provider
               credentials now that the unified Metadata Sources panel
               is the authoritative editor for enable/rate settings.
@@ -978,9 +1037,9 @@ function DesktopSettingsPage() {
           {apiCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Bearer token from hardcover.app → Account → API." />)}
           {googleBooksCreds.map(c => <CredField key={c.key} item={c} onSaved={loadCreds} desc="Google Cloud API key with Books API enabled. Restrict to your server's egress IP for safety. The keyed endpoint has a much higher daily quota (~1000 free queries/day) than the no-key path." />)}
           <MetadataSourcesPanel />
-        </>}
+        </></SectionScope>}
 
-        {showSection("scanning") && <>
+        {showSection("scanning") && <SectionScope id="scanning"><>
           <SF label="Auto-scan Enabled" desc="Periodically scan all authors against enabled sources.">
             <STog on={(s.author_scanning_enabled as boolean) ?? true} onToggle={() => upd("author_scanning_enabled", !(s.author_scanning_enabled ?? true))} label />
           </SF>
@@ -996,16 +1055,16 @@ function DesktopSettingsPage() {
               <span style={{ fontSize: 12, color: t.textDim }}>days</span>
             </div>
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("library") && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} cwaCreds={cwaCreds} onCredSaved={loadCreds} />}
+        {showSection("library") && <SectionScope id="library"><LibrarySection s={s} upd={upd} ist={ist} nist={nist} cwaCreds={cwaCreds} onCredSaved={loadCreds} /></SectionScope>}
 
-        {showSection("audiobookshelf") && <AudiobookshelfSection s={s} upd={upd} ist={ist} nist={nist} creds={absCreds} onCredSaved={loadCreds} />}
+        {showSection("audiobookshelf") && <SectionScope id="audiobookshelf"><AudiobookshelfSection s={s} upd={upd} ist={ist} nist={nist} creds={absCreds} onCredSaved={loadCreds} /></SectionScope>}
 
-        {showSection("discmam") && <DiscMamSection s={s} upd={upd} ist={ist} nist={nist} />}
+        {showSection("discmam") && <SectionScope id="discmam"><DiscMamSection s={s} upd={upd} ist={ist} nist={nist} /></SectionScope>}
 
 
-        {showSection("operational") && <>
+        {showSection("operational") && <SectionScope id="operational"><>
           <SF label="Verbose Logging" desc="Enable DEBUG-level output.">
             <STog on={!!s.verbose_logging} onToggle={() => upd("verbose_logging", !s.verbose_logging)} label />
           </SF>
@@ -1015,9 +1074,9 @@ function DesktopSettingsPage() {
           <SF label="Theme" desc="Use the theme toggle in the navbar to switch between Dark, Dim, and Light.">
             <span style={{ fontSize: 13, color: t.textDim }}>Managed via navbar toggle</span>
           </SF>
-        </>}
+        </></SectionScope>}
 
-        {showSection("data") && <>
+        {showSection("data") && <SectionScope id="data"><>
           <p style={{ fontSize: 12, color: t.textDim, marginBottom: 12, lineHeight: 1.5 }}>
             Discovery scan data clears (per-author or global) come first. Pipeline-side cleanups follow. Dangerous operations (⚠) ask for confirmation.
           </p>
@@ -1029,7 +1088,7 @@ function DesktopSettingsPage() {
             </p>
             <DataSection />
           </div>
-        </>}
+        </></SectionScope>}
       </div>
     </div>
     </SettingsSearchContext.Provider>

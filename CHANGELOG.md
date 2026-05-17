@@ -7,6 +7,82 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.15.1] — 2026-05-16
+
+Follow-up to v2.15.0 #B: two pieces of polish surfaced during UAT.
+
+### Added — search result deep-linking
+
+- **`GET /api/v1/discovery/books/{bid}?slug=…`** (new endpoint).
+  Returns a single book row by id; the `slug` query param routes
+  to the right library since book ids are per-library, not globally
+  unique. Used by the global-search book click-through so the
+  navbar can populate BookSidebar without a full listing fetch.
+- **`DiscBooksPage` listens for `seshat:focus` (kind=book)**. When
+  the global search routes to a book, the listener fetches the
+  full Book row from the new endpoint and opens BookSidebar with
+  it. v2.15.0 click-through landed on the library page without
+  auto-opening — this closes that gap.
+- **`DiscSeriesPage` listens for `seshat:focus` (kind=series)**.
+  Pre-fills the page's existing search input with the series name
+  so the list narrows to just that series. The 250ms search-debounce
+  flushes the fetch automatically.
+- **Series search results carry their name** through
+  `SearchNavTarget` → `seshat:focus` detail, so the listener can
+  apply it without a refetch.
+
+### Changed — Settings search now cross-section
+
+Reversed v2.15.0's two-tier UX decision. Settings page search now
+renders every section during search instead of filtering only the
+current one. Match criteria expanded:
+
+- **Field label** (always was)
+- **Field description** (always was)
+- **Field example placeholder** (always was)
+- **Section name** — typing "notif" → every SF in Notifications
+  renders (because the section's label matches)
+- **Section keywords** — each `SECTIONS` entry gained optional
+  `keywords: string[]` (e.g. Notifications → `["ntfy","notify","alerts"]`,
+  Download Client → `["qbittorrent","qbit","transmission"]`, etc.).
+  Typing "ntfy" → Notifications matches → all its SFs render
+  even though no individual SF has "ntfy" in its label.
+- **Optional per-field `searchAlso` prop on SF** — call sites that
+  want the search to also match the underlying settings key or
+  current value can pass them as extra match strings. Not retro-
+  applied; reserved for fields where the key/value is the natural
+  search term.
+
+UX additions:
+
+- Each rendered SF in search mode shows a small **section chip**
+  (e.g. "NOTIFICATIONS") above its label so the user sees where the
+  match came from.
+- Header title becomes "Settings · filtering '…'" in search mode
+  (instead of the current section's label, which would be misleading
+  with cross-section results visible).
+- Sidebar section click clears the active search so navigation
+  feels coherent.
+- Helper banner updated to reflect cross-section behavior.
+
+**Side-effect note**: each custom section component
+(MetadataSourcesPanel, LibrarySection, AudiobookshelfSection,
+DiscMamSection, DiscoveryDataSection, DataSection) fires its
+mount-time data-fetch effects when first rendered during search.
+With `[]` dep arrays they fire once per search-session
+activation — acceptable cost for the wider search reach.
+
+### Not yet matched
+
+- **Settings field key / value** matching. Mark's UAT scope included
+  these but SF doesn't have direct access — keys live in the
+  children (`<STog on={s.mam_irc_enabled}>`). The opt-in `searchAlso`
+  prop lets call sites add them per field, but no fields have been
+  retro-fitted; this is a future polish pass once we know which
+  keys users actually search by.
+
+---
+
 ## [2.15.0] — 2026-05-16
 
 Global + Settings search bars (#B). Two-tier search UX:

@@ -234,7 +234,12 @@ function SeshatApp() {
       case "series":
         nav("disc-series");
         setTimeout(() => window.dispatchEvent(new CustomEvent("seshat:focus", {
-          detail: { kind: "series", series_id: target.series_id, library_slug: target.library_slug },
+          detail: {
+            kind: "series",
+            series_id: target.series_id,
+            name: target.name,
+            library_slug: target.library_slug,
+          },
         })), 50);
         return;
       case "book":

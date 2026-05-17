@@ -460,6 +460,28 @@ async def get_hidden(search: str = Query(None), sort: str = Query("title"), sort
     finally: await db.close()
 
 
+@router.get("/books/{bid}")
+async def get_book(bid: int, slug: str | None = Query(None)):
+    """Return a single book row by id. Used by the v2.15.1 global-
+    search click-through so the navbar can open BookSidebar for a
+    book without having to fetch the full library listing.
+
+    `slug=` routes to a specific library; book ids are per-library,
+    not globally unique, so cross-library callers (the global
+    search) must pass the library_slug from the search hit.
+    """
+    db = await get_db(slug)
+    try:
+        row = await (await db.execute(
+            f"{_BOOKS_SELECT} WHERE b.id = ?", [bid],
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, f"book {bid} not found")
+        return dict(row)
+    finally:
+        await db.close()
+
+
 @router.post("/books/{bid}/dismiss")
 async def dismiss(bid: int, slug: str | None = Query(None)):
     """See `hide` for slug-routing rationale."""

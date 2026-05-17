@@ -216,6 +216,31 @@ function DesktopBooksPage({
       .catch(() => {});
   }, []);
 
+  // v2.15.1 — listen for `seshat:focus` events with kind=book from
+  // the global navbar search. When a user clicks a book result in
+  // the dropdown, App routes to disc-library and dispatches this
+  // event with the book id + library_slug. We fetch the full Book
+  // row from the new GET /discovery/books/{bid}?slug= endpoint and
+  // open BookSidebar with it.
+  useEffect(() => {
+    function onFocus(e: Event) {
+      const detail = (e as CustomEvent<{
+        kind?: string; book_id?: number; library_slug?: string | null;
+      }>).detail;
+      if (detail?.kind !== "book" || !detail.book_id) return;
+      const qs = detail.library_slug ? `?slug=${encodeURIComponent(detail.library_slug)}` : "";
+      api
+        .get<Book>(`/discovery/books/${detail.book_id}${qs}`)
+        .then((book) => {
+          setSbClosing(false);
+          setSb(book);
+        })
+        .catch(() => { /* book not reachable — silently skip */ });
+    }
+    window.addEventListener("seshat:focus", onFocus);
+    return () => window.removeEventListener("seshat:focus", onFocus);
+  }, []);
+
   // Live MAM scan progress poller — fetches /discovery/mam/scan/status
   // every 3 seconds and updates the in-page banner. Auto-clears the
   // banner state when the scan transitions running→done so the banner
