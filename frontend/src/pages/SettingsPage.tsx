@@ -1,5 +1,5 @@
 // SettingsPage v4 — sidebar navigation, one section at a time.
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { MetadataSourcesPanel } from "../components/MetadataSourcesPanel";
@@ -12,12 +12,34 @@ import type { Author, AuthorsResponse } from "../types";
 
 type S = Record<string, unknown>;
 
+// v2.15.0 #B — Settings page search. When the user types a query in
+// the in-page search box, every SF reads the query from this context
+// and self-hides if its label/desc doesn't match. Sections whose
+// `section === "X"` conditional would normally skip rendering also
+// render during search mode so matching SFs in other sections can
+// surface without the user having to click each section first.
+const SettingsSearchContext = createContext<string>("");
+function useSettingsSearch(): string { return useContext(SettingsSearchContext); }
+
+function matchSearch(needle: string, haystacks: (string | undefined)[]): boolean {
+  if (!needle) return true;
+  const n = needle.toLowerCase();
+  for (const h of haystacks) {
+    if (h && h.toLowerCase().includes(n)) return true;
+  }
+  return false;
+}
+
 // ── Shared field components ───────────────────────────────────
 
 function SF({ label, desc, example, children, warn, wide }: {
   label: string; desc?: string; example?: string; children: ReactNode; warn?: string; wide?: boolean;
 }) {
   const t = useTheme();
+  const search = useSettingsSearch();
+  // Self-hide when a search is active and this field's label/desc/
+  // example doesn't match. Search-empty case is the default render.
+  if (search && !matchSearch(search, [label, desc, example])) return null;
   return (
     <div style={{
       display: "grid",
@@ -496,6 +518,35 @@ function DesktopSettingsPage() {
   const [testingNtfy, setTestingNtfy] = useState(false);
   const [ntfyResult, setNtfyResult] = useState<string | null>(null);
   const [buildSha, setBuildSha] = useState("");
+  // v2.15.0 #B — Settings page search. Two-tier UX: the global
+  // navbar search handles cross-section navigation (it knows about
+  // section names + keywords); the in-page search filters fields
+  // within the currently-active section. Each SF reads the search
+  // string via SettingsSearchContext and self-hides if its label/
+  // desc/example doesn't match. We deliberately don't render all
+  // sections during search — each custom section component
+  // (MetadataSourcesPanel, LibrarySection, AudiobookshelfSection,
+  // etc.) has its own data-fetch effects, and render-all would fire
+  // every fetch on every search.
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const searchActive = settingsSearch.trim().length > 0;
+  function showSection(id: string): boolean {
+    return section === id;
+  }
+
+  // Listen for seshat:focus events with kind=settings-section so the
+  // navbar GlobalSearchBar can drop the user on a specific section.
+  useEffect(() => {
+    function onFocus(e: Event) {
+      const detail = (e as CustomEvent<{ kind?: string; section_id?: string }>).detail;
+      if (detail?.kind === "settings-section" && detail.section_id) {
+        setSection(detail.section_id);
+        setSettingsSearch("");
+      }
+    }
+    window.addEventListener("seshat:focus", onFocus);
+    return () => window.removeEventListener("seshat:focus", onFocus);
+  }, []);
 
   useEffect(() => { api.get<S>("/v1/settings").then(setS).catch(e => setMsg(`Error: ${e}`)); }, []);
   const loadCreds = () => {
@@ -534,6 +585,7 @@ function DesktopSettingsPage() {
   const groups = ["Pipeline", "Discovery", "Shared"];
 
   return (
+    <SettingsSearchContext.Provider value={settingsSearch}>
     <div style={{ display: "flex", gap: 0, minHeight: "calc(100vh - 100px)" }}>
 
       {/* ── Sidebar ── */}
@@ -565,11 +617,48 @@ function DesktopSettingsPage() {
       {/* ── Content Panel ── */}
       <div style={{ flex: 1, padding: "20px 32px", minWidth: 0 }}>
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, gap: 12 }}>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>
             {SECTIONS.find(sec => sec.id === section)?.label || "Settings"}
+            {searchActive && (
+              <span style={{ marginLeft: 10, fontSize: 13, fontWeight: 500, color: t.tf }}>
+                · filtering <span style={{ color: t.accent }}>“{settingsSearch}”</span>
+              </span>
+            )}
           </h1>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* v2.15.0 #B — in-page search. When active, every section
+               block renders and SFs self-hide based on label/desc/
+               example match. Clears with the ✕ button. */}
+            <div style={{ position: "relative" }}>
+              <input
+                type="search"
+                value={settingsSearch}
+                onChange={(e) => setSettingsSearch(e.target.value)}
+                placeholder="Search fields…"
+                style={{
+                  padding: "7px 32px 7px 12px", fontSize: 13,
+                  background: t.bg2, border: `1px solid ${t.borderL}`,
+                  borderRadius: 6, color: t.text2, minWidth: 220,
+                  fontFamily: "inherit", outline: "none",
+                }}
+              />
+              {searchActive && (
+                <button
+                  onClick={() => setSettingsSearch("")}
+                  aria-label="Clear search"
+                  style={{
+                    position: "absolute", right: 6, top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "transparent", border: "none",
+                    color: t.tf, cursor: "pointer", fontSize: 14,
+                    padding: "0 6px", lineHeight: 1,
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
             {msg && <span style={{ fontSize: 13, fontWeight: 600, color: msg.startsWith("Error") ? t.err : t.ok }}>{msg}</span>}
             {/* Sources section has its own Save button — top-level
                 Save would PATCH the whole settings dict and could
@@ -580,9 +669,26 @@ function DesktopSettingsPage() {
           </div>
         </div>
 
+        {/* When search is active and the current section has zero
+           matches, the rendered section body collapses to (almost)
+           empty space. This banner tells the user that the in-page
+           search is single-section-scoped so they don't think the
+           search is broken — the navbar search (⌘K) handles
+           cross-section discovery. */}
+        {searchActive && (
+          <div style={{
+            padding: "10px 14px", marginBottom: 16, fontSize: 12,
+            background: t.bg2, border: `1px solid ${t.borderL}`,
+            borderRadius: 6, color: t.textDim,
+          }}>
+            Filtering fields in this section only. For cross-section
+            matches use the navbar search (⌘K) at the top of the page.
+          </div>
+        )}
+
         {/* ── Section content ── */}
 
-        {section === "pipeline" && <>
+        {showSection("pipeline") && <>
           <SF label="IRC Listener" desc="Connects to MAM's #announce channel and processes every new torrent through the filter gate.">
             <STog on={(s.mam_irc_enabled as boolean) ?? true} onToggle={() => upd("mam_irc_enabled", !(s.mam_irc_enabled ?? true))} label />
           </SF>
@@ -594,7 +700,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "review" && <>
+        {showSection("review") && <>
           <SF label="Manual Review Queue" desc="Every downloaded book enters a review queue for your approval before Calibre delivery.">
             <STog on={(s.review_queue_enabled as boolean) ?? true} onToggle={() => upd("review_queue_enabled", !(s.review_queue_enabled ?? true))} label />
           </SF>
@@ -609,7 +715,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "policy" && <>
+        {showSection("policy") && <>
           {/* Three independent toggles + one number fit much nicer
               as a single compact grid row than four stacked SFs.
               Each cell has a short label on the left and its control
@@ -638,7 +744,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "budget" && <>
+        {showSection("budget") && <>
           <SF label="Budget Cap" desc="Max active snatches. New grabs queue when full.">
             <input type="number" min={1} value={s.snatch_budget_cap as number ?? 200} onChange={e => upd("snatch_budget_cap", parseInt(e.target.value) || 200)} style={nist} />
           </SF>
@@ -661,7 +767,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "mam" && <>
+        {showSection("mam") && <>
           <SF label="IRC Nickname" desc="Seshat's nickname on MAM's IRC server.">
             <input value={(s.mam_irc_nick as string) || ""} onChange={e => upd("mam_irc_nick", e.target.value)} placeholder="YourNick_seshat" style={{ ...ist, width: 200 }} />
           </SF>
@@ -678,7 +784,7 @@ function DesktopSettingsPage() {
           })}
         </>}
 
-        {section === "client" && <>
+        {showSection("client") && <>
           <SF label="Client Type" desc="Which torrent client to connect to.">
             <select value={(s.download_client_type as string) || "qbittorrent"} onChange={e => upd("download_client_type", e.target.value)}
               style={{ ...ist, width: 180, cursor: "pointer", appearance: "auto" }}>
@@ -730,7 +836,7 @@ function DesktopSettingsPage() {
           ) : null}
         </>}
 
-        {section === "sinks" && <>
+        {showSection("sinks") && <>
           <SF label="Default Sink" desc="Where approved books are delivered after review.">
             <select value={(s.default_sink as string) || "cwa"} onChange={e => upd("default_sink", e.target.value)}
               style={{ ...ist, width: 260, cursor: "pointer", appearance: "auto" }}>
@@ -781,7 +887,7 @@ function DesktopSettingsPage() {
           </details>
         </>}
 
-        {section === "notifications" && <>
+        {showSection("notifications") && <>
           {/* ntfy endpoint — server URL + topic collapsed into one
               row since they always move together, plus an inline
               test button so the configured-vs-working distinction
@@ -863,7 +969,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "sources" && <>
+        {showSection("sources") && <>
           {/* Hardcover API key — lives with the other provider
               credentials now that the unified Metadata Sources panel
               is the authoritative editor for enable/rate settings.
@@ -874,7 +980,7 @@ function DesktopSettingsPage() {
           <MetadataSourcesPanel />
         </>}
 
-        {section === "scanning" && <>
+        {showSection("scanning") && <>
           <SF label="Auto-scan Enabled" desc="Periodically scan all authors against enabled sources.">
             <STog on={(s.author_scanning_enabled as boolean) ?? true} onToggle={() => upd("author_scanning_enabled", !(s.author_scanning_enabled ?? true))} label />
           </SF>
@@ -892,14 +998,14 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "library" && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} cwaCreds={cwaCreds} onCredSaved={loadCreds} />}
+        {showSection("library") && <LibrarySection s={s} upd={upd} ist={ist} nist={nist} cwaCreds={cwaCreds} onCredSaved={loadCreds} />}
 
-        {section === "audiobookshelf" && <AudiobookshelfSection s={s} upd={upd} ist={ist} nist={nist} creds={absCreds} onCredSaved={loadCreds} />}
+        {showSection("audiobookshelf") && <AudiobookshelfSection s={s} upd={upd} ist={ist} nist={nist} creds={absCreds} onCredSaved={loadCreds} />}
 
-        {section === "discmam" && <DiscMamSection s={s} upd={upd} ist={ist} nist={nist} />}
+        {showSection("discmam") && <DiscMamSection s={s} upd={upd} ist={ist} nist={nist} />}
 
 
-        {section === "operational" && <>
+        {showSection("operational") && <>
           <SF label="Verbose Logging" desc="Enable DEBUG-level output.">
             <STog on={!!s.verbose_logging} onToggle={() => upd("verbose_logging", !s.verbose_logging)} label />
           </SF>
@@ -911,7 +1017,7 @@ function DesktopSettingsPage() {
           </SF>
         </>}
 
-        {section === "data" && <>
+        {showSection("data") && <>
           <p style={{ fontSize: 12, color: t.textDim, marginBottom: 12, lineHeight: 1.5 }}>
             Discovery scan data clears (per-author or global) come first. Pipeline-side cleanups follow. Dangerous operations (⚠) ask for confirmation.
           </p>
@@ -926,6 +1032,7 @@ function DesktopSettingsPage() {
         </>}
       </div>
     </div>
+    </SettingsSearchContext.Provider>
   );
 }
 

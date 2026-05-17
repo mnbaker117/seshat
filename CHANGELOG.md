@@ -7,6 +7,104 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.15.0] — 2026-05-16
+
+Global + Settings search bars (#B). Two-tier search UX:
+
+  - **Global navbar search**: persistent input in the top nav (mobile
+    gets a search icon → fullscreen overlay). Searches across pages,
+    Settings sections, authors, series, and books across every
+    discovered library. ⌘K / Ctrl+K focuses it from anywhere.
+  - **In-page Settings search**: input in the Settings header that
+    filters fields within the active section. Two-tier together: the
+    navbar finds the right section, the in-page search finds the
+    right field within it.
+
+### Added — Backend
+
+- **`GET /api/v1/search?q=…&limit=8`** (new router
+  `app/routers/search.py`). Searches books / authors / series across
+  every discovered library via `run_across_libraries("all", …)`.
+  Each category returns up to `limit` hits, ranked by owned-first
+  (books only) then by prefix-match-first then alphabetical. Each
+  hit carries `library_slug` + `author_name` + `series_name` so the
+  dropdown can render where-it-lives + click-through-target without
+  a second round-trip. Hidden books are filtered out. `q` is
+  bounded to 100 chars at the validation layer.
+- 14 tests in `tests/routers/test_search.py` covering cross-library
+  aggregation, hidden-book exclusion, owned-rank-above-unowned,
+  library_slug stamping, prefix-vs-substring ranking, limit cap,
+  and empty-query rejection.
+
+### Added — Frontend: GlobalSearchBar component
+
+- **`frontend/src/components/GlobalSearchBar.tsx`**. Persistent
+  input with magnifying-glass icon, 300ms debounce on the fetch.
+  Empty / <2-char queries clear the dropdown immediately.
+- **Categorized dropdown**: Pages → Settings → Authors → Series →
+  Books. Pages + Settings come from in-file client-side indexes
+  (`PAGE_INDEX` + `SETTINGS_SECTIONS_INDEX`); Authors / Series /
+  Books come from `/api/v1/search`.
+- **Keyboard nav**: ArrowUp / ArrowDown moves selection, Enter
+  activates, Escape closes. Mouse hover also moves selection.
+- **⌘K / Ctrl+K shortcut** focuses + selects the input from
+  anywhere in the app.
+- Click-outside-to-close on the wrapper.
+- Structured `SearchNavTarget` discriminated union — caller decides
+  routing.
+
+### Added — App-level mounting
+
+- **Desktop**: GlobalSearchBar sits between the section nav items
+  and the right-rail tool icons in the navbar. Added `min-width: 0`
+  to the section-nav-items flex child so its label list doesn't
+  squeeze the search bar's width away.
+- **Mobile**: search icon button next to the hamburger opens a
+  fullscreen overlay (z-index 220, above MobileNavDrawer's 201)
+  with `autoFocus` + `fullWidth` so the user lands ready to type.
+  Backdrop tap or ✕ button closes; selecting a result auto-closes.
+- **`navFromSearch`** in `App.tsx` translates `SearchNavTarget` into
+  `nav()` calls. Page + Author results use existing nav patterns.
+  Settings / Series / Book results also dispatch a window
+  `seshat:focus` CustomEvent so target pages can scroll-to / open
+  the matching element.
+
+### Added — Settings page in-page search
+
+- **`SettingsSearchContext`** + `useSettingsSearch()` hook in
+  `SettingsPage.tsx`. SF reads the search string from context and
+  self-hides (`return null`) when search is active and its label /
+  desc / example don't match.
+- **Search input** in the Settings content panel header with a
+  clear-search ✕ button. Active state surfaces a helpful banner
+  reminding the user that the in-page search is single-section
+  scoped (navbar handles cross-section).
+- **`seshat:focus` listener** with `kind=settings-section`: when
+  the navbar search routes to a Settings section, the Settings
+  page receives the focus event and switches to that section.
+
+### Design decision: two-tier (not render-all)
+
+The original plan was to render every Settings section during in-
+page search so cross-section matches could surface in-place. We
+reverted to two-tier instead: each custom section component
+(MetadataSourcesPanel, LibrarySection, AudiobookshelfSection,
+DiscMamSection, DiscoveryDataSection, DataSection) has its own
+data-fetch effects, and render-all would have fired every fetch
+on every search. Two-tier keeps the cross-section discovery in the
+navbar (cheap — section names are client-side) and the in-page
+search scoped to the current section. ⌘K is the bridge.
+
+### Not yet wired (deferred)
+
+- **Book / Series deep-link**. The `seshat:focus` event fires for
+  Book + Series results, but no target page listens yet. v2.15.0
+  ships with click-through landing on the library / series page
+  without auto-opening BookSidebar or scrolling to a specific
+  series row. Polish follow-up when there's demand.
+
+---
+
 ## [2.14.2] — 2026-05-16
 
 Hotfix for v2.14.1 Database Manager rework. UAT 2026-05-16 surfaced
