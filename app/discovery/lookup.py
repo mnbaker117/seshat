@@ -1011,11 +1011,49 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if bk.external_id is not None:
                 sets.append(f"{source_name}_id=COALESCE({source_name}_id,?)")
                 vals.append(bk.external_id)
+            # v2.16.0 Gap 1 — cross-source identifiers are identifier-
+            # class data, same write rule as `{source}_id`: COALESCE-
+            # fill (never clobber). Safe on hidden rows because
+            # identifier columns aren't part of the user-curated
+            # metadata surface — they're scaffolding for future
+            # dedup / enrichment paths if the user unhides later.
+            for _xid_col, _xid_val in (
+                ("goodreads_id", bk.goodreads_id),
+                ("openlibrary_id", bk.openlibrary_id),
+                ("google_books_id", bk.google_books_id),
+            ):
+                if _xid_val:
+                    sets.append(f"{_xid_col}=COALESCE({_xid_col},?)")
+                    vals.append(_xid_val)
             if not sets:
                 return None, None
             vals.append(matched_row["id"])
             sql = f"UPDATE books SET {', '.join(sets)} WHERE id=?"
             return sql, vals
+
+        def _cross_source_id_inserts(bk):
+            """Return `(cols, vals)` for cross-source identifier
+            columns the BookResult carries (Gap 1, v2.16.0).
+
+            Filters out any column that collides with the
+            `{source_name}_id` column already present in the INSERT
+            statement — when the active source IS goodreads, its own
+            `external_id` already routes to `goodreads_id` via the
+            dynamic `{source_name}_id` column, so emitting it again
+            would produce duplicate-column SQL. Empty values are
+            skipped so the column simply defaults to NULL.
+            """
+            cols: list[str] = []
+            vs: list = []
+            for c, v in (
+                ("goodreads_id", bk.goodreads_id),
+                ("openlibrary_id", bk.openlibrary_id),
+                ("google_books_id", bk.google_books_id),
+            ):
+                if v and c != f"{source_name}_id":
+                    cols.append(c)
+                    vs.append(v)
+            return cols, vs
 
         async def _flush_queue_rows(queue_rows):
             """UPSERT review-queue rows produced by `_update_existing`.
@@ -1092,6 +1130,18 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 merged = _merge_source_urls(matched_row["source_url"], source_name, bk.source_url)
                 sets.append("source_url=?"); vals.append(merged)
             sets.append(f"{source_name}_id=COALESCE({source_name}_id,?)"); vals.append(bk.external_id)
+            # v2.16.0 Gap 1 — cross-source identifiers (Hardcover's
+            # book_mappings table populates these for goodreads /
+            # openlibrary / google). COALESCE-fill: identifier-class
+            # data, never clobber an existing value.
+            for _xid_col, _xid_val in (
+                ("goodreads_id", bk.goodreads_id),
+                ("openlibrary_id", bk.openlibrary_id),
+                ("google_books_id", bk.google_books_id),
+            ):
+                if _xid_val:
+                    sets.append(f"{_xid_col}=COALESCE({_xid_col},?)")
+                    vals.append(_xid_val)
             # v2.12.0 — capture slug for sources whose URLs are
             # slug-based (Hardcover, Kobo). Lets the frontend
             # BookSidebar's `idDerivedUrl` fallback reconstruct a
@@ -1470,8 +1520,11 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     if suffix_norm in author_series_norms and prefix_norm in rows_by_norm:
                         omnibus = True
                 s_idx = None if omnibus else bk.series_index
-                await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id,amazon_format_asins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?)",
-                    (bk.title, author_id, sid_use, s_idx, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id, bk.amazon_format_asins))
+                _xcols, _xvals = _cross_source_id_inserts(bk)
+                _x_col_sql = ("," + ",".join(_xcols)) if _xcols else ""
+                _x_q_sql = ("," + ",".join(["?"] * len(_xcols))) if _xcols else ""
+                await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id,amazon_format_asins{_x_col_sql}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?{_x_q_sql})",
+                    (bk.title, author_id, sid_use, s_idx, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id, bk.amazon_format_asins, *_xvals))
                 existing.add(norm); new_books += 1
                 if on_new_book:
                     on_new_book()
@@ -1588,8 +1641,11 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     continue
             initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
             omnibus = _is_omnibus(bk.title)
-            await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id,amazon_format_asins) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?)",
-                (bk.title, author_id, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id, bk.amazon_format_asins))
+            _xcols, _xvals = _cross_source_id_inserts(bk)
+            _x_col_sql = ("," + ",".join(_xcols)) if _xcols else ""
+            _x_q_sql = ("," + ",".join(["?"] * len(_xcols))) if _xcols else ""
+            await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id,amazon_format_asins{_x_col_sql}) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?{_x_q_sql})",
+                (bk.title, author_id, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id, bk.amazon_format_asins, *_xvals))
             existing.add(norm); new_books += 1
             if on_new_book:
                 on_new_book()

@@ -164,6 +164,10 @@ fragment BookData on books {
   canonical_id
   image: cached_image
   contributions { author { name id } }
+  book_mappings(where: {platform: {name: {_in: ["Goodreads", "OpenLibrary", "Google"]}}}) {
+    external_id
+    platform { name }
+  }
 }
 fragment EditionData on editions {
   title id isbn_13 asin
@@ -679,6 +683,40 @@ class HardcoverSource(BaseSource):
                         pass  # unparseable date — leave as-is, let lookup.py handle
 
                 slug = book.get("slug", "")
+
+                # v2.16.0 Gap 1 — Hardcover knows the Goodreads /
+                # OpenLibrary / Google Books IDs for many books via
+                # its `book_mappings` table. Surface them so the
+                # merge layer can COALESCE-fill the per-source ID
+                # columns, which in turn unblocks the Phase-2
+                # author-goodreads_id backfill for audiobook-only
+                # authors (and any author whose only books come
+                # from Hardcover).
+                gr_id = ol_id = gb_id = None
+                for mapping in (book.get("book_mappings") or []):
+                    if not isinstance(mapping, dict):
+                        continue
+                    ext_id = mapping.get("external_id")
+                    if not ext_id:
+                        continue
+                    platform = (mapping.get("platform") or {}).get("name", "")
+                    pkey = str(platform).strip().lower()
+                    if pkey == "goodreads" and gr_id is None:
+                        gr_id = str(ext_id).strip()
+                    elif pkey == "openlibrary" and ol_id is None:
+                        # Hardcover stores either bare OL keys or
+                        # `/books/OLxxxM` / `/works/OLxxxW` paths.
+                        # Strip the prefix so the column value
+                        # matches what `openlibrary.py` itself
+                        # writes (bare `OL...` form). BookSidebar
+                        # suffix-routes M-keys to /books/ and
+                        # W-keys to /works/, so either kind is
+                        # link-resolvable.
+                        raw = str(ext_id).strip()
+                        ol_id = raw.rsplit("/", 1)[-1] if "/" in raw else raw
+                    elif pkey == "google" and gb_id is None:
+                        gb_id = str(ext_id).strip()
+
                 br = BookResult(
                     title=book.get("title", ""),
                     isbn=edition.get("isbn_13"),
@@ -692,6 +730,9 @@ class HardcoverSource(BaseSource):
                     external_id=str(book.get("id")),
                     source="hardcover",
                     source_url=f"https://hardcover.app/books/{slug}" if slug else None,
+                    goodreads_id=gr_id,
+                    openlibrary_id=ol_id,
+                    google_books_id=gb_id,
                 )
                 
                 # Check series info: try book_series relation first, then cached_featured_series

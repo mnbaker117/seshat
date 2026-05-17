@@ -329,6 +329,84 @@ class TestSearchAuthorEndToEnd:
         assert result is None
         await src.close()
 
+    async def test_book_mappings_populate_cross_source_ids(self):
+        """v2.16.0 Gap 1 — Hardcover's `book_mappings` table carries
+        Goodreads / OpenLibrary / Google Books external IDs for many
+        books. Verify the per-book GraphQL fetch surfaces them on the
+        BookResult so the merge layer's COALESCE-fill can seed
+        `goodreads_id`/`openlibrary_id`/`google_books_id` on the books
+        row — the unblocker for Phase-2 author-goodreads_id backfill
+        on audiobook-only / Hardcover-only authors.
+        """
+        src = _make_source()
+        _patch_query(src, {
+            "SearchAuthor": {"search": {"ids": [42], "results": ""}},
+            "AuthorBooks": {"authors": [{
+                "id": 42, "name": "Test Author", "books_count": 3,
+                "contributions": [
+                    # All three mappings present + OL value in the
+                    # `/books/OLxxxM` path form (Hardcover sometimes
+                    # stores the prefix; we strip to the bare key).
+                    {"book": {
+                        "id": 1001, "title": "SAO Novel 01", "slug": "sao",
+                        "contributions": [{"author": {"id": 42, "name": "Test Author"}}],
+                        "editions": [{"language": {"code3": "eng"}}],
+                        "book_mappings": [
+                            {"external_id": "36607207",
+                             "platform": {"name": "Goodreads"}},
+                            {"external_id": "/books/OL47349783M",
+                             "platform": {"name": "OpenLibrary"}},
+                            {"external_id": "5UFcAQAACAAJ",
+                             "platform": {"name": "Google"}},
+                        ],
+                    }},
+                    # No mappings at all — three xid fields stay None.
+                    {"book": {
+                        "id": 1002, "title": "Mapping-less Book",
+                        "contributions": [{"author": {"id": 42, "name": "Test Author"}}],
+                        "editions": [{"language": {"code3": "eng"}}],
+                    }},
+                    # Goodreads only + OL in bare-key form (no path
+                    # prefix) — must round-trip unchanged.
+                    {"book": {
+                        "id": 1003, "title": "Partial Mappings",
+                        "contributions": [{"author": {"id": 42, "name": "Test Author"}}],
+                        "editions": [{"language": {"code3": "eng"}}],
+                        "book_mappings": [
+                            {"external_id": "12345",
+                             "platform": {"name": "Goodreads"}},
+                            {"external_id": "OL99999W",
+                             "platform": {"name": "OpenLibrary"}},
+                        ],
+                    }},
+                ],
+            }]},
+        })
+
+        result = await src.search_author("Test Author")
+        assert result is not None
+        by_title = {
+            b.title: b
+            for b in result.books
+            + [bk for s in result.series for bk in s.books]
+        }
+
+        b1 = by_title["SAO Novel 01"]
+        assert b1.goodreads_id == "36607207"
+        assert b1.openlibrary_id == "OL47349783M"  # /books/ stripped
+        assert b1.google_books_id == "5UFcAQAACAAJ"
+
+        b2 = by_title["Mapping-less Book"]
+        assert b2.goodreads_id is None
+        assert b2.openlibrary_id is None
+        assert b2.google_books_id is None
+
+        b3 = by_title["Partial Mappings"]
+        assert b3.goodreads_id == "12345"
+        assert b3.openlibrary_id == "OL99999W"  # bare key passes through
+        assert b3.google_books_id is None
+        await src.close()
+
     async def test_punctuation_mismatch_does_not_drop_books(self):
         """v2.10.5 regression — pre-fix, an author searched as 'J. N.
         Chaney' (with spaces) but stored on Hardcover as 'J.N. Chaney'

@@ -62,6 +62,17 @@ class BookResult:
     # format" later. Only AmazonSource populates this today; other
     # sources leave it None and the merge layer no-ops.
     amazon_format_asins: Optional[str] = None
+    # v2.16.0 Gap 1 — cross-source identifiers a source happens to
+    # know for the book it's emitting. Hardcover surfaces these via
+    # its `book_mappings` table (goodreads/openlibrary/google
+    # platforms). The merge layer COALESCE-fills any column whose
+    # current value is NULL, so a Hardcover scan can seed the
+    # `goodreads_id` that Phase-2 author backfill later reverse-
+    # looks-up to enrich `authors.goodreads_id`. None for sources
+    # that don't expose cross-source IDs.
+    goodreads_id: Optional[str] = None
+    openlibrary_id: Optional[str] = None
+    google_books_id: Optional[str] = None
 
 
 @dataclass
