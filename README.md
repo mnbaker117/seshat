@@ -77,6 +77,18 @@ Discovery stats, pipeline stats, and per-library sync rows (Calibre +
 ABS side-by-side) all live on a single three-column dashboard. Stats
 rail on the right, Quick Actions across the bottom.
 
+### Search
+
+A persistent search bar in the top nav (⌘K / Ctrl+K) searches across
+pages, Settings sections, authors, series, and books from every
+discovered library. Click a result to deep-link straight to it: books
+open BookSidebar, authors land on Author Detail, series narrow the
+Series page, Settings sections switch tabs. The Settings page also has
+its own in-page search that filters all sections at once and matches
+on field labels, descriptions, section names, and section keywords —
+typing "ntfy" surfaces every Notifications field, "qbit" surfaces
+Download Client, etc.
+
 ---
 
 ## Screenshots
@@ -141,7 +153,7 @@ state lives entirely on the `/app/data` volume.
 - **Auth:** bcrypt + itsdangerous signed cookies + Fernet-encrypted secrets
 - **Theme:** Egyptian goddess palette (gold, deep indigo, jade green)
 - **Docker:** two-stage build (node:22-alpine + python:3.12-slim)
-- **API routes:** 187 total (103 discovery + 84 pipeline)
+- **API routes:** 197 total (107 discovery + 90 pipeline/shared)
 - **Library backends:** Calibre (file-based) + Audiobookshelf (API-based),
   composable — users can run multiple of either. Cross-library `works`
   linked via the pipeline DB.
