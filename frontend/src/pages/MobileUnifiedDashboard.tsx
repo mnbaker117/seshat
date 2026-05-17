@@ -247,6 +247,23 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
     refresh();
   };
 
+  // v2.16.0 — Data Hygiene chain mirror of the desktop flow.
+  // Confirmation gate before kicking off; busy state derives from
+  // the in-flight scan-status entry.
+  const [showHygieneConfirm, setShowHygieneConfirm] = useState(false);
+  const [hygieneStarting, setHygieneStarting] = useState(false);
+  const triggerHygiene = async () => {
+    setHygieneStarting(true);
+    try { await api.post("/discovery/hygiene/run"); } catch { /* ignore */ }
+    setHygieneStarting(false);
+    setShowHygieneConfirm(false);
+    refresh();
+  };
+  const cancelHygiene = async () => {
+    try { await api.post("/discovery/hygiene/cancel"); } catch { /* ignore */ }
+    refresh();
+  };
+
   const calibreWebUrl = settings?.cwa_web_url || settings?.calibre_web_url || "";
   const absWebUrl = settings?.abs_web_url || "";
   const allowed = counts?.authors_allowed ?? 0;
@@ -256,6 +273,7 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
 
   const lookupScan = scanStatus.find((s) => s.kind === "lookup");
   const mamScan = scanStatus.find((s) => s.kind === "mam");
+  const hygieneScan = scanStatus.find((s) => s.kind === "hygiene");
   const libScans = scanStatus.filter((s) => s.kind === "library");
   const activeScans = scanStatus.filter((s) => s.running);
 
@@ -344,6 +362,14 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
               {mamScanning ? "MAM Scanning…" : "MAM Scan"}
             </MobileBtn>
             <MobileBtn
+              variant="secondary"
+              fullWidth
+              onClick={() => setShowHygieneConfirm(true)}
+              disabled={hygieneStarting || !!hygieneScan?.running}
+            >
+              {hygieneScan?.running ? "Hygiene…" : "Data Hygiene"}
+            </MobileBtn>
+            <MobileBtn
               variant="primary"
               fullWidth
               onClick={() => onNav("pipe-review")}
@@ -373,6 +399,13 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
                   scan={mamScan}
                   label="MAM Scan"
                   onCancel={cancelMam}
+                />
+              )}
+              {hygieneScan && hygieneScan.running && (
+                <MobileScanProgress
+                  scan={hygieneScan}
+                  label="Data Hygiene"
+                  onCancel={cancelHygiene}
                 />
               )}
             </div>
@@ -625,6 +658,96 @@ export default function MobileUnifiedDashboard({ onNav }: Props) {
           />
         </div>
       </MobileSection>
+      {showHygieneConfirm && (
+        <MobileHygieneConfirm
+          starting={hygieneStarting}
+          onConfirm={triggerHygiene}
+          onCancel={() => setShowHygieneConfirm(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+const MOBILE_HYGIENE_JOBS = [
+  "Empty author + series cleanup",
+  "Hardcover identifier backfill",
+  "Phase-2 author goodreads_id backfill",
+  "Book deduplication",
+  "Series consolidation",
+  "ABS author cross-stamp",
+];
+
+interface MobileHygieneConfirmProps {
+  starting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function MobileHygieneConfirm({
+  starting,
+  onConfirm,
+  onCancel,
+}: MobileHygieneConfirmProps) {
+  const t = useTheme();
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "flex-end",
+        justifyContent: "center",
+        zIndex: 200,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxHeight: "85vh",
+          overflowY: "auto",
+          background: t.bg2,
+          borderTop: `1px solid ${t.border}`,
+          borderTopLeftRadius: 12,
+          borderTopRightRadius: 12,
+          padding: 16,
+          color: t.text,
+        }}
+      >
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>
+          Run Data Hygiene?
+        </div>
+        <div style={{ fontSize: 12, color: t.text2, marginBottom: 10 }}>
+          Fans 6 jobs across every library, in order. Re-running is idempotent.
+        </div>
+        <ol style={{ paddingLeft: 22, margin: 0, marginBottom: 14 }}>
+          {MOBILE_HYGIENE_JOBS.map((name) => (
+            <li
+              key={name}
+              style={{ fontSize: 12, color: t.text2, marginBottom: 4 }}
+            >
+              {name}
+            </li>
+          ))}
+        </ol>
+        <div style={{ display: "flex", gap: 8 }}>
+          <MobileBtn variant="secondary" fullWidth onClick={onCancel}>
+            Cancel
+          </MobileBtn>
+          <MobileBtn
+            variant="primary"
+            fullWidth
+            onClick={onConfirm}
+            disabled={starting}
+            primary
+          >
+            {starting ? "Starting…" : "Run Hygiene"}
+          </MobileBtn>
+        </div>
+      </div>
     </div>
   );
 }

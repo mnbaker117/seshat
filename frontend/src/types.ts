@@ -250,14 +250,14 @@ export interface PenNameLink {
   link_type: LinkType;
 }
 
-// Unified scan-status entry (one per kind: lookup / mam / library).
-// `extra` is a grab-bag of counters the scan emits for progress /
-// summary lines (found, possible, not_found, books_new, etc.) plus
-// the nested `source_timeouts` map keyed by source name → author
-// count. Typed as `unknown` so callers narrow per-field rather than
-// claiming every value is a number.
+// Unified scan-status entry (one per kind: lookup / mam / library /
+// hygiene). `extra` is a grab-bag of counters the scan emits for
+// progress / summary lines (found, possible, not_found, books_new,
+// etc.) plus the nested `source_timeouts` map keyed by source name →
+// author count. Typed as `unknown` so callers narrow per-field
+// rather than claiming every value is a number.
 export interface ScanProgress {
-  kind: "lookup" | "mam" | "library";
+  kind: "lookup" | "mam" | "library" | "hygiene";
   slug?: string;
   app_type?: string;
   content_type?: string;

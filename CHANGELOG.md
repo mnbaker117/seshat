@@ -7,6 +7,102 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.16.0] — 2026-05-17
+
+Two prerequisite gap fixes uncovered by the 2026-05-16 stress test,
+plus the **Data Hygiene** Command Center action — a single button
+that fans 6 chained backfill / cleanup jobs across every configured
+library.
+
+### Added — `Data Hygiene` Command Center action
+
+A new Quick Actions button on the Command Center (both desktop and
+mobile dashboards) launches a confirmation modal listing all 6 jobs,
+then fires them as a background chain. Progress surfaces in the
+existing scan-status banner alongside Source / MAM / library syncs.
+
+The 6 jobs, in order:
+
+1. **Empty author + series cleanup** — deletes authors with 0 books
+   (preserving the global `authors_allowed` allowlist by name) and
+   series with 0 members.
+2. **Hardcover identifier backfill** — for books with `hardcover_id`
+   but missing `goodreads_id` / `openlibrary_id` / `google_books_id`,
+   batch-queries Hardcover's `book_mappings` table and COALESCE-fills
+   the missing columns. Unblocks Job 3 for audiobook-only authors.
+3. **Phase-2 author goodreads_id backfill** — runs the existing
+   sweep that reverse-looks-up author Goodreads IDs from any owned
+   book carrying a resolvable identifier. Skipped if Cloudflare
+   soft-block is active.
+4. **Book deduplication** — merges book rows sharing any non-null
+   identifier (Goodreads, Hardcover, ISBN, ASIN, Amazon, Audible).
+   Then re-runs the existing `_dedupe_same_series_position` pass to
+   catch "Remnant II" vs "Remnant Book 2" duplicates. Hidden rows
+   are excluded from the comparison set.
+5. **Series consolidation** — collapses series rows under the same
+   author whose names canonicalize to the same form
+   (`"Mistborn"` vs `"The Mistborn Saga"`), via the existing
+   `_dedupe_intra_author_series` helper.
+6. **ABS author cross-stamp** — copies `goodreads_id` /
+   `hardcover_id` / `openlibrary_id` / `google_books_id` from
+   enriched ebook authors to ABS authors with the same normalized
+   name. Cheap-and-safe scope: only name-equality. Real ABS author
+   enrichment (cross-library Goodreads resolution for ABS-only
+   authors) is deferred to v2.17.x.
+
+Universal rules:
+
+- **Skip hidden items** where applicable (cleanup + dedup
+  iteration). Identifier-class writes (stamping a discovered ID)
+  ignore hidden state — same rule the live scan layer follows.
+- **Idempotent**. Re-running back-to-back is a near-no-op.
+- **Preserve `authors_allowed` by name**. The empty-cleanup job
+  refuses to delete any author whose normalized name appears in the
+  global allow-list — that table is the user's allowlist of record.
+
+API:
+
+- **`POST /api/discovery/hygiene/run`** — start the chain. Refuses
+  overlap. Returns `{"status": "started"}` or `{"status": "running",
+  "message": ...}`.
+- **`POST /api/discovery/hygiene/cancel`** — cancel an in-flight
+  chain.
+- **`GET /api/discovery/hygiene/status`** — direct snapshot for
+  operators tailing curl. The unified `/scan-status` endpoint also
+  surfaces hygiene progress so the existing banner picks it up.
+
+### Added — Gap 1: Hardcover `book_mappings` extraction
+
+The Hardcover BookData GraphQL fragment now includes the
+`book_mappings` table for Goodreads / OpenLibrary / Google
+platforms. Three new optional fields on `BookResult`
+(`goodreads_id`, `openlibrary_id`, `google_books_id`) COALESCE-fill
+through every books-table write path in `lookup.py`.
+
+**Why it matters**: the 2026-05-16 44-author stress test surfaced
+1,526 Hardcover-stamped books with zero `goodreads_id` because our
+query didn't ask for the mapping. Hardcover has it. Post-fix,
+Phase-2 author-goodreads_id backfill (and Data Hygiene Job 3) can
+reverse-resolve audiobook-only authors that previously had no
+anchor book carrying a goodreads_id.
+
+OpenLibrary path-form values (`/books/OL...M`) are stripped to the
+bare OL key for column consistency with what `openlibrary.py`
+itself writes; BookSidebar suffix-routes M-keys to `/books/` and
+W-keys to `/works/` either way.
+
+### Changed — Gap 2: Hardcover URL uses stable id-permalink
+
+Hardcover regenerates slugs when titles change on their side, so
+stored `source_url` and `hardcover_slug` go stale and 404 (UAT
+2026-05-16). Live probe confirmed the singular
+`https://hardcover.app/book/<hardcover_id>` form is a stable
+permalink that 302s to the current canonical slug. BookSidebar now
+prefers it over any stored Hardcover URL when `hardcover_id` is
+known.
+
+---
+
 ## [2.15.1] — 2026-05-16
 
 Follow-up to v2.15.0 #B: two pieces of polish surfaced during UAT.

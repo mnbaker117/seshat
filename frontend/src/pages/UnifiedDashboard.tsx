@@ -270,6 +270,13 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
     scansArr.find((s) => s.kind === "lookup") || {};
   const mamScan: ScanProgress | Record<string, never> =
     scansArr.find((s) => s.kind === "mam") || {};
+  // v2.16.0 Data Hygiene chain. Surfaces as a Command Center button
+  // that fans 6 backfill / cleanup jobs across every library. Idle
+  // entries are filtered out at scan-status, so the row only
+  // appears once the chain starts (or after it has run at least
+  // once this session).
+  const hygieneScan: ScanProgress | Record<string, never> =
+    scansArr.find((s) => s.kind === "hygiene") || {};
 
   const triggerSync = async (slug?: string) => {
     setSyncingSlug(slug || "__active__");
@@ -335,11 +342,39 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
     refresh();
   };
 
+  // v2.16.0 Data Hygiene chain — confirmation gate is intentional;
+  // the chain mutates per-library DBs (deletes empty authors,
+  // merges duplicate books, consolidates series) so a misclick
+  // shouldn't fire it. The modal lists the 6 jobs verbatim so the
+  // user sees what's about to run.
+  const [showHygieneConfirm, setShowHygieneConfirm] = useState(false);
+  const [hygieneStarting, setHygieneStarting] = useState(false);
+  const triggerHygiene = async () => {
+    setHygieneStarting(true);
+    try {
+      await api.post("/discovery/hygiene/run");
+    } catch {
+      /* ignore — banner will surface errors */
+    }
+    setHygieneStarting(false);
+    setShowHygieneConfirm(false);
+    refresh();
+  };
+  const cancelHygiene = async () => {
+    try {
+      await api.post("/discovery/hygiene/cancel");
+    } catch {
+      /* ignore */
+    }
+    refresh();
+  };
+
   const anyLibRunning = libScans.some((s) => s.running);
   const anyRunning =
     anyLibRunning ||
     ("running" in srcScan && srcScan.running) ||
     ("running" in mamScan && mamScan.running) ||
+    ("running" in hygieneScan && hygieneScan.running) ||
     syncingSlug !== null;
   const pollMs = anyRunning ? 3000 : POLL * 1000;
   useVisibleInterval(refresh, pollMs);
@@ -584,6 +619,18 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
               onClick={triggerMam}
             />
             <CmdBtn
+              label={
+                <>
+                  <Dot color={t.grn} /> Data Hygiene
+                </>
+              }
+              busy={
+                hygieneStarting ||
+                ("running" in hygieneScan && !!hygieneScan.running)
+              }
+              onClick={() => setShowHygieneConfirm(true)}
+            />
+            <CmdBtn
               label={`Review ${reviewCount ? `(${reviewCount})` : ""}`}
               highlight
               onClick={() => onNav("pipe-review")}
@@ -619,6 +666,21 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
               "running" in mamScan && mamScan.running ? cancelMam : undefined
             }
           />
+          {/* Hygiene row hidden until the chain runs at least once
+              this session (idle entries are filtered out at
+              scan-status — same rule as Source / MAM / library rows). */}
+          {"kind" in hygieneScan && hygieneScan.kind === "hygiene" && (
+            <ProgressRow
+              label="Data Hygiene"
+              scan={hygieneScan}
+              t={t}
+              onCancel={
+                "running" in hygieneScan && hygieneScan.running
+                  ? cancelHygiene
+                  : undefined
+              }
+            />
+          )}
           {/* Last-scan summary inline, below the progress rows */}
           {srcNewBooks != null || hasTimeouts ? (
             <div
@@ -1258,6 +1320,13 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
           <Tile label="Total Grabs" value={fmtNum(totalGrabs)} />
         </div>
       </div>
+      {showHygieneConfirm && (
+        <HygieneConfirmModal
+          starting={hygieneStarting}
+          onConfirm={triggerHygiene}
+          onCancel={() => setShowHygieneConfirm(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1656,6 +1725,148 @@ function ProgressRow({ label, scan, t, onCancel }: ProgressRowProps) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+interface HygieneConfirmModalProps {
+  starting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+const HYGIENE_JOBS: { name: string; blurb: string }[] = [
+  {
+    name: "Empty author + series cleanup",
+    blurb: "Removes authors with 0 books (preserving your allowlist) and series with no members.",
+  },
+  {
+    name: "Hardcover identifier backfill",
+    blurb: "For books with hardcover_id, stamps any missing Goodreads / OpenLibrary / Google Books IDs from Hardcover's mapping table.",
+  },
+  {
+    name: "Phase-2 author goodreads_id backfill",
+    blurb: "Resolves authors whose books now carry a goodreads_id, looking up the author's id via reverse-lookup.",
+  },
+  {
+    name: "Book deduplication",
+    blurb: "Merges book rows sharing any non-null identifier (Goodreads / Hardcover / ISBN / ASIN / Audible) plus same-series-position duplicates.",
+  },
+  {
+    name: "Series consolidation",
+    blurb: "Collapses series under the same author whose names canonicalize to the same form ('Mistborn' vs 'The Mistborn Saga').",
+  },
+  {
+    name: "ABS author cross-stamp",
+    blurb: "Copies goodreads_id / hardcover_id / etc. from enriched ebook authors to ABS authors with the same name.",
+  },
+];
+
+function HygieneConfirmModal({
+  starting,
+  onConfirm,
+  onCancel,
+}: HygieneConfirmModalProps) {
+  const t = useTheme();
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 100,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(640px, 92vw)",
+          background: t.bg2,
+          border: `1px solid ${t.border}`,
+          borderRadius: 8,
+          padding: 20,
+          color: t.text,
+          maxHeight: "85vh",
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
+          Run Data Hygiene?
+        </div>
+        <div style={{ fontSize: 13, color: t.text2, marginBottom: 14 }}>
+          This will fan the following 6 jobs across every configured library,
+          in order. Re-running is idempotent — re-runs are near-no-ops once
+          everything is clean.
+        </div>
+        <ol style={{ paddingLeft: 22, margin: 0, marginBottom: 18 }}>
+          {HYGIENE_JOBS.map((j, idx) => (
+            <li key={j.name} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: t.text }}>
+                {idx + 1}. {j.name}
+              </div>
+              <div style={{ fontSize: 12, color: t.text2, marginTop: 2 }}>
+                {j.blurb}
+              </div>
+            </li>
+          ))}
+        </ol>
+        <div
+          style={{
+            fontSize: 11,
+            color: t.text2,
+            background: t.bg3,
+            padding: 8,
+            borderRadius: 6,
+            marginBottom: 14,
+          }}
+        >
+          <b>Universal rules</b>: hidden items skipped where applicable,
+          `authors_allowed` preserved by name, Hardcover calls reuse the
+          existing 1s rate limit.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            onClick={onCancel}
+            disabled={starting}
+            style={{
+              padding: "7px 14px",
+              borderRadius: 5,
+              fontSize: 13,
+              background: t.bg4,
+              color: t.text2,
+              border: `1px solid ${t.border}`,
+              cursor: starting ? "wait" : "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={starting}
+            style={{
+              padding: "7px 14px",
+              borderRadius: 5,
+              fontSize: 13,
+              fontWeight: 600,
+              background: t.accent,
+              color: t.bg,
+              border: `1px solid ${t.accent}`,
+              cursor: starting ? "wait" : "pointer",
+              opacity: starting ? 0.6 : 1,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            {starting ? <Spin size={12} /> : null}
+            Run Hygiene
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

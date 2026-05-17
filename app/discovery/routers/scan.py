@@ -350,6 +350,8 @@ def _label_for(kind: str, scan_type: str) -> str:
         # reads "Audiobookshelf Sync" naturally instead of always
         # saying "Calibre Sync".
         return f"{scan_type} Sync" if scan_type and scan_type != "none" else "Library Sync"
+    if kind == "hygiene":
+        return "Data Hygiene"
     return scan_type or kind
 
 
@@ -430,6 +432,36 @@ def _project_mam() -> dict:
     }
 
 
+def _project_hygiene() -> dict:
+    """Project _hygiene_progress into the unified scan-status shape.
+
+    The Hygiene chain runs 6 sub-jobs; we expose its overall "job X
+    of 6" framing as `current` / `total` for the banner's main
+    progress bar, and stash per-job rolling stats in `extra.jobs`
+    so the dashboard can render a one-line "this run merged 12
+    books, +83 IDs" digest while running and after completion.
+    """
+    p = state._hygiene_progress
+    return {
+        "kind": "hygiene",
+        "type": p.get("type", "none"),
+        "label": _label_for("hygiene", p.get("type", "none")),
+        "running": bool(p.get("running")),
+        "current": int(p.get("current_job_idx", 0))
+                   + (1 if p.get("running") else 0),
+        "total": int(p.get("total_jobs", 0)),
+        "current_label": p.get("current_job_name", "") or None,
+        "current_book": p.get("current_library", "") or None,
+        "status": p.get("status", "idle"),
+        "completed_at": _stamp_completed(p),
+        "extra": {
+            "jobs": p.get("jobs", []),
+            "phase_current": int(p.get("current", 0)),
+            "phase_total": int(p.get("total", 0)),
+        },
+    }
+
+
 def _project_libraries() -> list[dict]:
     """Project per-library sync progress into the unified shape.
 
@@ -489,7 +521,7 @@ async def scan_status():
     auto-hides when nothing has run yet.
     """
     out = []
-    for proj in (_project_lookup(), _project_mam(), *_project_libraries()):
+    for proj in (_project_lookup(), _project_mam(), _project_hygiene(), *_project_libraries()):
         # Hide entries that are pristine idle (never ran). Keep complete
         # ones so the user sees the result of the last scan even after
         # it finishes. Library rows are always kept so the Command

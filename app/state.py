@@ -285,6 +285,25 @@ _mam_scan_progress: Dict[str, Any] = {
 }
 _mam_full_scan_task: Optional[asyncio.Task] = None
 
+# v2.16.0 Data Hygiene action state. One coordinator runs at most one
+# Hygiene chain at a time; the same dict is mutated as each of the 6
+# sub-jobs progresses, with `extra.jobs` carrying per-job rolling
+# stats so the Command Center banner can render both the overall
+# 1-of-6 sub-step and the in-flight job's own count.
+_hygiene_task: Optional[asyncio.Task] = None
+_hygiene_progress: Dict[str, Any] = {
+    "running": False,
+    "current_job_idx": 0,
+    "total_jobs": 0,
+    "current_job_name": "",
+    "current_library": "",
+    "current": 0,   # in-flight job's progress counter
+    "total": 0,     # in-flight job's progress total
+    "status": "idle",
+    "type": "none",
+    "jobs": [],      # appended per-completion: {name, library, stats}
+}
+
 
 # ─── Dispatcher singleton ────────────────────────────────────
 # Set by main.py's lifespan during startup. The inject router and
