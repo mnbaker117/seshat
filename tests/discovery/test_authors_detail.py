@@ -183,6 +183,79 @@ async def test_authors_list_counts_are_global_on_every_tab(
     disco_db.set_active_library(None)
 
 
+async def test_authors_list_sorts_by_last_name(
+    tmp_path, monkeypatch,
+):
+    """v2.17.2 — cross-library Authors list sort keys on LAST NAME
+    (matching the frontend's letter-sidebar `getLetterKey` logic),
+    not on `sort_name`. Calibre's `sort_name` is inconsistent
+    ("Last, First" for most rows, but raw "First Last" for
+    pseudonyms / some imports), so SQL ORDER BY sort_name placed
+    "Emrys Ambrosius" under E even though the alphabet sidebar
+    correctly grouped them under A. Both layers now agree.
+    """
+    from app import config as app_config
+    from app import state
+    from app.discovery import database as disco_db
+    from app.discovery.database import get_db
+    from app.discovery.routers.authors import router
+
+    monkeypatch.setattr(app_config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(disco_db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "_discovered_libraries", [
+        {"slug": "calibre", "content_type": "ebook", "name": "Calibre"},
+    ])
+
+    disco_db.set_active_library("calibre")
+    await disco_db.init_db("calibre")
+    db = await get_db("calibre")
+    try:
+        # Mix of authors with different sort_name conventions
+        # (the bug's repro condition). All start with "A"-letters
+        # by LAST name but sort_name varies wildly.
+        rows = [
+            ("Alfir2", "Alfir2"),                # single-word, no comma
+            ("Ameria", "Ameria"),                # single-word
+            ("Emrys Ambrosius", "Emrys Ambrosius"),  # buggy "First Last"
+            ("Ann Aguirre", "Aguirre, Ann"),     # canonical "Last, First"
+            ("Ryan Anderson", "Anderson, Ryan"), # canonical
+        ]
+        for name, sort_name in rows:
+            cur = await db.execute(
+                "INSERT INTO authors (name, sort_name) VALUES (?, ?)",
+                (name, sort_name),
+            )
+            aid = cur.lastrowid
+            await db.execute(
+                "INSERT INTO books (title, author_id, owned, hidden) "
+                "VALUES ('B', ?, 0, 0)",
+                (aid,),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as c:
+        r = await c.get("/api/discovery/authors?content_type=all&sort=name&sort_dir=asc")
+    assert r.status_code == 200
+    names = [a["name"] for a in r.json()["authors"]]
+    # Expected order by LAST NAME:
+    # Aguirre < Alfir2 < Ambrosius < Ameria < Anderson
+    assert names == [
+        "Ann Aguirre",
+        "Alfir2",
+        "Emrys Ambrosius",
+        "Ameria",
+        "Ryan Anderson",
+    ], f"unexpected order: {names}"
+
+    disco_db.set_active_library(None)
+
+
 async def test_authors_list_audiobook_only_excluded_from_ebook_tab(
     tmp_path, monkeypatch,
 ):

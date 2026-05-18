@@ -153,16 +153,35 @@ async def get_authors(search: str = Query(None), sort: str = Query("name"), sort
         # negative-key trick). Parity with the DiscBooksPage sort
         # behavior + a frontend invert button gives the user explicit
         # control.
+        #
+        # v2.17.2 — name sort now keys on LAST NAME (matching the
+        # frontend's `getLetterKey`/`getLastName` logic for the
+        # alphabet sidebar). `sort_name` from Calibre is inconsistent:
+        # most rows store "Last, First", but pseudonyms and some
+        # imports stay "First Last" verbatim (Emrys Ambrosius,
+        # Aaron Renfroe, etc.). The alphabetical SQL sort placed
+        # those under their FIRST initial — so Emrys landed under
+        # "E", invisible on page 1 of the All-sort even though the
+        # sidebar correctly puts them at "A" via last-word
+        # extraction. Now both layers agree.
+        def _last_name_key(x):
+            name = (x.get("name") or x.get("sort_name") or "").strip()
+            parts = name.split()
+            last = parts[-1] if len(parts) > 1 else (parts[0] if parts else "")
+            return (last.lower(), name.lower())
         def _key_count(field: str):
             def k(x):
-                return (x.get(field) or 0, (x.get("sort_name") or "").lower())
+                return (
+                    x.get(field) or 0,
+                    *_last_name_key(x),
+                )
             return k
         sort_fn = {
             "missing": _key_count("missing_count"),
             "new": _key_count("new_count"),
             "total": _key_count("total_books"),
             "owned": _key_count("owned_count"),
-        }.get(sort, lambda x: ((x.get("sort_name") or x.get("name") or "").lower(),))
+        }.get(sort, _last_name_key)
         reverse = sort_dir == "desc"
         authors = sorted(merged.values(), key=sort_fn, reverse=reverse)
         # v2.17.1 — post-merge content_type filter. The frontend's

@@ -7,6 +7,34 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.17.2] — 2026-05-18
+
+UAT-caught: Authors list now sorts by last name (matching the
+alphabet sidebar's grouping).
+
+### Fixed — name sort keys on last word, not Calibre `sort_name`
+
+The cross-library Authors list's default name sort used
+`sort_name` from each library's authors row. Calibre populates
+this inconsistently — most rows store "Last, First" (Ann Aguirre
+→ "Aguirre, Ann") but pseudonyms / some imports stay raw
+"First Last" (Emrys Ambrosius → "Emrys Ambrosius", Aaron
+Renfroe → "Aaron Renfroe"). Result: SQL ORDER BY sort_name placed
+Emrys under the "E"s, page 5+ alphabetically, even though the
+alphabet sidebar's `getLetterKey` correctly grouped them under
+"A" via last-word extraction. UAT 2026-05-18 caught this: Emrys
+was missing from page 1 of the All / Audiobooks tabs.
+
+Fix: cross-library sort now extracts the last word from the
+display name (matches the frontend's `getLastName` exactly).
+Both layers agree on placement now.
+
+One new test (`test_authors_list_sorts_by_last_name`) feeds a
+mixed-convention set and asserts the order matches last-name
+collation.
+
+---
+
 ## [2.17.1] — 2026-05-18
 
 UAT-caught hotfix to v2.17.0 Bug B / Bug A: Authors-page tile
