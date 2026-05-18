@@ -7,6 +7,34 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.16.3] — 2026-05-18
+
+UAT follow-up: bound the Hygiene Job 3 Phase-2 sweep.
+
+### Fixed — Hygiene Job 3 now caps the Phase-2 sweep at 200 candidates
+
+v2.16.0's Hygiene chain called `backfill_missing_author_ids(limit=None)`,
+leaving the Phase-2 cross-DB co-author sweep unbounded. UAT
+2026-05-17 against Mark's library found **645 ABS Phase-2
+candidates** × 7s each (Goodreads rate-limit) → projected ~70-minute
+wall-time on first invocation, which is too long for an interactive
+trigger.
+
+Fix: one-line change to pass `limit=200`. The existing
+`backfill_missing_author_ids` already honors `limit` across both
+phases combined; Phase-1 (small, anchor-book-driven) runs first
+and Phase-2 inherits the remaining budget. Idempotent re-runs
+naturally drain the rest of the backlog over multiple chain
+invocations. With ~30s per HTTP-bound author and a mix of fast
+resolver-chain-dry skips, this caps the chain at ~10-15 min per
+library wall-time even on first-run.
+
+One new test (`TestJob3LimitCap.test_passes_non_none_limit`)
+pins the kwarg so future refactors don't silently re-introduce
+the unbounded path.
+
+---
+
 ## [2.16.2] — 2026-05-18
 
 UAT-caught hotfix to v2.16.0's Hardcover `book_mappings` extraction

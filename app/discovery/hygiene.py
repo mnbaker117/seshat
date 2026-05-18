@@ -466,12 +466,24 @@ async def job_author_id_backfill(slug: str, stats: dict[str, Any]) -> None:
     The existing sweep handles its own logging, rate-limiting, and
     soft-block detection — we just observe the stats it returns and
     fold them into the Hygiene rollup.
+
+    v2.16.3 — pass `limit=200` so a first-run against a library
+    with hundreds of audiobook-only authors (645 ABS Phase-2
+    candidates on Mark's library — UAT 2026-05-17) doesn't take
+    ~70 minutes at Goodreads' 5s + jitter rate-limit. The limit is
+    shared across Phase-1 + Phase-2 by `backfill_missing_author_ids`,
+    so Phase-1 (small, anchor-book-driven) runs first and Phase-2
+    inherits the remaining budget. Hygiene is idempotent — a
+    second run picks up the next batch of candidates that weren't
+    reached. With ~30s per HTTP-bound author and a mix of fast
+    resolver-chain-dry skips, this caps the chain at ~10-15 min
+    per library wall-time even on first-run.
     """
     from app.discovery.goodreads_author_backfill import (
         backfill_missing_author_ids,
     )
     try:
-        result = await backfill_missing_author_ids(limit=None)
+        result = await backfill_missing_author_ids(limit=200)
         stats["authors_resolved"] += int(result.get("resolved", 0))
         logger.info(
             "hygiene[%s] author-id-backfill: considered=%d resolved=%d "

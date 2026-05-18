@@ -475,6 +475,47 @@ class TestIdentifierDedup:
 # ─── Coordinator — empty-library no-op ──────────────────────────────
 
 
+class TestJob3LimitCap:
+    """v2.16.3 regression — `job_author_id_backfill` MUST pass a
+    non-None `limit` kwarg to `backfill_missing_author_ids` so the
+    Hygiene chain stays bounded on first-run against libraries
+    with hundreds of audiobook-only authors. UAT 2026-05-17 found
+    ABS Phase-2 had 645 candidates × 7s each → ~70-minute
+    wall-time when called with `limit=None`.
+    """
+
+    async def test_passes_non_none_limit(self, monkeypatch):
+        from app.discovery import hygiene as hyg
+
+        captured: dict[str, object] = {}
+
+        async def fake_backfill(*, limit=None):
+            captured["limit"] = limit
+            return {
+                "considered": 0, "resolved": 0,
+                "missed": 0, "skipped_soft_blocked": 0,
+            }
+
+        # Patch the lazy import inside job_author_id_backfill so the
+        # function picks up our fake instead of the real Goodreads
+        # sweep. The import is inside the function so we need to
+        # monkeypatch via the module the function imports from.
+        import app.discovery.goodreads_author_backfill as gr_mod
+        monkeypatch.setattr(gr_mod, "backfill_missing_author_ids", fake_backfill)
+
+        stats = hyg._zero_stats()
+        await hyg.job_author_id_backfill("anylib", stats)
+
+        assert "limit" in captured, "Job 3 didn't call backfill"
+        assert captured["limit"] is not None, (
+            "Job 3 must pass a non-None limit so Phase-2 ABS sweeps "
+            "don't run unbounded (UAT 2026-05-17 surfaced 70-min wall "
+            "time when limit=None)"
+        )
+        assert isinstance(captured["limit"], int)
+        assert captured["limit"] > 0
+
+
 class TestHygieneHardcoverQueryShape:
     """v2.16.2 regression — the batched book_mappings query used by
     `_fetch_hardcover_book_mappings` MUST filter platforms by their
