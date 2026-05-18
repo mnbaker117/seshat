@@ -334,6 +334,57 @@ function DesktopBooksPage({
     setBusy(false);
   };
 
+  // v2.17.0 Feat C — bulk Hide / Delete on book-listing pages.
+  // Behavior parity with the per-row context menu actions: Hide is
+  // soft (sets books.hidden=1, recomputes series authority), Delete
+  // is hard (removes the row, with Calibre-synced rows automatically
+  // skipped server-side).
+  const bulkHide = async () => {
+    if (!confirm(`Hide ${sel.size} book(s)? They'll move to the Hidden page.`)) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{ status?: string; count?: number; error?: string }>(
+        "/discovery/books/bulk-hide",
+        { book_ids: [...sel] },
+      );
+      if (r.error) toast.error(r.error);
+      else {
+        toast.success(`Hid ${r.count ?? sel.size} book(s)`);
+        setSel(new Set());
+        setSelMode(false);
+        load(pg);
+      }
+    } catch (e) {
+      toast.error((e as Error).message || "Error hiding books");
+    }
+    setBusy(false);
+  };
+
+  const bulkDelete = async () => {
+    if (!confirm(
+      `Delete ${sel.size} book(s)? Calibre / Audiobookshelf-synced books will be skipped.`,
+    )) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{ deleted?: number; skipped?: number; error?: string }>(
+        "/discovery/books/bulk-delete",
+        { book_ids: [...sel] },
+      );
+      if (r.error) toast.error(r.error);
+      else {
+        const parts = [`Deleted ${r.deleted ?? 0}`];
+        if (r.skipped) parts.push(`skipped ${r.skipped} library-synced`);
+        toast.success(parts.join(", "));
+        setSel(new Set());
+        setSelMode(false);
+        load(pg);
+      }
+    } catch (e) {
+      toast.error((e as Error).message || "Error deleting books");
+    }
+    setBusy(false);
+  };
+
   const scanMam = async () => {
     if (
       !confirm(
@@ -846,6 +897,44 @@ function DesktopBooksPage({
                       : []),
                   ]}
                 />
+                <span
+                  style={{
+                    width: 1,
+                    height: 20,
+                    background: t.border,
+                    margin: "0 4px",
+                  }}
+                />
+                {/* v2.17.0 Feat C — bulk Hide + Delete. Hide is soft
+                    (books move to Hidden page); Delete is hard but
+                    server-side-skips library-synced rows so a mixed
+                    selection still does what it can. */}
+                <Btn
+                  size="sm"
+                  onClick={bulkHide}
+                  disabled={busy}
+                  title="Hide selected books (moves them to the Hidden page)"
+                  style={{
+                    background: t.ylw + "22",
+                    color: t.ylwt,
+                    border: `1px solid ${t.ylw}44`,
+                  }}
+                >
+                  Hide
+                </Btn>
+                <Btn
+                  size="sm"
+                  onClick={bulkDelete}
+                  disabled={busy}
+                  title="Delete selected books (Calibre / ABS-synced skipped)"
+                  style={{
+                    background: t.red + "22",
+                    color: t.red,
+                    border: `1px solid ${t.red}44`,
+                  }}
+                >
+                  Delete
+                </Btn>
                 <span
                   style={{
                     width: 1,

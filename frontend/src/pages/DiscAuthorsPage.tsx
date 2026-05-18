@@ -65,6 +65,12 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   const [ld, setLd] = useState(true);
   const [q, setQ] = usePersist<string>("ap_q", "");
   const [sort, setSort] = usePersist<string>("ap_sort", "name");
+  // v2.17.0 — sort direction toggle (parity with DiscBooksPage). The
+  // "Owned" / "Missing" / "Books" sorts implicitly favored DESC in the
+  // backend's `sort_fn` lambdas (negative-key trick), but the user-
+  // facing sort dropdown only had one entry per metric and no way to
+  // invert. Now backend + frontend both honor `sort_dir`.
+  const [sortDir, setSortDir] = usePersist<string>("ap_sort_dir", "asc");
   const [vm, setVm] = usePersist<ViewMode>("ap_vm", "list");
   const [letter, setLetter] = usePersist<string>("ap_letter", "");
   const [fmt, setFmt] = usePersist<string>("ap_fmt", "all");
@@ -81,6 +87,10 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   const [scanning, setScanning] = useState(false);
   const [mamOn, setMamOn] = useState(false);
   const [linking, setLinking] = useState(false);
+  // v2.17.0 — generic busy flag for bulk Hide / Delete cascades
+  // (distinct from `scanning` / `clearing` so the UI can show the
+  // right spinner per action class).
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api
@@ -92,7 +102,7 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   useEffect(() => {
     const c = new AbortController();
     setLd(true);
-    const params = new URLSearchParams({ search: q, sort, content_type: fmt });
+    const params = new URLSearchParams({ search: q, sort, sort_dir: sortDir, content_type: fmt });
     api
       .get<AuthorsResponse>(`/discovery/authors?${params}`, c.signal)
       .then((d) => {
@@ -103,7 +113,7 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
         if (!api.isAbort(e)) setLd(false);
       });
     return () => c.abort();
-  }, [q, sort, fmt]);
+  }, [q, sort, sortDir, fmt]);
 
   // Clear cross-page selection state when the filter context changes.
   // The selectAllVisible button is intentionally additive across pages
@@ -117,7 +127,7 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
   // the "B" letter filter.
   useEffect(() => {
     setSel(new Set());
-  }, [letter, q, sort, fmt]);
+  }, [letter, q, sort, sortDir, fmt]);
 
   // Filter by letter
   const filtered = useMemo(() => {
@@ -173,7 +183,7 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
 
   const reload = () => {
     setLd(true);
-    const params = new URLSearchParams({ search: q, sort, content_type: fmt });
+    const params = new URLSearchParams({ search: q, sort, sort_dir: sortDir, content_type: fmt });
     api
       .get<AuthorsResponse>(`/discovery/authors?${params}`)
       .then((d) => {
@@ -301,6 +311,78 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
       toast.error((e as Error).message || "Failed");
     }
     setScanning(false);
+  };
+
+  // v2.17.0 Feat C — bulk Hide / Delete cascade to each selected
+  // author's books across every library. "Hide" sets `hidden=1` on
+  // all their books (per-library tile drops out of non-Hidden
+  // listings); "Delete" removes their unowned discovery rows
+  // (Calibre / ABS-synced skipped). Author rows themselves stay
+  // intact so the v2.12.1 dual-row mirror pattern isn't disturbed.
+  const bulkHideBooks = async () => {
+    const picked = selectedAuthors();
+    if (
+      !confirm(
+        `Hide every book by ${picked.length} author(s)? They'll move to the Hidden page across every library.`,
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      const r = await api.post<{
+        books_hidden?: number;
+        libraries_touched?: number;
+        error?: string;
+      }>("/discovery/authors/bulk-hide-books", {
+        author_names: picked.map((a) => a.name),
+      });
+      if (r.error) toast.error(r.error);
+      else {
+        toast.success(
+          `Hid ${r.books_hidden ?? 0} book(s) across ${r.libraries_touched ?? 0} library/libraries`,
+        );
+        setSel(new Set());
+        setSelMode(false);
+        reload();
+      }
+    } catch (e) {
+      toast.error((e as Error).message || "Error hiding");
+    }
+    setBusy(false);
+  };
+
+  const bulkDeleteBooks = async () => {
+    const picked = selectedAuthors();
+    if (
+      !confirm(
+        `Delete every UNOWNED book by ${picked.length} author(s)? Calibre / ABS-synced books will be skipped. Author rows stay intact.`,
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      const r = await api.post<{
+        books_deleted?: number;
+        books_skipped?: number;
+        libraries_touched?: number;
+        error?: string;
+      }>("/discovery/authors/bulk-delete-books", {
+        author_names: picked.map((a) => a.name),
+      });
+      if (r.error) toast.error(r.error);
+      else {
+        const parts = [`Deleted ${r.books_deleted ?? 0}`];
+        if (r.books_skipped) parts.push(`skipped ${r.books_skipped} library-synced`);
+        parts.push(`across ${r.libraries_touched ?? 0} libraries`);
+        toast.success(parts.join(", "));
+        setSel(new Set());
+        setSelMode(false);
+        reload();
+      }
+    } catch (e) {
+      toast.error((e as Error).message || "Error deleting");
+    }
+    setBusy(false);
   };
 
   const scanMam = async () => {
@@ -551,9 +633,35 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
                 }}
               >
                 <option value="name">Sort: Name</option>
-                <option value="books">Sort: Books</option>
+                <option value="total">Sort: Books</option>
+                <option value="owned">Sort: Owned</option>
                 <option value="missing">Sort: Missing</option>
               </select>
+              {/* v2.17.0 — sort-direction toggle (parity with DiscBooksPage). */}
+              <button
+                onClick={() => {
+                  setSortDir(sortDir === "asc" ? "desc" : "asc");
+                  setPg(1);
+                }}
+                title={
+                  sortDir === "asc"
+                    ? "Ascending — click for descending"
+                    : "Descending — click for ascending"
+                }
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  border: `1px solid ${t.border}`,
+                  background: t.inp,
+                  color: t.text2,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  minWidth: 28,
+                }}
+              >
+                {sortDir === "asc" ? "↑" : "↓"}
+              </button>
               <VT mode={vm} setMode={setVm} />
               <Btn
                 size="sm"
@@ -759,12 +867,42 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
                   ]}
                 />
                 <span style={{ width: 1, height: 20, background: t.border }} />
+                {/* v2.17.0 Feat C — bulk Hide / Delete cascade to all
+                    selected authors' books across every library. Hide
+                    is reversible; Delete only touches unowned rows. */}
+                <Btn
+                  size="sm"
+                  onClick={bulkHideBooks}
+                  disabled={busy}
+                  title="Hide every book by selected authors (moves them to Hidden)"
+                  style={{
+                    background: t.ylw + "22",
+                    color: t.ylwt,
+                    border: `1px solid ${t.ylw}44`,
+                  }}
+                >
+                  Hide
+                </Btn>
+                <Btn
+                  size="sm"
+                  onClick={bulkDeleteBooks}
+                  disabled={busy}
+                  title="Delete every UNOWNED book by selected authors (Calibre / ABS-synced skipped)"
+                  style={{
+                    background: t.red + "22",
+                    color: t.red,
+                    border: `1px solid ${t.red}44`,
+                  }}
+                >
+                  Delete
+                </Btn>
+                <span style={{ width: 1, height: 20, background: t.border }} />
               </>
             )}
             <Btn
               size="sm"
               onClick={selectAllVisible}
-              disabled={scanning || clearing || linking}
+              disabled={scanning || clearing || linking || busy}
             >
               Select All on Page
             </Btn>
@@ -772,7 +910,7 @@ function DesktopAuthorsPage({ onNav }: { onNav: NavFn }) {
               <Btn
                 size="sm"
                 onClick={() => setSel(new Set())}
-                disabled={scanning || clearing || linking}
+                disabled={scanning || clearing || linking || busy}
               >
                 Deselect All
               </Btn>
@@ -840,10 +978,27 @@ interface AuthorRowProps {
   onClick: () => void;
 }
 
+// v2.17.0 — emoji string per content_types set. Cross-library merge
+// stamps `content_types: ["ebook"]` / `["audiobook"]` / both. The
+// flat list view + grid view both call this so an audiobook-bearing
+// author is visually distinguishable on the "All" tab without
+// hunting through tabs. Empty string when content_types is missing
+// (single-library mode falls through without a badge).
+function formatBadge(ct: string[] | undefined): string {
+  if (!ct || ct.length === 0) return "";
+  const hasEbook = ct.includes("ebook");
+  const hasAudio = ct.includes("audiobook");
+  if (hasEbook && hasAudio) return "📖🎧";
+  if (hasAudio) return "🎧";
+  if (hasEbook) return "📖";
+  return "";
+}
+
 function AuthorCard({ a, t, selected, onClick }: AuthorRowProps) {
   const owned = a.owned_count || 0;
   const missing = a.missing_count || 0;
   const total = a.total_books || 0;
+  const badge = formatBadge(a.content_types);
   return (
     <div
       onClick={onClick}
@@ -868,6 +1023,24 @@ function AuthorCard({ a, t, selected, onClick }: AuthorRowProps) {
           }}
         >
           {a.name}
+          {badge && (
+            <span
+              title={
+                badge === "📖🎧"
+                  ? "Ebook + audiobook"
+                  : badge === "🎧"
+                  ? "Audiobook"
+                  : "Ebook"
+              }
+              style={{
+                fontSize: 12,
+                marginLeft: 6,
+                verticalAlign: "middle",
+              }}
+            >
+              {badge}
+            </span>
+          )}
           {(a.link_count || 0) > 0 && (
             <span
               style={{
@@ -927,6 +1100,7 @@ function AuthorRow({ a, t, selected, onClick }: AuthorRowProps) {
   const owned = a.owned_count || 0;
   const missing = a.missing_count || 0;
   const total = a.total_books || 0;
+  const badge = formatBadge(a.content_types);
   return (
     <div
       onClick={onClick}
@@ -998,6 +1172,20 @@ function AuthorRow({ a, t, selected, onClick }: AuthorRowProps) {
             }}
           >
             {a.name}
+            {badge && (
+              <span
+                title={
+                  badge === "📖🎧"
+                    ? "Ebook + audiobook"
+                    : badge === "🎧"
+                    ? "Audiobook"
+                    : "Ebook"
+                }
+                style={{ fontSize: 11, flexShrink: 0 }}
+              >
+                {badge}
+              </span>
+            )}
             {(a.link_count || 0) > 0 && (
               <span
                 style={{

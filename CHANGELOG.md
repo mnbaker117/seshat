@@ -7,6 +7,104 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.17.0] — 2026-05-18
+
+Cross-library polish minor. Four user-reported items landed in one
+release — two UX fixes that make audiobook authors actually visible
++ correctly counted on cross-library setups, plus bulk Hide/Delete
+across every book and author listing.
+
+### Fixed — Bug A: Authors "All" filter now shows format badges
+
+Audiobook-only authors WERE coming back from the API on the "All"
+tab; the bug was UX: `AuthorCard` / `AuthorRow` rendered nothing
+to distinguish ebook-only / audiobook-only / mixed authors, so on
+a Calibre-dominant library the audiobook side felt invisible.
+Tiles now show a 📖 / 🎧 / 📖🎧 badge next to the author name when
+the cross-library merge identifies content_types — explicit
+visual differentiation without changing the data path.
+
+The backend's merge step (`/authors?content_type=all`) now stamps
+a parallel `content_types: [...]` list alongside the existing
+`library_slugs` so the frontend can render the badge without a
+second round-trip.
+
+### Fixed — Bug B: Author-detail counts are now GLOBAL across libraries
+
+`/api/discovery/authors/{aid}?include_cross_library=1` now returns
+a `global_stats` field that sums `owned` / `missing` / `total` /
+`series_count` across the primary library + every cross_library
+entry. The top-of-page tile on both desktop (`DiscAuthorDetailPage`)
+and mobile (`MobileAuthorDetailPage`) read this field. Before:
+an audiobook-only author with 1 owned audiobook + 4 freshly-
+discovered unowned ebooks rendered "1 owned, 0 missing" on the
+ABS-side detail page (per-library count). After: "1 owned, 4
+missing" — true global view that matches what the cross-format
+scan actually produced.
+
+The per-library counts inside each tab are unchanged — they're
+still useful when the user is looking at one specific library's
+slice. The bug was at the top-of-page summary.
+
+Side effect cleanup: the mobile detail page previously read
+`a.owned_count` / `a.total_books` / `a.missing_count` directly,
+but those columns aren't populated by the detail endpoint (the
+list endpoint computes them via JOIN aggregation). Mobile was
+permanently rendering "0 / 0 owned" — also closed by this fix.
+
+### Added — Feat C: Bulk Hide / Delete on every book + author page
+
+Every book-listing page gains Hide and Delete buttons in the
+multi-select bar:
+
+- **Library, Missing, Upcoming** (`DiscBooksPage`): Hide moves
+  selected books to the Hidden page; Delete removes unowned rows
+  and silently skips Calibre / Audiobookshelf-synced ones.
+- **Hidden** (`DiscHiddenPage`): full new multi-select bar with
+  **Unhide** + **Delete** (the Hidden page is the one place
+  where the bulk verb is Unhide, not Hide).
+- **Authors** (`DiscAuthorsPage`): Hide and Delete cascade across
+  every selected author's books. Hide sets `hidden=1` on all
+  their book rows (across every configured library); Delete
+  removes unowned rows only. Author rows themselves stay intact
+  so the v2.12.1 dual-row mirror pattern keeps working.
+
+New API surface:
+
+- **`POST /api/discovery/books/bulk-unhide`** (new endpoint
+  symmetric with the existing `bulk-hide`).
+- **`POST /api/discovery/authors/bulk-hide-books`** — accepts
+  `{author_names: [...]}` and cascades across every library.
+- **`POST /api/discovery/authors/bulk-delete-books`** — symmetric;
+  returns per-library `books_deleted` / `books_skipped` counts.
+
+Two new tests pin the cascade behavior
+(`test_bulk_hide_authors_books_cascades_across_libraries`,
+`test_bulk_delete_authors_books_skips_library_synced`).
+
+Mobile pages keep their existing "no bulk select bar on mobile"
+design decision per the file-level comment in
+`MobileBooksPage.tsx`. If bulk on mobile becomes a felt need,
+it's a separate follow-up.
+
+### Added — Feat D: Authors page "Sort: Owned" + sort-invert button
+
+The Authors page sort dropdown gains an **Owned** option that
+orders authors by their owned-book count. The new sort-invert
+button (↑ / ↓ chevron next to the dropdown) flips the sort
+direction; this is parity with the existing pattern on
+`DiscBooksPage`. Backend's `_build_authors_sql` and cross-library
+merge sort lambdas both honor `sort_dir` literally now (previously
+count sorts forced DESC via a negative-key trick).
+
+Frontend bug-fix bonus: the existing sort dropdown sent
+`sort=books` which the backend treated as an unknown value and
+silently fell through to ORDER BY sort_name. Renamed to
+`sort=total` to match the backend's mapping; sorting by book count
+actually works now.
+
+---
+
 ## [2.16.3] — 2026-05-18
 
 UAT follow-up: bound the Hygiene Job 3 Phase-2 sweep.

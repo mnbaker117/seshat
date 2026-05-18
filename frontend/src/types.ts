@@ -126,6 +126,15 @@ export interface Author {
   // the "slug:id" nav arg so cross-library click-throughs resolve
   // in the right library.
   library_slug?: string;
+  // v2.17.0 — merged-author fields set by the cross-library mode of
+  // the /authors endpoint. `library_slugs` lists every library this
+  // author has rows in; `content_types` lists the formats (ebook /
+  // audiobook). Used by the Authors tile to render a 📖/🎧 badge so
+  // audiobook-bearing authors are visually distinguishable on the
+  // "All" tab. Absent in single-library mode.
+  library_slugs?: string[];
+  content_types?: string[];
+  author_ids_by_slug?: Record<string, number>;
 }
 
 export interface Book {

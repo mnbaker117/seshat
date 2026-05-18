@@ -26,6 +26,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from app import state
 from app.config import load_settings
 from app.discovery.database import get_db, get_active_library, HF, cleanup_empty_series
+from app.discovery.routers.series import _recompute_series_author
 from app.discovery.lookup import lookup_author
 from app.discovery.cross_library import (
     libraries_for,
@@ -73,6 +74,9 @@ def _build_authors_sql(search, has_missing, book_type, include_orphans, sort, so
         "missing": f" ORDER BY missing_count {d}, a.sort_name ASC",
         "new": f" ORDER BY new_count {d}, a.sort_name ASC",
         "total": f" ORDER BY total_books {d}, a.sort_name ASC",
+        # v2.17.0 Feat D — Owned sort. Parity with the "Missing" /
+        # "Total" sorts; ties broken by sort_name ASC for stable ordering.
+        "owned": f" ORDER BY owned_count {d}, a.sort_name ASC",
     }.get(sort, f" ORDER BY a.sort_name {d}")
     return q, p
 
@@ -119,18 +123,38 @@ async def get_authors(search: str = Query(None), sort: str = Query("name"), sort
                 # the right library's author-detail page.
                 base["library_slugs"].append(r["library_slug"])
                 base["author_ids_by_slug"][r["library_slug"]] = r.get("id")
+                # v2.17.0 Bug A — parallel content-type list lets the
+                # Authors tile render a format badge (📖/🎧/📖🎧)
+                # without re-fetching `_discovered_libraries` from the
+                # frontend.
+                ct = r.get("content_type")
+                if ct and ct not in base["content_types"]:
+                    base["content_types"].append(ct)
             else:
                 merged[key] = {
                     **r,
                     "library_slugs": [r["library_slug"]],
                     "author_ids_by_slug": {r["library_slug"]: r.get("id")},
+                    "content_types": (
+                        [r["content_type"]] if r.get("content_type") else []
+                    ),
                 }
+        # v2.17.0 — sort_dir now applies uniformly across all sort
+        # keys (was previously baked-in DESC for count sorts via a
+        # negative-key trick). Parity with the DiscBooksPage sort
+        # behavior + a frontend invert button gives the user explicit
+        # control.
+        def _key_count(field: str):
+            def k(x):
+                return (x.get(field) or 0, (x.get("sort_name") or "").lower())
+            return k
         sort_fn = {
-            "missing": lambda x: (-(x.get("missing_count") or 0), (x.get("sort_name") or "").lower()),
-            "new": lambda x: (-(x.get("new_count") or 0), (x.get("sort_name") or "").lower()),
-            "total": lambda x: (-(x.get("total_books") or 0), (x.get("sort_name") or "").lower()),
+            "missing": _key_count("missing_count"),
+            "new": _key_count("new_count"),
+            "total": _key_count("total_books"),
+            "owned": _key_count("owned_count"),
         }.get(sort, lambda x: ((x.get("sort_name") or x.get("name") or "").lower(),))
-        reverse = sort_dir == "desc" and sort not in ("missing", "new", "total")
+        reverse = sort_dir == "desc"
         authors = sorted(merged.values(), key=sort_fn, reverse=reverse)
         return {"authors": authors}
 
@@ -305,6 +329,47 @@ async def get_author(aid: int, include_cross_library: bool = False, slug: Option
              if l["slug"] == primary_slug),
             "ebook",
         )
+
+        # v2.17.0 Bug B — `global_stats` sums owned / missing / series
+        # across the primary library AND every cross_library entry,
+        # so the author-detail page header can render unified counts
+        # (rather than per-library counts that mislead the user when
+        # an audiobook-only author has Calibre-side ebook discoveries
+        # waiting). Frontend reads `a.global_stats` for the top-of-page
+        # tile; per-tab views keep showing their per-library numbers.
+        def _stats_for_author_block(block: dict[str, Any]) -> dict[str, int]:
+            sa = block.get("standalone_books") or []
+            ser = block.get("series") or []
+            sa_owned = sum(1 for b in sa if (b.get("owned") or 0) == 1)
+            sa_total = len(sa)
+            ser_owned = sum(int(s.get("owned_count") or 0) for s in ser)
+            ser_total = sum(
+                int(s.get("author_book_count") or s.get("book_count") or 0)
+                for s in ser
+            )
+            return {
+                "owned": sa_owned + ser_owned,
+                "total": sa_total + ser_total,
+                "series_names": {
+                    str(s.get("name") or "") for s in ser if s.get("name")
+                },
+            }
+        primary_stats = _stats_for_author_block(a)
+        global_owned = primary_stats["owned"]
+        global_total = primary_stats["total"]
+        all_series_names: set[str] = set(primary_stats["series_names"])
+        for slug_key, payload in cross.items():
+            other = payload.get("author") or {}
+            s = _stats_for_author_block(other)
+            global_owned += s["owned"]
+            global_total += s["total"]
+            all_series_names |= s["series_names"]
+        a["global_stats"] = {
+            "owned": global_owned,
+            "missing": max(0, global_total - global_owned),
+            "total": global_total,
+            "series_count": len(all_series_names),
+        }
     return a
 
 
@@ -737,6 +802,166 @@ async def clear_author_scan_data(data: dict = Body(...)):
     )
     return {"status": "ok", "authors_cleared": n_authors,
             "books_deleted": total_deleted, "libraries_touched": libs_touched}
+
+
+@router.post("/authors/bulk-hide-books")
+async def bulk_hide_authors_books(data: dict = Body(...)):
+    """v2.17.0 Feat C — cascade Hide across selected authors' books.
+
+    Authors don't have their own `hidden` column; "Hide" on the
+    Authors list means "hide every one of these authors' books"
+    (so the per-library tile vanishes from non-Hidden listings).
+    Reuses books-side semantics so it composes cleanly with the
+    existing single-book Hide and the bulk-hide-books endpoint.
+
+    Cross-library: like `clear-scan-data`, accepts `author_names`
+    as the portable identifier across libraries (per-library IDs
+    collide). Returns per-library counts so the frontend can
+    surface a "X books across Y libraries" toast.
+    """
+    author_names = data.get("author_names") or []
+    if not author_names:
+        return {"error": "No authors specified"}
+
+    total_hidden = 0
+    libs_touched = 0
+    for lib in state._discovered_libraries:
+        slug = lib.get("slug")
+        if not slug:
+            continue
+        db = await get_db(slug)
+        try:
+            ph = ",".join(["?" for _ in author_names])
+            name_rows = await (await db.execute(
+                f"SELECT id FROM authors WHERE name IN ({ph})",
+                list(author_names),
+            )).fetchall()
+            lib_ids = [r["id"] for r in name_rows]
+            if not lib_ids:
+                continue
+            id_ph = ",".join(["?" for _ in lib_ids])
+            # Affected series — we'll recompute authority after the
+            # hide so a now-empty per-author series doesn't keep
+            # claiming a shared author tag.
+            sid_rows = await (await db.execute(
+                f"SELECT DISTINCT series_id FROM books "
+                f"WHERE author_id IN ({id_ph}) "
+                f"AND series_id IS NOT NULL AND hidden = 0",
+                lib_ids,
+            )).fetchall()
+            affected_sids = [r["series_id"] for r in sid_rows]
+
+            cur = await db.execute(
+                f"UPDATE books SET hidden = 1 "
+                f"WHERE author_id IN ({id_ph}) AND hidden = 0",
+                lib_ids,
+            )
+            n = cur.rowcount or 0
+            await db.execute(
+                f"DELETE FROM book_series_suggestions "
+                f"WHERE book_id IN (SELECT id FROM books "
+                f"WHERE author_id IN ({id_ph}))",
+                lib_ids,
+            )
+            if affected_sids:
+                await _recompute_series_author(db, affected_sids)
+            await db.commit()
+            total_hidden += n
+            libs_touched += 1
+        finally:
+            await db.close()
+
+    logger.info(
+        f"bulk-hide-authors-books: {len(author_names)} authors → "
+        f"hid {total_hidden} books across {libs_touched} libraries"
+    )
+    return {
+        "status": "ok",
+        "authors": len(author_names),
+        "books_hidden": total_hidden,
+        "libraries_touched": libs_touched,
+    }
+
+
+@router.post("/authors/bulk-delete-books")
+async def bulk_delete_authors_books(data: dict = Body(...)):
+    """v2.17.0 Feat C — cascade Delete across selected authors'
+    UNOWNED books. Mirrors the books-side `bulk-delete` behavior of
+    silently skipping Calibre/ABS-synced rows.
+
+    Author rows themselves stay intact so the v2.12.1 dual-row
+    mirror pattern keeps working — if a hard "remove the author
+    record" verb is ever needed, it'll be a separate endpoint
+    with its own design.
+    """
+    author_names = data.get("author_names") or []
+    if not author_names:
+        return {"error": "No authors specified"}
+
+    total_deleted = 0
+    total_skipped = 0
+    libs_touched = 0
+    for lib in state._discovered_libraries:
+        slug = lib.get("slug")
+        if not slug:
+            continue
+        db = await get_db(slug)
+        try:
+            ph = ",".join(["?" for _ in author_names])
+            name_rows = await (await db.execute(
+                f"SELECT id FROM authors WHERE name IN ({ph})",
+                list(author_names),
+            )).fetchall()
+            lib_ids = [r["id"] for r in name_rows]
+            if not lib_ids:
+                continue
+            id_ph = ",".join(["?" for _ in lib_ids])
+            # Count what we'd skip (Calibre-synced + ABS-synced).
+            skipped_row = await (await db.execute(
+                f"SELECT COUNT(*) AS c FROM books "
+                f"WHERE author_id IN ({id_ph}) "
+                f"AND (calibre_id IS NOT NULL OR audiobookshelf_id IS NOT NULL)",
+                lib_ids,
+            )).fetchone()
+            n_skipped = (skipped_row["c"] if skipped_row else 0) or 0
+            # Capture series for post-delete authority recomputation.
+            sid_rows = await (await db.execute(
+                f"SELECT DISTINCT series_id FROM books "
+                f"WHERE author_id IN ({id_ph}) "
+                f"AND series_id IS NOT NULL "
+                f"AND calibre_id IS NULL AND audiobookshelf_id IS NULL",
+                lib_ids,
+            )).fetchall()
+            affected_sids = [r["series_id"] for r in sid_rows]
+
+            cur = await db.execute(
+                f"DELETE FROM books "
+                f"WHERE author_id IN ({id_ph}) "
+                f"AND calibre_id IS NULL AND audiobookshelf_id IS NULL",
+                lib_ids,
+            )
+            n_deleted = cur.rowcount or 0
+            if affected_sids:
+                await _recompute_series_author(db, affected_sids)
+            await db.commit()
+            total_deleted += n_deleted
+            total_skipped += n_skipped
+            libs_touched += 1
+        finally:
+            await db.close()
+
+    logger.info(
+        f"bulk-delete-authors-books: {len(author_names)} authors → "
+        f"deleted {total_deleted}, skipped {total_skipped} library-synced "
+        f"across {libs_touched} libraries"
+    )
+    return {
+        "status": "ok",
+        "authors": len(author_names),
+        "books_deleted": total_deleted,
+        "books_skipped": total_skipped,
+        "libraries_touched": libs_touched,
+    }
 
 
 async def _resolve_names_for_ids(

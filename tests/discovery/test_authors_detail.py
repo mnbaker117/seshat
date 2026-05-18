@@ -89,3 +89,242 @@ async def test_series_with_one_visible_book_still_appears(client):
     series = r.json()["series"]
     assert len(series) == 1
     assert series[0]["author_book_count"] == 1
+
+
+async def test_bulk_hide_authors_books_cascades_across_libraries(
+    tmp_path, monkeypatch,
+):
+    """v2.17.0 Feat C — `POST /authors/bulk-hide-books` accepts a
+    list of author names and hides every book they wrote across
+    every configured library. Books rows stay (hidden=1); the
+    author rows themselves are untouched so the v2.12.1 dual-row
+    mirror pattern isn't disturbed.
+    """
+    from app import config as app_config
+    from app import state
+    from app.discovery import database as disco_db
+    from app.discovery.database import get_db
+    from app.discovery.routers.authors import router
+
+    monkeypatch.setattr(app_config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(disco_db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "_discovered_libraries", [
+        {"slug": "calibre", "content_type": "ebook", "name": "Calibre"},
+        {"slug": "abs", "content_type": "audiobook", "name": "ABS"},
+    ])
+
+    for slug in ("calibre", "abs"):
+        disco_db.set_active_library(slug)
+        await disco_db.init_db(slug)
+
+    # Seed Hatton in both libraries — 3 ebooks in Calibre, 1 audiobook in ABS.
+    for slug, n_books in (("calibre", 3), ("abs", 1)):
+        disco_db.set_active_library(slug)
+        db = await get_db(slug)
+        try:
+            await db.execute(
+                "INSERT INTO authors (name, sort_name) VALUES ('R. A. Hatton', 'Hatton')"
+            )
+            for i in range(n_books):
+                await db.execute(
+                    "INSERT INTO books (title, author_id, owned, hidden) "
+                    "VALUES (?, 1, 0, 0)",
+                    (f"Book {i} ({slug})",),
+                )
+            await db.commit()
+        finally:
+            await db.close()
+
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as c:
+        r = await c.post(
+            "/api/discovery/authors/bulk-hide-books",
+            json={"author_names": ["R. A. Hatton"]},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    # 3 ebooks + 1 audiobook = 4 books hidden across 2 libs.
+    assert body["books_hidden"] == 4
+    assert body["libraries_touched"] == 2
+
+    # Confirm books are hidden and author rows still exist.
+    for slug in ("calibre", "abs"):
+        db = await get_db(slug)
+        try:
+            cur = await db.execute(
+                "SELECT COUNT(*) AS n FROM books WHERE hidden = 1"
+            )
+            row = await cur.fetchone()
+            assert (row["n"] or 0) >= 1
+            cur = await db.execute(
+                "SELECT COUNT(*) AS n FROM authors WHERE name = 'R. A. Hatton'"
+            )
+            row = await cur.fetchone()
+            assert row["n"] == 1, (
+                f"author row in {slug} must survive bulk-hide-books"
+            )
+        finally:
+            await db.close()
+
+    disco_db.set_active_library(None)
+
+
+async def test_bulk_delete_authors_books_skips_library_synced(
+    tmp_path, monkeypatch,
+):
+    """v2.17.0 Feat C — `POST /authors/bulk-delete-books` removes
+    unowned discovery rows but skips Calibre / Audiobookshelf-synced
+    books (those rows are upstream-managed). Returns per-library
+    counts so the toast can summarize the partial outcome.
+    """
+    from app import config as app_config
+    from app import state
+    from app.discovery import database as disco_db
+    from app.discovery.database import get_db
+    from app.discovery.routers.authors import router
+
+    monkeypatch.setattr(app_config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(disco_db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "_discovered_libraries", [
+        {"slug": "calibre", "content_type": "ebook", "name": "Calibre"},
+    ])
+
+    disco_db.set_active_library("calibre")
+    await disco_db.init_db("calibre")
+    db = await get_db("calibre")
+    try:
+        await db.execute(
+            "INSERT INTO authors (name, sort_name) VALUES ('Test Author', 'Test')"
+        )
+        # 2 unowned discovery rows (deletable).
+        await db.execute(
+            "INSERT INTO books (title, author_id, owned, hidden) "
+            "VALUES ('Unowned A', 1, 0, 0)"
+        )
+        await db.execute(
+            "INSERT INTO books (title, author_id, owned, hidden) "
+            "VALUES ('Unowned B', 1, 0, 0)"
+        )
+        # 1 Calibre-synced row (must be skipped).
+        await db.execute(
+            "INSERT INTO books (title, author_id, owned, hidden, calibre_id) "
+            "VALUES ('Calibre-synced', 1, 1, 0, 42)"
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as c:
+        r = await c.post(
+            "/api/discovery/authors/bulk-delete-books",
+            json={"author_names": ["Test Author"]},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["books_deleted"] == 2
+    assert body["books_skipped"] == 1
+
+    # Confirm the Calibre-synced row survived.
+    db = await get_db("calibre")
+    try:
+        cur = await db.execute(
+            "SELECT COUNT(*) AS n FROM books WHERE calibre_id IS NOT NULL"
+        )
+        row = await cur.fetchone()
+        assert row["n"] == 1
+    finally:
+        await db.close()
+
+    disco_db.set_active_library(None)
+
+
+async def test_global_stats_sums_primary_plus_cross_library(
+    tmp_path, monkeypatch,
+):
+    """v2.17.0 Bug B — when `include_cross_library=1` is passed, the
+    `global_stats` field on the response sums owned / total / series
+    across the primary library + every cross-library entry. Repro:
+    an audiobook-only author has 1 owned audiobook in ABS but 4
+    unowned ebooks in Calibre (post cross-format-scan). Per-library
+    counts would show "1 owned, 0 missing" on the ABS side; global
+    should show "1 owned, 4 missing".
+    """
+    from app import config as app_config
+    from app import state
+    from app.discovery import database as disco_db
+    from app.discovery.database import get_db
+    from app.discovery.routers.authors import router
+
+    monkeypatch.setattr(app_config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(disco_db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "_discovered_libraries", [
+        {"slug": "calibre", "content_type": "ebook", "name": "Calibre"},
+        {"slug": "abs", "content_type": "audiobook", "name": "Audiobookshelf"},
+    ])
+
+    # Seed both libraries' DBs with the same author (dual-row pattern).
+    for slug in ("calibre", "abs"):
+        disco_db.set_active_library(slug)
+        await disco_db.init_db(slug)
+
+    # Calibre side: author + 4 unowned ebooks in 1 series.
+    disco_db.set_active_library("calibre")
+    db = await get_db("calibre")
+    try:
+        await db.execute("INSERT INTO authors (id, name, sort_name) VALUES (10, 'V. E. Schwab', 'Schwab')")
+        await db.execute("INSERT INTO series (id, name, author_id) VALUES (1, 'Shades of Magic', 10)")
+        for i in range(4):
+            await db.execute(
+                "INSERT INTO books (title, author_id, series_id, owned, hidden) "
+                "VALUES (?, 10, 1, 0, 0)",
+                (f"Ebook {i+1}",),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+    # ABS side: same author (different per-library id) + 1 owned audiobook in a different series.
+    disco_db.set_active_library("abs")
+    db = await get_db("abs")
+    try:
+        await db.execute("INSERT INTO authors (id, name, sort_name) VALUES (266, 'V. E. Schwab', 'Schwab')")
+        await db.execute("INSERT INTO series (id, name, author_id) VALUES (1, 'Audio Stories', 266)")
+        await db.execute(
+            "INSERT INTO books (title, author_id, series_id, owned, hidden) "
+            "VALUES ('Audio 1', 266, 1, 1, 0)"
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    # Hit the endpoint with include_cross_library=1, primary=abs side.
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as c:
+        r = await c.get(
+            "/api/discovery/authors/266?include_cross_library=1&slug=abs"
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert "global_stats" in body
+    gs = body["global_stats"]
+    # 1 owned audiobook + 0 owned ebooks = 1
+    assert gs["owned"] == 1
+    # 4 unowned ebooks + 0 unowned audiobooks = 4 missing
+    assert gs["missing"] == 4
+    # 5 total books across both libraries
+    assert gs["total"] == 5
+    # 2 distinct series (Shades of Magic + Audio Stories)
+    assert gs["series_count"] == 2
+
+    disco_db.set_active_library(None)

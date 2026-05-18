@@ -1315,6 +1315,40 @@ async def bulk_hide(data: dict = Body(...), slug: str | None = Query(None)):
         await db.close()
 
 
+@router.post("/books/bulk-unhide")
+async def bulk_unhide(data: dict = Body(...), slug: str | None = Query(None)):
+    """v2.17.0 — bulk variant of `unhide`. Used by the Hidden page's
+    multi-select bar so users can flip a whole batch back to visible
+    in one click. Mirrors `bulk_hide` exactly except for the column
+    value, plus an `_recompute_series_author` pass since a previously-
+    hidden book joining the visible set can change who "owns" the
+    series (e.g. a co-author's only contribution un-hiding flips a
+    per-author series back to shared).
+    """
+    book_ids = data.get("book_ids", [])
+    if not book_ids:
+        return {"error": "No books specified"}
+    db = await get_db(slug)
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        sid_rows = await (await db.execute(
+            f"SELECT DISTINCT series_id FROM books "
+            f"WHERE id IN ({placeholders}) AND series_id IS NOT NULL",
+            book_ids,
+        )).fetchall()
+        affected_sids = [r["series_id"] for r in sid_rows]
+
+        await db.execute(
+            f"UPDATE books SET hidden=0 WHERE id IN ({placeholders})", book_ids,
+        )
+        if affected_sids:
+            await _recompute_series_author(db, affected_sids)
+        await db.commit()
+        return {"status": "ok", "count": len(book_ids)}
+    finally:
+        await db.close()
+
+
 @router.post("/books/bulk-dismiss")
 async def bulk_dismiss(data: dict = Body(...), slug: str | None = Query(None)):
     """See `hide` for slug-routing rationale."""

@@ -38,6 +38,15 @@ interface AuthorDetail extends Author {
   active_library_slug?: string;
   active_content_type?: string;
   cross_library?: Record<string, CrossLibraryEntry>;
+  // v2.17.0 Bug B — summed counts across primary + every
+  // cross_library entry. Set by the backend when
+  // include_cross_library=1 is passed.
+  global_stats?: {
+    owned: number;
+    missing: number;
+    total: number;
+    series_count: number;
+  };
 }
 
 interface CrossLibraryEntry {
@@ -811,16 +820,44 @@ export default function MobileAuthorDetailPage({
               flexWrap: "wrap",
             }}
           >
-            <span>
-              <strong style={{ color: t.text }}>{fmtNum(a.owned_count ?? 0)}</strong>
-              {" / "}
-              {fmtNum(a.total_books ?? 0)} owned
-            </span>
-            {(a.missing_count ?? 0) > 0 && (
-              <span style={{ color: t.red }}>
-                {fmtNum(a.missing_count ?? 0)} missing
-              </span>
-            )}
+            {(() => {
+              // v2.17.0 Bug B — `global_stats` sums across primary +
+              // every cross_library entry. Fall back to per-library
+              // computation when the field isn't present. (Pre-fix,
+              // mobile read a.owned_count from the authors table
+              // directly which has no such column, so the display
+              // was permanently 0/0 — separate bug also closed here.)
+              const gs = (a as AuthorDetail).global_stats;
+              const saOwned = (a.standalone_books || []).filter(
+                (b) => b.owned === 1,
+              ).length;
+              const saTotal = (a.standalone_books || []).length;
+              const serOwned = (a.series || []).reduce(
+                (n, s) => n + (s.owned_count || 0),
+                0,
+              );
+              const serTotal = (a.series || []).reduce(
+                (n, s) => n + (s.author_book_count ?? s.book_count ?? 0),
+                0,
+              );
+              const owned = gs ? gs.owned : saOwned + serOwned;
+              const total = gs ? gs.total : saTotal + serTotal;
+              const missing = gs ? gs.missing : Math.max(0, total - owned);
+              return (
+                <>
+                  <span>
+                    <strong style={{ color: t.text }}>{fmtNum(owned)}</strong>
+                    {" / "}
+                    {fmtNum(total)} owned
+                  </span>
+                  {missing > 0 && (
+                    <span style={{ color: t.red }}>
+                      {fmtNum(missing)} missing
+                    </span>
+                  )}
+                </>
+              );
+            })()}
             {(a.new_count ?? 0) > 0 && (
               <MobileBadge tone="accent">{a.new_count} new</MobileBadge>
             )}

@@ -51,6 +51,17 @@ interface AuthorDetail extends Author {
   active_library_slug?: string;
   active_content_type?: string;
   cross_library?: Record<string, CrossLibraryEntry>;
+  // v2.17.0 — owned / missing / total / series_count summed across
+  // primary + every cross_library entry. Backend only sets this when
+  // include_cross_library=1 is passed (i.e. on the author-detail
+  // page); single-library installs and other callers see undefined
+  // and the frontend falls back to per-library computation.
+  global_stats?: {
+    owned: number;
+    missing: number;
+    total: number;
+    series_count: number;
+  };
 }
 
 interface CrossLibraryEntry {
@@ -996,6 +1007,14 @@ function DesktopAuthorDetailPage({
   if (ld) return <Load />;
   if (!a) return <div style={{ color: t.tf }}>Not found</div>;
 
+  // v2.17.0 Bug B — when the backend ran the cross_library fan-out
+  // and computed `global_stats`, the top-of-page tile uses those
+  // (summed across every library this author has rows in). Without
+  // it, an audiobook-only author with fresh ebook discoveries on
+  // the Calibre side renders "1 owned, 0 missing" — the per-library
+  // counts that mislead users (UAT 2026-05-18). Fall back to the
+  // per-library computed values when global_stats isn't on the
+  // response (single-library installs, older cached responses).
   const saOwned = (a.standalone_books || []).filter(
     (b) => b.owned === 1,
   ).length;
@@ -1008,8 +1027,10 @@ function DesktopAuthorDetailPage({
     (n: number, s: Series) => n + (s.author_book_count ?? s.book_count ?? 0),
     0,
   );
-  const oc = saOwned + serOwned;
-  const total = saTotal + serTotal;
+  const gs = a.global_stats;
+  const oc = gs ? gs.owned : saOwned + serOwned;
+  const total = gs ? gs.total : saTotal + serTotal;
+  const globalSeriesCount = gs ? gs.series_count : (a.series || []).length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -1096,7 +1117,7 @@ function DesktopAuthorDetailPage({
               <span style={{ color: t.grnt }}>{oc} owned</span>
               <span style={{ color: t.ylwt }}>{total - oc} missing</span>
               <span style={{ color: t.purt }}>
-                {(a.series || []).length} series
+                {globalSeriesCount} series
               </span>
             </div>
             {/* Author-link chips inline with identity. The
