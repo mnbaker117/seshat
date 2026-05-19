@@ -28,6 +28,7 @@ from lxml import html
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.kobo")
 
@@ -159,7 +160,7 @@ class KoboSource(MetaSource):
             authors=[],  # Kobo search doesn't reliably surface author
             series=details.get("series_name"),
             series_index=details.get("series_index"),
-            description=details.get("description"),
+            description=description_to_plain_text(details.get("description")),
             isbn=details.get("isbn"),
             publisher=details.get("publisher"),
             pub_date=details.get("pub_date"),

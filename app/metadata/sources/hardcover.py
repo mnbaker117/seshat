@@ -17,6 +17,7 @@ import httpx
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.hardcover")
 
@@ -220,7 +221,7 @@ def _book_to_record(book: dict) -> MetaRecord:
         authors=authors,
         series=series_name,
         series_index=series_index,
-        description=book.get("description") or None,
+        description=description_to_plain_text(book.get("description")),
         isbn=str(isbn).replace("-", "") if isbn else None,
         pub_date=str(pub_date)[:10] if pub_date else None,
         page_count=int(pages) if pages else None,

@@ -422,9 +422,21 @@ async def re_enrich(review_id: int, body: SaveRequest) -> ReviewItem:
         # not — those tiers no-op cleanly.
         from app.metadata.author_lookup import get_goodreads_id_for_author
         author_goodreads_id = await get_goodreads_id_for_author(author)
+        # v2.17.3: thread any ISBN/ASIN the user has on the review
+        # row (file-embedded or hand-edited) into the resolver chain
+        # so Goodreads' T1/T2 identifier tiers can fire even when
+        # MAM's upload form was blank.
+        seed_isbn = str(
+            merged.get("isbn") or enriched_prior.get("isbn") or ""
+        ).strip()
+        seed_asin = str(
+            merged.get("asin") or enriched_prior.get("asin") or ""
+        ).strip()
         result = await enricher.enrich(
             title=title,
             author=author,
+            isbn=seed_isbn,
+            asin=seed_asin,
             mam_torrent_id=mam_torrent_id,
             mam_token=_get_mam_token(),
             audiobook=is_audiobook,

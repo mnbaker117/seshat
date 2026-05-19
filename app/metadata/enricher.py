@@ -260,6 +260,8 @@ class MetadataEnricher:
         *,
         title: str,
         author: str,
+        isbn: str = "",
+        asin: str = "",
         mam_torrent_id: str = "",
         mam_token: str = "",
         audiobook: bool = False,
@@ -293,6 +295,17 @@ class MetadataEnricher:
         walk). When omitted, those tiers no-op and Goodreads can only
         contribute via the identifier-based T1-T3. Callers (the
         pipeline) look this up from the seshat authors table.
+
+        `isbn` / `asin` (v2.17.3) seed the resolver's identifier tiers
+        when the .epub's file-embedded metadata carries an ISBN/ASIN
+        the MAM upload-form didn't populate. Before this, identifiers
+        could only enter the source chain via `merged.isbn` after a
+        prior source surfaced them — which meant a brand-new author
+        with an ISBN-bearing .epub but a no-ISBN MAM upload would
+        miss Goodreads T2 entirely. Per-source `current_isbn` /
+        `current_asin` below prefer what prior sources contributed
+        over the seed, so MAM's exact-ID lookup still wins when it
+        has the data.
 
         Returns None when every source returned None or errored.
         """
@@ -383,11 +396,13 @@ class MetadataEnricher:
                     continue
             # Pull whatever identifiers prior sources have populated on
             # the in-progress merged record so Goodreads' resolver
-            # tiers (T1-T5) can use them. Empty strings when nothing
-            # has populated yet (first source in the chain, or no
-            # source surfaced an isbn/asin so far).
-            current_isbn = (merged.isbn if merged else None) or ""
-            current_asin = (merged.asin if merged else None) or ""
+            # tiers (T1-T5) can use them. Falls back to the seed
+            # identifiers from the caller (.epub-embedded ISBN/ASIN
+            # that MAM's upload form didn't carry — see v2.17.3
+            # docstring note). Empty strings when neither path has a
+            # value yet.
+            current_isbn = (merged.isbn if merged else None) or isbn or ""
+            current_asin = (merged.asin if merged else None) or asin or ""
             result = await self._safe_search(
                 src, title=title, author=author, max_wait=remaining,
                 isbn=current_isbn, asin=current_asin,

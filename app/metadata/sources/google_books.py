@@ -22,6 +22,7 @@ from typing import Optional
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.google_books")
 
@@ -117,7 +118,7 @@ def _volume_to_record(item: dict) -> MetaRecord:
         authors=vi.get("authors", []),
         series=series_name,
         series_index=series_index,
-        description=_strip_html(vi.get("description") or ""),
+        description=description_to_plain_text(vi.get("description")),
         isbn=isbn,
         publisher=vi.get("publisher"),
         pub_date=vi.get("publishedDate"),
@@ -164,8 +165,3 @@ def _parse_series_from_title(title: str) -> tuple[Optional[str], Optional[float]
     return None, None
 
 
-def _strip_html(text: str) -> str:
-    """Strip HTML tags from Google Books descriptions."""
-    if not text:
-        return ""
-    return re.sub(r"<[^>]+>", "", text).strip()

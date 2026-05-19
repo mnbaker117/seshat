@@ -36,6 +36,7 @@ from typing import Any, Optional
 from app.metadata.record import MetaRecord
 from app.metadata.scoring import score_match
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 logger = logging.getLogger("seshat.metadata.openlibrary")
 
@@ -277,7 +278,7 @@ def _bibkeys_to_record(payload: dict, isbn: str) -> MetaRecord:
         authors=authors,
         series=series_name,
         series_index=series_idx,
-        description=description,
+        description=description_to_plain_text(description),
         isbn=isbn,
         publisher=publisher,
         pub_date=pub_date,

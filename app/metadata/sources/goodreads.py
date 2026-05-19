@@ -37,6 +37,7 @@ from bs4 import BeautifulSoup
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.goodreads")
 
@@ -320,7 +321,12 @@ def _merge_detail_page(record: MetaRecord, html: str) -> None:
     if og_desc and og_desc.get("content"):
         desc_candidates.append(_squeeze(og_desc["content"]))
     if desc_candidates:
-        record.description = max(desc_candidates, key=len)
+        # JSON-LD's `description` field is sometimes raw HTML
+        # (`<p>...<br>`) rather than plain text — normalize before
+        # storing so the review queue never surfaces the tags.
+        record.description = description_to_plain_text(
+            max(desc_candidates, key=len)
+        )
 
     # Series info: Goodreads uses `h3.Text__title3` with an anchor for
     # the series name. Shape: "Stormlight Archive #1".

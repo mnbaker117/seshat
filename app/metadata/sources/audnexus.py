@@ -37,6 +37,7 @@ from typing import Optional
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.audnexus")
 
@@ -168,7 +169,7 @@ def _item_to_record(item: dict, *, region: str = "us") -> MetaRecord:
         authors=authors,
         series=series_name,
         series_index=series_index,
-        description=item.get("summary") or None,
+        description=description_to_plain_text(item.get("summary")),
         isbn=item.get("isbn") or None,
         publisher=item.get("publisherName") or None,
         pub_date=pub_year,

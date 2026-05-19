@@ -25,6 +25,7 @@ from typing import Optional
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 from app.mam.torrent_info import TorrentInfo, TorrentInfoError, get_torrent_info
 
 _log = logging.getLogger("seshat.metadata.sources.mam_search")
@@ -92,8 +93,12 @@ def _info_to_record(info: TorrentInfo) -> MetaRecord:
                         pass
                 break
 
-    # Strip BBCode from the description for plain-text display.
-    description = _strip_bbcode(info.description) if info.description else None
+    # Normalize the synopsis to plain text. MAM uploads carry a mix
+    # of BBCode (legacy template), raw HTML (publisher marketing
+    # paste), and entities like &#8212; — the shared util handles
+    # all three in one pass so the review queue never surfaces raw
+    # markup to the user.
+    description = description_to_plain_text(info.description)
 
     # Tags from MAM carry genre + format info as a space-separated string.
     tags = [t.strip() for t in info.tags.split() if t.strip()] if info.tags else []
@@ -119,11 +124,3 @@ def _info_to_record(info: TorrentInfo) -> MetaRecord:
     )
 
 
-def _strip_bbcode(text: str) -> str:
-    """Rough BBCode → plain text. Good enough for review queue display."""
-    import re
-    text = re.sub(r'\[/?(?:b|i|u|s|size|color|url|img|quote|code|spoiler|list|\*)(?:=[^\]]*)?]', '', text)
-    text = re.sub(r'\[hr]', '\n', text)
-    text = re.sub(r'\r\n', '\n', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()

@@ -846,6 +846,17 @@ async def _prepare_group(
             enriched = await metadata_enricher.enrich(
                 title=metadata.title,
                 author=metadata.author,
+                # v2.17.3: thread the file-embedded ISBN/ASIN into
+                # the resolver chain. Without this seed, identifier-
+                # gated tiers (Goodreads T2 ISBN, T1 ASIN) only fire
+                # when a prior source populates merged.isbn/asin —
+                # which fails when the MAM upload form was left
+                # blank but the .epub itself has the ISBN. ASIN
+                # piggy-backs off `file_metadata` (m4b ASIN tags)
+                # since BookMetadata above doesn't currently carry
+                # it forward.
+                isbn=metadata.isbn or "",
+                asin=file_metadata.asin or "",
                 # Bundle children: don't pass mam_torrent_id (the
                 # bundle's torrent_id describes the bundle as a whole,
                 # not the child book). Also flip skip_mam=True so the

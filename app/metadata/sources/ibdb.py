@@ -17,6 +17,7 @@ from typing import Optional
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.ibdb")
 
@@ -153,7 +154,7 @@ def _item_to_record(item: dict) -> MetaRecord:
         authors=authors,
         series=series_name if isinstance(series_name, str) else None,
         series_index=series_index,
-        description=description,
+        description=description_to_plain_text(description),
         isbn=str(isbn).replace("-", "") if isbn else None,
         publisher=publisher,
         pub_date=str(pub_date)[:10] if pub_date else None,

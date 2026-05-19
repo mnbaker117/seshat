@@ -33,6 +33,7 @@ import requests
 
 from app.metadata.record import MetaRecord
 from app.metadata.sources.base import MetaSource
+from app.metadata.text_clean import description_to_plain_text
 
 _log = logging.getLogger("seshat.metadata.amazon")
 
@@ -375,7 +376,7 @@ def _parse_detail_page(html_text: str, asin: str) -> Optional[MetaRecord]:
         authors=[],
         series=series_name,
         series_index=series_index,
-        description=description,
+        description=description_to_plain_text(description),
         isbn=isbn,
         pub_date=pub_date,
         page_count=pages,
