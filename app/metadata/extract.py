@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.metadata.text_clean import description_to_plain_text
+
 _log = logging.getLogger("seshat.metadata")
 
 # OPF XML namespaces used by EPUB.
@@ -104,7 +106,14 @@ def _extract_epub(path: Path) -> BookMetadata:
         author = _dc_text(md, "creator")
         language = _dc_text(md, "language")
         publisher = _dc_text(md, "publisher")
-        description = _dc_text(md, "description")
+        # v2.17.4: publishers commonly paste HTML marketing copy into
+        # the .epub's dc:description (`<p>...<br>...&#8212;`). Clean
+        # at the boundary so the rest of the pipeline never sees the
+        # tags. Source-level sanitization in v2.17.3 only covers
+        # descriptions that flow through metadata sources — the
+        # file-embedded path bypassed it because pipeline.py prefers
+        # `metadata.description` (file) over `enriched.description`.
+        description = description_to_plain_text(_dc_text(md, "description")) or ""
         isbn = _find_isbn(md)
         series, series_index = _find_series(md)
 
@@ -222,11 +231,11 @@ def _extract_m4b(path: Path) -> BookMetadata:
         or _mp4_str(tags, "\xa9nrt")
         or _mp4_str(tags, "\xa9wrt")
     )
-    description = (
+    description = description_to_plain_text(
         _mp4_str(tags, "desc")
         or _mp4_str(tags, "\xa9cmt")
         or _mp4_freeform(tags, "comment")
-    )
+    ) or ""
     pub_year = _mp4_year(_mp4_str(tags, "\xa9day"))
     # ASIN is stored as freeform iTunes atom on Audible rips. Some
     # older tools stuff it in the comment field — fall back to
@@ -360,10 +369,10 @@ def _extract_mp3(path: Path) -> BookMetadata:
         _id3_txxx(tags, "NARRATOR")
         or _id3_str(tags, "TPE1") if _id3_str(tags, "TPE2") else ""
     ) or _id3_str(tags, "TCOM")
-    description = (
+    description = description_to_plain_text(
         _id3_comm(tags)
         or _id3_uslt(tags)
-    )
+    ) or ""
     pub_year = _mp4_year(_id3_str(tags, "TDRC") or _id3_str(tags, "TYER"))
     asin = _id3_txxx(tags, "ASIN") or _sniff_asin(_id3_comm(tags))
 

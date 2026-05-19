@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from app import state
 from app.database import get_db
 from app.mam.cookie import get_current_token as _get_mam_token
+from app.metadata.text_clean import description_to_plain_text
 from app.orchestrator.pipeline import deliver_reviewed
 from app.storage import grabs as grabs_storage
 from app.storage import review_queue as review_storage
@@ -295,6 +296,35 @@ async def approve(review_id: int, body: ApproveRequest) -> ReviewActionResponse:
         await db.close()
 
 
+def _resolve_reenrich_description(
+    *, current: Any, enriched: Optional[str]
+) -> Optional[str]:
+    """Pick the description to store on a re-enriched review row.
+
+    Three outcomes, in order:
+      - Enriched wins when it's longer than the cleaned current
+        text. Matches the existing longest-wins promotion policy.
+      - Cleaned-current wins when the stored description has
+        markup (BBCode / HTML / entities) — review rows captured
+        before v2.17.3 carry raw publisher HTML and re-enrich
+        should migrate them to plain text even when the new
+        enriched text is shorter.
+      - None when neither path needs to mutate the row (the stored
+        description is already clean and enriched isn't longer).
+
+    Returning None from a re-enrich handler lets the caller skip
+    the write entirely instead of round-tripping the same string.
+    """
+    raw_current = str(current or "")
+    cleaned_current = description_to_plain_text(raw_current) or ""
+    enriched_desc = (enriched or "").strip()
+    if enriched_desc and len(enriched_desc) > len(cleaned_current):
+        return enriched_desc
+    if cleaned_current and cleaned_current != raw_current:
+        return cleaned_current
+    return None
+
+
 async def _merge_metadata(
     existing: dict[str, Any], edits: dict[str, Any]
 ) -> tuple[dict[str, Any], Optional[str]]:
@@ -470,10 +500,13 @@ async def re_enrich(review_id: int, body: SaveRequest) -> ReviewItem:
         # back-of-book text. Only description gets this treatment —
         # title / authors / isbn / etc. stay where the user left
         # them so custom edits survive re-enrich.
-        enriched_desc = result.description or ""
-        current_desc = str(merged.get("description") or "")
-        if enriched_desc and len(enriched_desc) > len(current_desc):
-            merged["description"] = enriched_desc
+        #
+        promoted = _resolve_reenrich_description(
+            current=merged.get("description"),
+            enriched=result.description,
+        )
+        if promoted is not None:
+            merged["description"] = promoted
 
         # Download the fresh cover into the review staging dir so the
         # UI can show it without re-running the whole staging pass.

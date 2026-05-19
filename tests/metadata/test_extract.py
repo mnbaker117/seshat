@@ -127,6 +127,59 @@ class TestExtractEpub:
         assert meta.title == ""
         assert meta.author == ""
 
+    def test_description_html_stripped_at_extract_boundary(self, tmp_path):
+        """v2.17.4: HTML in dc:description must be cleaned before
+        the pipeline ever sees it.
+
+        Publishers commonly paste marketing copy with `<p>/<br>/<b>`
+        and entities (`&#8212;`) into the .epub OPF description.
+        pipeline.py prefers file_metadata.description over enricher
+        output, so without cleaning here the review queue renders
+        the raw HTML.
+        """
+        dirty = (
+            "<p><b>In a city of ancient automata</b>, a cleric of "
+            "death finds his own life on the line&#8212;though no "
+            "one thanks him.<br>This is the synopsis.</p>"
+        )
+        # _make_epub doesn't accept a description kwarg, so we patch
+        # the OPF post-creation to inject one.
+        epub = _make_epub(tmp_path)
+        with zipfile.ZipFile(str(epub), "r") as zf:
+            opf_bytes = zf.read("content.opf")
+        # Cheap inline patch — re-create the zip with a dc:description.
+        opf_str = opf_bytes.decode("utf-8")
+        injected = opf_str.replace(
+            "</metadata>",
+            f'<dc:description>{dirty}</dc:description></metadata>',
+        )
+        # Need to escape the HTML inside the XML node — use CDATA so the
+        # XML parser passes the raw markup through unchanged.
+        injected = opf_str.replace(
+            "</metadata>",
+            f"<dc:description><![CDATA[{dirty}]]></dc:description></metadata>",
+        )
+        epub.unlink()
+        with zipfile.ZipFile(str(epub), "w") as zf:
+            zf.writestr("META-INF/container.xml", _container_xml())
+            zf.writestr("content.opf", injected)
+
+        meta = extract(epub)
+        assert "<" not in meta.description
+        assert ">" not in meta.description
+        assert "&#8212;" not in meta.description
+        assert "—" in meta.description
+        assert "In a city of ancient automata" in meta.description
+
+
+def _container_xml() -> str:
+    return (
+        '<?xml version="1.0"?>'
+        '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">'
+        '<rootfiles><rootfile full-path="content.opf" '
+        'media-type="application/oebps-package+xml"/></rootfiles></container>'
+    )
+
 
 class TestExtractM4b:
     def test_reads_m4b_metadata(self, tmp_path):
