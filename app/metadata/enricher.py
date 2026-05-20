@@ -638,13 +638,15 @@ def _merge_records(
     earlier high-priority sources are usually authoritative for
     identifiers (title/authors/ISBN/etc).
 
-    Description is different: the first source to supply one is
-    often a truncated preview (MAM's ~150-char torrent-page excerpt,
-    Amazon's product-card blurb) while later sources (Goodreads,
-    Hardcover) typically carry the full back-of-book text. First-
-    non-empty would lock out the richer content; longest-wins lets
-    it replace the preview. Caught by Tier 1 UAT where MAM's
-    56-char description locked out Goodreads' full text.
+    Description is different: source quality varies per book, and
+    any source can hand us a truncated preview (Amazon's product-
+    card blurb, og:description teasers) while others carry the full
+    back-of-book text. First-non-empty would lock out the richer
+    content; longest-wins lets it replace the preview. Per v2.18.2,
+    MAM's API now returns the uploader's full synopsis (previously
+    omitted entirely because the `description` opt-in flag was
+    missing), making it commonly the longest non-empty contributor
+    and the de-facto first authoritative source for the merge.
 
     Confidence takes the max so the threshold gate above can decide
     when to stop.

@@ -155,6 +155,47 @@ class TestMergeDetailPage:
         _merge_detail_page(record, html)
         assert record.description == long_body
 
+    def test_goodreads_boilerplate_is_rejected(self):
+        """v2.18.2: when the only description on the page is Goodreads'
+        site-wide tagline (served as og:description for unreleased/stub
+        book pages), reject it instead of storing it.
+
+        Triggered by Spirit Blade (tid=1243620, unreleased) where the
+        47-char tagline beat a missing-because-unfetched MAM description
+        in `_pick_longer`. The fix at the source layer prevents the
+        boilerplate from ever entering the merge.
+        """
+        html = """
+        <html><head>
+        <meta property="og:description"
+              content="Discover and share books you love on Goodreads." />
+        </head><body></body></html>
+        """
+        record = MetaRecord(title="Spirit Blade", source="goodreads")
+        _merge_detail_page(record, html)
+        assert record.description in (None, "")
+
+    def test_real_description_still_wins_over_boilerplate(self):
+        """Boilerplate-rejection only fires when boilerplate is the chosen
+        candidate. A real long description on the same page must still
+        be selected normally."""
+        long_body = (
+            "Aaron Conner lives a quiet life. He waits tables at a "
+            "local restaurant and helps keep the apartment building "
+            "he lives in maintained."
+        )
+        html = f"""
+        <html><head>
+        <meta property="og:description"
+              content="Discover and share books you love on Goodreads." />
+        </head><body>
+        <span itemprop="description">{long_body}</span>
+        </body></html>
+        """
+        record = MetaRecord(title="Spirit Blade", source="goodreads")
+        _merge_detail_page(record, html)
+        assert record.description == long_body
+
     def test_longest_description_wins_even_if_preexisting(self):
         """Tier 1 UAT context: per-source parsers should extract the
         best description from THEIR page and let the enricher's

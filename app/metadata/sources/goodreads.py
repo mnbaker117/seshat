@@ -56,6 +56,17 @@ _DEFAULT_HEADERS = {
 }
 
 
+# Known boilerplate strings Goodreads sometimes serves as og:description
+# when a book page is a stub (e.g. unreleased title, metadata not yet
+# populated). These pass any length-based filter but carry no book
+# information — caught on Spirit Blade (tid=1243620, pre-release) where
+# the 47-char site tagline beat MAM's missing-because-unfetched
+# description. Extend this set when new placeholder strings appear.
+_GOODREADS_BOILERPLATE = frozenset({
+    "Discover and share books you love on Goodreads.",
+})
+
+
 def _is_cloudflare_soft_block(resp) -> bool:
     """Detect Goodreads' Cloudflare 202-with-empty-body interstitial.
 
@@ -324,9 +335,14 @@ def _merge_detail_page(record: MetaRecord, html: str) -> None:
         # JSON-LD's `description` field is sometimes raw HTML
         # (`<p>...<br>`) rather than plain text — normalize before
         # storing so the review queue never surfaces the tags.
-        record.description = description_to_plain_text(
+        chosen = description_to_plain_text(
             max(desc_candidates, key=len)
         )
+        # Reject known stub-page boilerplate before it pollutes the
+        # merge. Leaving record.description as None lets other
+        # sources (MAM, Hardcover, etc.) supply real content.
+        if chosen and chosen not in _GOODREADS_BOILERPLATE:
+            record.description = chosen
 
     # Series info: Goodreads uses `h3.Text__title3` with an anchor for
     # the series name. Shape: "Stormlight Archive #1".

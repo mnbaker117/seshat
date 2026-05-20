@@ -91,6 +91,18 @@ class TestGetTorrentInfoSuccess:
         assert info.free is True
         assert info.fl_vip is True
 
+    async def test_parses_description_when_present(self, fake_mam):
+        """v2.18.2: when MAM returns the opt-in `description` field,
+        TorrentInfo preserves it verbatim. Plain-text normalization
+        happens at the metadata-source layer (mam_search.py), not
+        here — torrent_info stores raw HTML/BBCode as-is.
+        """
+        fake_mam.search.body = _make_search_response({
+            "description": '<p style="margin:0">Long synopsis here.</p>',
+        })
+        info = await get_torrent_info("965093", token="tok")
+        assert info.description == '<p style="margin:0">Long synopsis here.</p>'
+
     async def test_parses_personal_freeleech(self, fake_mam):
         fake_mam.search.body = _make_search_response({
             "personal_freeleech": "1",
@@ -105,6 +117,26 @@ class TestGetTorrentInfoSuccess:
             "loadSearchJSONbasic.php" in str(req.url)
             for req in fake_mam.requests
         )
+
+    async def test_payload_opts_into_isbn_and_description(self, fake_mam):
+        """v2.18.2: payload must set both `isbn: true` and `description: true`.
+
+        MAM's loadSearchJSONbasic.php omits these fields from the
+        response by default. Probed v2.18.2: these are the only two
+        real opt-in flags on the endpoint; both must be present or
+        the enricher loses the uploader's full synopsis (which then
+        lets Goodreads boilerplate win the longest-wins merge).
+        """
+        fake_mam.search.body = _make_search_response()
+        await get_torrent_info("965093", token="tok")
+        search_reqs = [
+            r for r in fake_mam.requests
+            if "loadSearchJSONbasic.php" in str(r.url)
+        ]
+        assert len(search_reqs) == 1
+        body = json.loads(search_reqs[0].content)
+        assert body.get("isbn") is True, "isbn opt-in flag missing"
+        assert body.get("description") is True, "description opt-in flag missing"
 
 
 # ─── Caching ────────────────────────────────────────────────

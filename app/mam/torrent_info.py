@@ -111,11 +111,24 @@ async def get_torrent_info(
 
     _log.info("Fetching MAM torrent info for tid=%s", torrent_id)
 
-    # v2.13.2: `isbn: True` at the payload root tells MAM to include
-    # the optional ISBN/ASIN field in the response. Confirmed via
-    # probe — without this flag, the field key is omitted entirely;
-    # with it, MAM returns either an empty value or the uploader's
-    # entry (e.g. "9798902092261" or "ASIN:B0H1XKSFHQ").
+    # MAM's loadSearchJSONbasic.php uses payload-root flags to opt
+    # into optional fields. Probed in v2.18.2: only `isbn` and
+    # `description` are real opt-ins — every other plausible flag
+    # name (cover, poster, nfo, comments, pubdate, goodreads, etc.)
+    # is silently ignored. Without these flags the keys are omitted
+    # from the response entirely.
+    #
+    # `isbn: True` (v2.13.2) — returns the uploader's optional
+    # ISBN/ASIN field. Empty string when not filled. ASINs are
+    # prefixed "ASIN:" per the upload form's help text.
+    #
+    # `description: True` (v2.18.2) — returns the full uploader-
+    # written synopsis as HTML. Normalized to plain text downstream
+    # by description_to_plain_text. Without this flag MAM returns
+    # NO description at all (the key is absent), which let a
+    # Goodreads boilerplate string ("Discover and share books you
+    # love on Goodreads.") win the longest-wins merge on Spirit
+    # Blade (tid=1243620).
     payload = json.dumps({
         "tor": {
             "id": torrent_id,
@@ -127,6 +140,7 @@ async def get_torrent_info(
         },
         "perpage": 1,
         "isbn": True,
+        "description": True,
     })
 
     try:
