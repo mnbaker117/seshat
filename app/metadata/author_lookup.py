@@ -49,6 +49,7 @@ async def get_goodreads_id_for_author(name: str) -> str:
         from app import state
         from app.discovery.database import get_db as get_library_db
         from app.filter.gate import split_authors
+        from app.metadata.author_names import normalize_author_name
     except Exception:
         return ""
 
@@ -61,8 +62,14 @@ async def get_goodreads_id_for_author(name: str) -> str:
         return ""
 
     for individual_name in individual_names:
-        target = individual_name.strip()
-        if not target:
+        # Match on `authors.normalized_name`, not `name`. MAM announces
+        # often drop punctuation ("St Arkham") while Calibre keeps it
+        # ("St. Arkham"); a strict `WHERE name = ?` misses the row and
+        # the enricher proceeds without an author_goodreads_id anchor,
+        # collapsing GoodreadsSource's T4/T5 tiers to no_result on
+        # obscure books with no ISBN/ASIN.
+        norm_target = normalize_author_name(individual_name)
+        if not norm_target:
             continue
         for lib in libraries:
             slug = (lib or {}).get("slug")
@@ -74,15 +81,15 @@ async def get_goodreads_id_for_author(name: str) -> str:
                 continue
             try:
                 row = await (await db.execute(
-                    "SELECT goodreads_id FROM authors WHERE name = ?",
-                    (target,),
+                    "SELECT goodreads_id FROM authors WHERE normalized_name = ?",
+                    (norm_target,),
                 )).fetchone()
                 if row and row[0]:
                     return str(row[0])
             except Exception as e:
                 _log.debug(
                     "author_lookup: %s author lookup failed for %r: %s",
-                    slug, target, e,
+                    slug, individual_name, e,
                 )
             finally:
                 try:
