@@ -441,14 +441,20 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
     : wideMode
     ? {
         display: "grid",
-        gridTemplateColumns: "1fr 1fr 380px",
+        // minmax(0, 1fr) instead of 1fr — `1fr` is `minmax(auto, 1fr)`,
+        // and `auto` defers to the track's min-content. A single long
+        // unbreakable title in the middle column (e.g. a 130-char MAM
+        // torrent name) then pushes the track past its proportional
+        // share and squeezes the left column. minmax(0, ...) forces
+        // the track to honor the 1fr share regardless of inner content.
+        gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) 380px",
         gridTemplateAreas: `"left middle stats" "actions actions stats"`,
         gap: 10,
         alignItems: "start",
       }
     : {
         display: "grid",
-        gridTemplateColumns: "1fr 1fr",
+        gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
         gridTemplateAreas: `"left middle" "actions actions" "stats stats"`,
         gap: 10,
         alignItems: "start",
@@ -940,11 +946,15 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
                 <span
                   style={{
                     color: t.text2,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
                     flex: 1,
                     minWidth: 0,
+                    // Wrap long MAM torrent names instead of clipping
+                    // with ellipsis — readability > row height, and the
+                    // Recent Activity list is short (max 5 rows).
+                    // `break-word` handles the rare unbreakable token
+                    // (URL, long hash) without forcing the column out.
+                    overflowWrap: "break-word",
+                    wordBreak: "break-word",
                   }}
                 >
                   {g.torrent_name}
@@ -1013,11 +1023,14 @@ function DesktopUnifiedDashboard({ onNav }: Props) {
                     <span
                       style={{
                         flex: 1,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
                         color: t.text2,
                         minWidth: 0,
+                        // Wrap rather than ellipsize — see Recent
+                        // Activity above. The seeding list is inside
+                        // a maxHeight:180 scroll container so taller
+                        // rows just consume more scroll, not page space.
+                        overflowWrap: "break-word",
+                        wordBreak: "break-word",
                       }}
                     >
                       {e.torrent_name}
