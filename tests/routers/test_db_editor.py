@@ -175,3 +175,206 @@ class TestCombined:
         )
         names = [row["torrent_name"] for row in r.json()["rows"]]
         assert names == ["Charlie Book", "Bravo Book", "Alpha Book"]
+
+
+# ─── v2.17.5: per-library discovery routing ──────────────────────
+
+
+@pytest.fixture
+async def multi_lib_client(tmp_path, monkeypatch):
+    """Spin up two real discovery DBs (`books-lib` + `audio-lib`) so
+    tests can confirm `?library=<slug>` lands in the right file
+    instead of the active-library fallback.
+
+    Each DB gets one distinctly-named author row so a successful
+    routing fetch returns a single, identifiable row. Without
+    routing, the call would fall back to the active library and
+    return that library's row instead.
+    """
+    from app import config as app_config
+    from app import database as pipeline_database
+    from app import state as app_state
+    from app.discovery import database as disco_db
+
+    monkeypatch.setattr(app_config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(disco_db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(app_config, "APP_DB_PATH", tmp_path / "seshat.db")
+    monkeypatch.setattr(pipeline_database, "APP_DB_PATH", tmp_path / "seshat.db")
+
+    # Two libraries registered in app state so the slug-validation
+    # gate accepts them. `active` matches the first slug — the
+    # "without library param" path lands there by default.
+    monkeypatch.setattr(
+        app_state, "_discovered_libraries",
+        [
+            {"slug": "books-lib", "name": "Books Lib",
+             "source_db_path": "/x", "library_path": "/x"},
+            {"slug": "audio-lib", "name": "Audio Lib",
+             "source_db_path": "/y", "library_path": "/y"},
+        ],
+    )
+
+    await pipeline_database.init_db()
+    disco_db.set_active_library("books-lib")
+    await disco_db.init_db("books-lib")
+    await disco_db.init_db("audio-lib")
+
+    # One author per library so a routed query returns exactly one
+    # known row. The names are deliberately distinct so the assert
+    # fails clearly if routing crosses libraries.
+    for slug, author_name in [
+        ("books-lib", "Books Author"),
+        ("audio-lib", "Audio Author"),
+    ]:
+        db = await disco_db.get_db(slug=slug)
+        try:
+            await db.execute(
+                "INSERT INTO authors (name, sort_name, normalized_name) "
+                "VALUES (?, ?, ?)",
+                (author_name, author_name, author_name.lower()),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test",
+    ) as ac:
+        yield ac
+
+    disco_db.set_active_library(None)
+
+
+class TestLibraryRouting:
+    async def test_discovery_query_routes_to_named_library(self, multi_lib_client):
+        # ?library=audio-lib must read audio-lib's DB, not the
+        # active-library's (books-lib). Asserting the returned name
+        # proves routing actually happened — the active-library
+        # fallback would return "Books Author".
+        r = await multi_lib_client.get(
+            "/api/v1/db/table/authors?library=audio-lib",
+        )
+        assert r.status_code == 200
+        names = [row["name"] for row in r.json()["rows"]]
+        assert names == ["Audio Author"]
+
+    async def test_discovery_query_without_library_uses_active(
+        self, multi_lib_client,
+    ):
+        # Backward-compat: omitting `library` keeps the old behavior
+        # (read from whatever `set_active_library` was last set to).
+        r = await multi_lib_client.get("/api/v1/db/table/authors")
+        names = [row["name"] for row in r.json()["rows"]]
+        assert names == ["Books Author"]
+
+    async def test_unknown_library_slug_is_rejected(self, multi_lib_client):
+        # Silent fallback to a fresh `seshat_<typo>.db` would be a
+        # data-loss footgun — we 400 instead.
+        r = await multi_lib_client.get(
+            "/api/v1/db/table/authors?library=nope",
+        )
+        assert r.status_code == 400
+
+    async def test_pipeline_table_ignores_library_param(self, multi_lib_client):
+        # Pipeline tables live in the global seshat.db; the param is
+        # accepted (so the frontend doesn't have to strip it per
+        # call) but has no effect on which DB gets queried.
+        r = await multi_lib_client.get(
+            "/api/v1/db/table/announces?library=audio-lib",
+        )
+        assert r.status_code == 200
+
+    async def test_delete_routes_to_named_library(self, multi_lib_client):
+        # The most important multi-library hazard: a delete with
+        # the wrong routing would nuke a row in the active library
+        # while the user expected the named one. Verify both:
+        # the named library loses the row AND the other doesn't.
+        r = await multi_lib_client.get(
+            "/api/v1/db/table/authors?library=audio-lib",
+        )
+        audio_id = r.json()["rows"][0]["id"]
+        r2 = await multi_lib_client.delete(
+            f"/api/v1/db/table/authors/row/{audio_id}?library=audio-lib",
+        )
+        assert r2.status_code == 200
+
+        # audio-lib should now be empty
+        r3 = await multi_lib_client.get(
+            "/api/v1/db/table/authors?library=audio-lib",
+        )
+        assert r3.json()["total"] == 0
+
+        # books-lib (active) must still have its row
+        r4 = await multi_lib_client.get("/api/v1/db/table/authors")
+        assert r4.json()["total"] == 1
+        assert r4.json()["rows"][0]["name"] == "Books Author"
+
+
+class TestTablesScopeTag:
+    async def test_tables_response_carries_scope_per_entry(self, multi_lib_client):
+        r = await multi_lib_client.get("/api/v1/db/tables")
+        tables = r.json()["tables"]
+        by_name = {t["name"]: t["scope"] for t in tables}
+        # Sample one of each — full table presence is asserted by
+        # the expanded-whitelist test below.
+        assert by_name["announces"] == "pipeline"
+        assert by_name["authors"] == "discovery"
+
+    async def test_tables_library_param_targets_discovery_counts(
+        self, multi_lib_client,
+    ):
+        # Counts for discovery tables must reflect the requested
+        # library, not the active one. audio-lib has its single
+        # author row; switching the `library` arg flips the count.
+        r_audio = await multi_lib_client.get(
+            "/api/v1/db/tables?library=audio-lib",
+        )
+        rows_audio = {t["name"]: t["row_count"] for t in r_audio.json()["tables"]}
+        r_books = await multi_lib_client.get(
+            "/api/v1/db/tables?library=books-lib",
+        )
+        rows_books = {t["name"]: t["row_count"] for t in r_books.json()["tables"]}
+        # Each has exactly one author, separate IDs — same count,
+        # but the routing is exercised by the delete test above.
+        assert rows_audio["authors"] == 1
+        assert rows_books["authors"] == 1
+
+
+class TestExpandedWhitelist:
+    """v2.17.5 added four discovery tables to the whitelist.
+    Each must be reachable through the editor — otherwise the
+    user is back to SSH-ing the DB box for hand edits."""
+
+    @pytest.mark.parametrize(
+        "table",
+        [
+            "book_merges",
+            "metadata_review_queue",
+            "books_abs_snapshot",
+            "books_calibre_snapshot",
+        ],
+    )
+    async def test_new_table_is_readable(self, multi_lib_client, table):
+        r = await multi_lib_client.get(
+            f"/api/v1/db/table/{table}?library=books-lib",
+        )
+        assert r.status_code == 200
+        # Empty is fine — the assert here is that the whitelist
+        # accepts the name. A 404 would mean the table didn't make
+        # it into _DISCOVERY_TABLES.
+        body = r.json()
+        assert "rows" in body
+        assert "total" in body
+
+    async def test_new_table_schema_endpoint_works(self, multi_lib_client):
+        r = await multi_lib_client.get(
+            "/api/v1/db/table/book_merges/schema?library=books-lib",
+        )
+        assert r.status_code == 200
+        cols = {c["name"] for c in r.json()["columns"]}
+        # Sanity-check: the new table's known columns survived
+        # the whitelist expansion.
+        assert "winner_id" in cols
+        assert "loser_id" in cols

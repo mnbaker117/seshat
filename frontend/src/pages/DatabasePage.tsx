@@ -21,10 +21,25 @@ import MobileDatabasePage from "./MobileDatabasePage";
 interface TableEntry {
   name: string;
   row_count: number;
+  // v2.17.5: "pipeline" = global seshat.db; "discovery" =
+  // per-library seshat_<slug>.db. The library picker filters/
+  // groups by this field instead of the old hardcoded name list.
+  scope: "pipeline" | "discovery";
 }
 
 interface TablesResponse {
   tables: TableEntry[];
+}
+
+interface LibraryEntry {
+  slug: string;
+  name: string;
+  display_name?: string;
+  active: boolean;
+}
+
+interface LibrariesResponse {
+  libraries: LibraryEntry[];
 }
 
 interface RowsResponse {
@@ -93,6 +108,13 @@ function DesktopDatabasePage() {
   const t = useTheme();
   const [tables, setTables] = useState<TableEntry[] | null>(null);
   const [selected, setSelected] = useState<string>("");
+  // v2.17.5 — library picker. `libraries` is the list of discovery
+  // libraries (calibre-library, abs-audio-library, etc.). `library`
+  // is the currently-selected discovery slug; "" means "pipeline
+  // tables only" (the global DB). Defaults to the active library
+  // on first load so the page lands where the user expects.
+  const [libraries, setLibraries] = useState<LibraryEntry[]>([]);
+  const [library, setLibrary] = useState<string>("");
   const [schema, setSchema] = useState<SchemaResponse | null>(null);
   const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -127,25 +149,52 @@ function DesktopDatabasePage() {
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
   const [colMenuOpen, setColMenuOpen] = useState(false);
 
+  // Fetch the discovery library list once on mount + default the
+  // picker to the active library. Tables are re-fetched whenever
+  // the library changes so the row counts reflect the chosen DB.
   useEffect(() => {
-    api.get<TablesResponse>("/v1/db/tables")
+    api.get<LibrariesResponse>("/discovery/libraries")
+      .then((r) => {
+        setLibraries(r.libraries || []);
+        const active = (r.libraries || []).find((l) => l.active);
+        if (active) setLibrary(active.slug);
+      })
+      .catch(() => { /* picker stays empty; pipeline tables still work */ });
+  }, []);
+
+  useEffect(() => {
+    const qs = library ? `?library=${encodeURIComponent(library)}` : "";
+    api.get<TablesResponse>(`/v1/db/tables${qs}`)
       .then((r) => {
         setTables(r.tables);
         const firstNonEmpty = r.tables.find((x) => x.row_count > 0);
         setSelected(firstNonEmpty?.name || (r.tables[0]?.name ?? ""));
       })
       .catch((e) => setError(String(e)));
-  }, []);
+  }, [library]);
+
+  // Helper — append `?library=<slug>` only when the current table
+  // is a discovery table. Pipeline tables ignore the param but it's
+  // also semantically clearer to omit it for them.
+  function libParam(tableName: string, leadChar: "?" | "&"): string {
+    if (!library) return "";
+    const entry = (tables || []).find((x) => x.name === tableName);
+    if (entry?.scope !== "discovery") return "";
+    return `${leadChar}library=${encodeURIComponent(library)}`;
+  }
 
   // Fetch schema whenever the selected table changes. The PK column drives
   // which cells are editable (and which identifies a row for updates).
   useEffect(() => {
     if (!selected) return;
     setSchema(null);
-    api.get<SchemaResponse>(`/v1/db/table/${selected}/schema`)
+    api.get<SchemaResponse>(`/v1/db/table/${selected}/schema${libParam(selected, "?")}`)
       .then(setSchema)
       .catch((e) => setError(String(e)));
-  }, [selected]);
+    // libParam reads `tables` + `library` from closure; the deps below
+    // capture both via `library` (tables only changes when library does).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, library]);
 
   // Debounce: 300ms after the user stops typing, mirror `search` →
   // `debouncedSearch`. Empty strings flush immediately so the user
@@ -168,6 +217,8 @@ function DesktopDatabasePage() {
       params.set("sort", sort);
       params.set("sort_dir", sortDir);
     }
+    const entry = (tables || []).find((x) => x.name === selected);
+    if (library && entry?.scope === "discovery") params.set("library", library);
     api.get<RowsResponse>(`/v1/db/table/${selected}?${params}`)
       .then((r) => {
         setRows(r.rows);
@@ -176,7 +227,8 @@ function DesktopDatabasePage() {
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [selected, page, debouncedSearch, sort, sortDir]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, page, debouncedSearch, sort, sortDir, library]);
 
   // Clear pending edits on table switch or search/page/sort change — saving
   // across a different view would be surprising.
@@ -304,7 +356,7 @@ function DesktopDatabasePage() {
     setError(null);
     try {
       const r = await api.post<UpdateResponse>(
-        `/v1/db/table/${selected}/update`,
+        `/v1/db/table/${selected}/update${libParam(selected, "?")}`,
         { edits },
       );
       if (r.status !== "ok") {
@@ -327,6 +379,8 @@ function DesktopDatabasePage() {
         params.set("sort", sort);
         params.set("sort_dir", sortDir);
       }
+      const entry = (tables || []).find((x) => x.name === selected);
+      if (library && entry?.scope === "discovery") params.set("library", library);
       const fresh = await api.get<RowsResponse>(
         `/v1/db/table/${selected}?${params}`,
       );
@@ -346,7 +400,7 @@ function DesktopDatabasePage() {
     setDeleting(rk);
     setError(null);
     try {
-      await api.del(`/v1/db/table/${selected}/row/${encodeURIComponent(rk)}`);
+      await api.del(`/v1/db/table/${selected}/row/${encodeURIComponent(rk)}${libParam(selected, "?")}`);
       setRows((prev) => (prev || []).filter((r) => rowKey(r) !== rk));
       setTotal((v) => Math.max(0, v - 1));
       setEdits((prev) => {
@@ -363,8 +417,34 @@ function DesktopDatabasePage() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-        <h1 style={{ fontSize: 24, fontWeight: 700, color: t.text }}>Database</h1>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: t.text, margin: 0 }}>Database</h1>
+          {/* Library picker: switches the discovery-side tables to a
+              different per-library DB. Pipeline-table calls always
+              hit the global seshat.db regardless of selection. */}
+          {libraries.length > 0 && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: t.text2 }}>
+              <span style={{ color: t.textDim }}>Library</span>
+              <select
+                value={library}
+                onChange={(e) => { setLibrary(e.target.value); setPage(1); setSearch(""); }}
+                style={{
+                  background: t.bg2, color: t.text,
+                  border: `1px solid ${t.borderL}`, borderRadius: 6,
+                  padding: "4px 8px", fontSize: 13,
+                  fontFamily: "ui-monospace, Consolas, monospace",
+                }}
+              >
+                {libraries.map((l) => (
+                  <option key={l.slug} value={l.slug}>
+                    {l.name}{l.active ? " (active)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
         <span style={{ fontSize: 12, color: t.textDim }}>
           Click a cell to edit · delete via the trash icon
         </span>
@@ -383,9 +463,12 @@ function DesktopDatabasePage() {
           {/* Table list */}
           <div style={{ background: t.bg2, border: `1px solid ${t.borderL}`, borderRadius: 8, padding: 8, alignSelf: "start", maxHeight: "75vh", overflowY: "auto" }}>
             {(() => {
-              const DISC = new Set(["authors", "series", "books", "sync_log", "mam_scan_log", "book_series_suggestions", "pen_name_links"]);
-              const disc = tables.filter((x) => DISC.has(x.name));
-              const pipe = tables.filter((x) => !DISC.has(x.name));
+              // v2.17.5: group by backend-provided scope tag instead
+              // of the legacy hardcoded name list. That way new
+              // discovery tables (book_merges, metadata_review_queue,
+              // *_snapshot) automatically land in the right section.
+              const disc = tables.filter((x) => x.scope === "discovery");
+              const pipe = tables.filter((x) => x.scope === "pipeline");
               const renderGroup = (label: string, list: TableEntry[]) => (
                 <>
                   <div style={{ fontSize: 10, fontWeight: 700, color: t.textDim, textTransform: "uppercase", letterSpacing: "0.06em", padding: "8px 10px 4px" }}>{label}</div>
@@ -411,7 +494,9 @@ function DesktopDatabasePage() {
                   ))}
                 </>
               );
-              return <>{renderGroup("Pipeline", pipe)}{disc.length > 0 && <div style={{ borderTop: `1px solid ${t.borderL}`, margin: "6px 0" }} />}{disc.length > 0 && renderGroup("Discovery", disc)}</>;
+              const libLabel = libraries.find((l) => l.slug === library)?.name;
+              const discLabel = libLabel ? `Discovery · ${libLabel}` : "Discovery";
+              return <>{renderGroup("Pipeline", pipe)}{disc.length > 0 && <div style={{ borderTop: `1px solid ${t.borderL}`, margin: "6px 0" }} />}{disc.length > 0 && renderGroup(discLabel, disc)}</>;
             })()}
           </div>
 

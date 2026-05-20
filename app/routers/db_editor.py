@@ -31,6 +31,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel
 
+from app import state
 from app.database import get_db as get_pipeline_db
 from app.discovery.database import get_db as get_discovery_db
 
@@ -59,6 +60,18 @@ _PIPELINE_TABLES: frozenset[str] = frozenset({
     "calibre_additions",
 })
 
+# v2.17.5: expanded to cover four tables Seshat added since the
+# editor was last touched. All four are safe to surface — the existing
+# type-coerce / NOT NULL / FK-aware delete guards apply uniformly.
+#   book_merges            — audit log of dedup choices (winner_id /
+#                            loser_id / loser_snapshot_json)
+#   metadata_review_queue  — pending field-level proposals from
+#                            external sources; FK→books on delete-
+#                            cascade so deleting a book sweeps its
+#                            review rows automatically
+#   books_abs_snapshot     — point-in-time ABS server-of-truth
+#                            snapshot used by the cross-source diff
+#   books_calibre_snapshot — same idea for Calibre
 _DISCOVERY_TABLES: frozenset[str] = frozenset({
     "authors",
     "series",
@@ -67,6 +80,10 @@ _DISCOVERY_TABLES: frozenset[str] = frozenset({
     "mam_scan_log",
     "book_series_suggestions",
     "pen_name_links",
+    "book_merges",
+    "metadata_review_queue",
+    "books_abs_snapshot",
+    "books_calibre_snapshot",
 })
 
 _TABLES = _PIPELINE_TABLES | _DISCOVERY_TABLES
@@ -80,10 +97,36 @@ def _check_table(name: str) -> None:
         )
 
 
-async def _get_db(name: str):
-    """Return the correct database connection for a table."""
+def _check_library_slug(slug: Optional[str]) -> Optional[str]:
+    """Validate a discovery-library slug or fall back to active.
+
+    Returns the slug to pass into `get_discovery_db()` — None means
+    "use the active library" (legacy behavior). A non-empty slug
+    must match one of the libraries currently discovered on this
+    instance; anything else is a 400 so a typo doesn't silently
+    open a fresh empty SQLite at `seshat_<typo>.db`.
+    """
+    if not slug:
+        return None
+    valid = {lib["slug"] for lib in state._discovered_libraries}
+    if slug not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown library slug: {slug!r}",
+        )
+    return slug
+
+
+async def _get_db(name: str, library: Optional[str] = None):
+    """Return the correct database connection for a table.
+
+    Discovery tables route to the per-library DB; the optional
+    `library` arg picks which one. Pipeline tables ignore `library`
+    because they live in the global `seshat.db`.
+    """
     if name in _DISCOVERY_TABLES:
-        return await get_discovery_db()
+        slug = _check_library_slug(library)
+        return await get_discovery_db(slug=slug) if slug else await get_discovery_db()
     return await get_pipeline_db()
 
 
@@ -93,6 +136,10 @@ async def _get_db(name: str):
 class TableEntry(BaseModel):
     name: str
     row_count: int
+    # v2.17.5: "pipeline" = global seshat.db; "discovery" = per-library
+    # seshat_<slug>.db. Frontend uses this to group tables under the
+    # library picker and to know which calls need `?library=`.
+    scope: str
 
 
 class TablesResponse(BaseModel):
@@ -123,37 +170,74 @@ class RowsResponse(BaseModel):
 
 
 @router.get("/tables", response_model=TablesResponse)
-async def list_tables() -> TablesResponse:
-    """List every whitelisted table with its current row count."""
+async def list_tables(
+    library: Optional[str] = Query(
+        None,
+        description="Discovery library slug; counts for discovery "
+                    "tables are taken from this library's DB. Omit "
+                    "to use the active library.",
+    ),
+) -> TablesResponse:
+    """List every whitelisted table with its current row count.
+
+    Each entry carries a `scope` tag — `pipeline` (global seshat.db)
+    or `discovery` (per-library seshat_<slug>.db). When `library` is
+    given, discovery counts come from that library's DB so the UI's
+    library picker reflects the actual row totals for the selected
+    library rather than always showing the active library's counts.
+    """
+    slug = _check_library_slug(library)
     entries: list[TableEntry] = []
-    for table_set, get_db_fn in [
-        (_PIPELINE_TABLES, get_pipeline_db),
-        (_DISCOVERY_TABLES, get_discovery_db),
-    ]:
-        db = await get_db_fn()
-        try:
-            for name in sorted(table_set):
-                try:
-                    cur = await db.execute(f"SELECT COUNT(*) FROM [{name}]")
-                    row = await cur.fetchone()
-                    entries.append(TableEntry(name=name, row_count=int(row[0]) if row else 0))
-                except Exception:
-                    entries.append(TableEntry(name=name, row_count=0))
-        finally:
-            await db.close()
+    pipeline_db = await get_pipeline_db()
+    try:
+        for name in sorted(_PIPELINE_TABLES):
+            try:
+                cur = await pipeline_db.execute(f"SELECT COUNT(*) FROM [{name}]")
+                row = await cur.fetchone()
+                entries.append(TableEntry(
+                    name=name,
+                    row_count=int(row[0]) if row else 0,
+                    scope="pipeline",
+                ))
+            except Exception:
+                entries.append(TableEntry(name=name, row_count=0, scope="pipeline"))
+    finally:
+        await pipeline_db.close()
+
+    discovery_db = (
+        await get_discovery_db(slug=slug) if slug else await get_discovery_db()
+    )
+    try:
+        for name in sorted(_DISCOVERY_TABLES):
+            try:
+                cur = await discovery_db.execute(f"SELECT COUNT(*) FROM [{name}]")
+                row = await cur.fetchone()
+                entries.append(TableEntry(
+                    name=name,
+                    row_count=int(row[0]) if row else 0,
+                    scope="discovery",
+                ))
+            except Exception:
+                entries.append(TableEntry(name=name, row_count=0, scope="discovery"))
+    finally:
+        await discovery_db.close()
+
     entries.sort(key=lambda e: e.name)
     return TablesResponse(tables=entries)
 
 
 @router.get("/table/{name}/schema", response_model=SchemaResponse)
-async def table_schema(name: str) -> SchemaResponse:
+async def table_schema(
+    name: str,
+    library: Optional[str] = Query(None),
+) -> SchemaResponse:
     """Column metadata for a whitelisted table.
 
     Wraps SQLite's PRAGMA table_info; shapes each row into a
     small dataclass rather than returning the 6-tuple raw.
     """
     _check_table(name)
-    db = await _get_db(name)
+    db = await _get_db(name, library)
     try:
         cur = await db.execute(f"PRAGMA table_info([{name}])")
         rows = await cur.fetchall()
@@ -179,6 +263,7 @@ async def list_rows(
     search: Optional[str] = Query(None),
     sort: Optional[str] = Query(None),
     sort_dir: str = Query("asc"),
+    library: Optional[str] = Query(None),
 ) -> RowsResponse:
     """Paginated row list for a whitelisted table.
 
@@ -193,7 +278,7 @@ async def list_rows(
     `sort_dir` is `asc` or `desc`; anything else falls back to asc.
     """
     _check_table(name)
-    db = await _get_db(name)
+    db = await _get_db(name, library)
     try:
         # Column set for the search + sort filters.
         sch = await db.execute(f"PRAGMA table_info([{name}])")
@@ -324,7 +409,11 @@ def _coerce_value(val: Any, col_type: str, col_name: str) -> Any:
 
 
 @router.post("/table/{name}/update")
-async def update_rows(name: str, body: dict = Body(...)) -> dict[str, Any]:
+async def update_rows(
+    name: str,
+    body: dict = Body(...),
+    library: Optional[str] = Query(None),
+) -> dict[str, Any]:
     """Batch-update cells in a whitelisted table.
 
     Body: `{"edits": {"<row_id>": {"<col>": value, ...}, ...}}`
@@ -339,7 +428,7 @@ async def update_rows(name: str, body: dict = Body(...)) -> dict[str, Any]:
     if not edits:
         return {"status": "ok", "updated": 0}
 
-    db = await _get_db(name)
+    db = await _get_db(name, library)
     try:
         col_meta, pk_col = await _column_meta(db, name)
         if pk_col is None:
@@ -388,7 +477,11 @@ async def update_rows(name: str, body: dict = Body(...)) -> dict[str, Any]:
 
 
 @router.post("/table/{name}/add")
-async def add_row(name: str, body: dict = Body(...)) -> dict[str, Any]:
+async def add_row(
+    name: str,
+    body: dict = Body(...),
+    library: Optional[str] = Query(None),
+) -> dict[str, Any]:
     """Insert a new row into a whitelisted table.
 
     Body: `{"values": {"<col>": value, ...}}`
@@ -403,7 +496,7 @@ async def add_row(name: str, body: dict = Body(...)) -> dict[str, Any]:
     if not values:
         raise HTTPException(400, "no values provided")
 
-    db = await _get_db(name)
+    db = await _get_db(name, library)
     try:
         col_meta, _pk = await _column_meta(db, name)
 
@@ -435,7 +528,11 @@ async def add_row(name: str, body: dict = Body(...)) -> dict[str, Any]:
 
 
 @router.delete("/table/{name}/row/{row_id}")
-async def delete_row(name: str, row_id: int) -> dict[str, Any]:
+async def delete_row(
+    name: str,
+    row_id: int,
+    library: Optional[str] = Query(None),
+) -> dict[str, Any]:
     """Delete one row by primary key from a whitelisted table.
 
     Translates FK-constraint violations into a 409 with a readable
@@ -443,7 +540,7 @@ async def delete_row(name: str, row_id: int) -> dict[str, Any]:
     without making the user decode sqlite3's raw error string.
     """
     _check_table(name)
-    db = await _get_db(name)
+    db = await _get_db(name, library)
     try:
         col_meta, pk_col = await _column_meta(db, name)
         if pk_col is None:

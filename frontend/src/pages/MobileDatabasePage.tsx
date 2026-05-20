@@ -21,6 +21,13 @@ import {
 interface TableEntry {
   name: string;
   row_count: number;
+  scope: "pipeline" | "discovery";
+}
+
+interface LibraryEntry {
+  slug: string;
+  name: string;
+  active: boolean;
 }
 
 interface SchemaResponse {
@@ -50,20 +57,47 @@ export default function MobileDatabasePage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [tableSheet, setTableSheet] = useState(false);
+  // v2.17.5 — library picker parity with desktop. `library` = ""
+  // means "no discovery library selected"; falls back to the
+  // active library on first load.
+  const [libraries, setLibraries] = useState<LibraryEntry[]>([]);
+  const [library, setLibrary] = useState<string>("");
+  const [librarySheet, setLibrarySheet] = useState(false);
 
   useEffect(() => {
     api
-      .get<{ tables: TableEntry[] }>("/v1/db/tables")
+      .get<{ libraries: LibraryEntry[] }>("/discovery/libraries")
+      .then((r) => {
+        setLibraries(r.libraries || []);
+        const active = (r.libraries || []).find((l) => l.active);
+        if (active) setLibrary(active.slug);
+      })
+      .catch(() => { /* picker absent; pipeline tables still work */ });
+  }, []);
+
+  useEffect(() => {
+    const qs = library ? `?library=${encodeURIComponent(library)}` : "";
+    api
+      .get<{ tables: TableEntry[] }>(`/v1/db/tables${qs}`)
       .then((r) => setTables(r.tables))
       .catch((e) => setError(String(e)));
-  }, []);
+  }, [library]);
+
+  function libParam(tableName: string, leadChar: "?" | "&"): string {
+    if (!library) return "";
+    const entry = (tables || []).find((x) => x.name === tableName);
+    if (entry?.scope !== "discovery") return "";
+    return `${leadChar}library=${encodeURIComponent(library)}`;
+  }
 
   const loadTable = async (name: string) => {
     setSelected(name);
     setSearch("");
     setPage(1);
     try {
-      const s = await api.get<SchemaResponse>(`/v1/db/table/${name}/schema`);
+      const s = await api.get<SchemaResponse>(
+        `/v1/db/table/${name}/schema${libParam(name, "?")}`,
+      );
       setSchema(s);
     } catch (e) {
       setError(String(e));
@@ -78,6 +112,8 @@ export default function MobileDatabasePage() {
       per_page: String(PER_PAGE),
     });
     if (search) params.set("search", search);
+    const entry = (tables || []).find((x) => x.name === selected);
+    if (library && entry?.scope === "discovery") params.set("library", library);
     api
       .get<RowsResponse>(`/v1/db/table/${selected}?${params}`)
       .then((r) => {
@@ -89,7 +125,8 @@ export default function MobileDatabasePage() {
         setError(String(e));
         setLoading(false);
       });
-  }, [selected, page, search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, page, search, library]);
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
@@ -98,12 +135,14 @@ export default function MobileDatabasePage() {
   const deleteRow = async (rowKey: unknown) => {
     if (!confirm(`Delete row ${rowKey} from ${selected}?`)) return;
     try {
-      await api.del(`/v1/db/table/${selected}/row/${rowKey}`);
+      await api.del(`/v1/db/table/${selected}/row/${rowKey}${libParam(selected, "?")}`);
       const params = new URLSearchParams({
         page: String(page),
         per_page: String(PER_PAGE),
       });
       if (search) params.set("search", search);
+      const entry = (tables || []).find((x) => x.name === selected);
+      if (library && entry?.scope === "discovery") params.set("library", library);
       const r = await api.get<RowsResponse>(
         `/v1/db/table/${selected}?${params}`,
       );
@@ -140,15 +179,24 @@ export default function MobileDatabasePage() {
         </div>
       )}
 
-      {/* Table selector */}
-      <MobileChip onClick={() => setTableSheet(true)}>
-        Table: {selected || "(pick one)"}
-        {selected && tables && (
-          <span style={{ color: t.tg, marginLeft: 4 }}>
-            · {tables.find((tab) => tab.name === selected)?.row_count ?? "?"} rows
-          </span>
+      {/* Library + table selectors. The library chip only appears
+          when at least one library was discovered — single-library
+          installs see no extra UI. */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {libraries.length > 0 && (
+          <MobileChip onClick={() => setLibrarySheet(true)}>
+            Library: {libraries.find((l) => l.slug === library)?.name || "(default)"}
+          </MobileChip>
         )}
-      </MobileChip>
+        <MobileChip onClick={() => setTableSheet(true)}>
+          Table: {selected || "(pick one)"}
+          {selected && tables && (
+            <span style={{ color: t.tg, marginLeft: 4 }}>
+              · {tables.find((tab) => tab.name === selected)?.row_count ?? "?"} rows
+            </span>
+          )}
+        </MobileChip>
+      </div>
 
       {selected && (
         <>
@@ -321,12 +369,39 @@ export default function MobileDatabasePage() {
             <MobileRow
               key={tab.name}
               title={tab.name}
-              subtitle={`${tab.row_count.toLocaleString()} rows`}
+              subtitle={
+                `${tab.row_count.toLocaleString()} rows · ${tab.scope}`
+              }
               active={selected === tab.name}
               hideChevron
               onClick={() => {
                 loadTable(tab.name);
                 setTableSheet(false);
+              }}
+            />
+          ))}
+        </div>
+      </MobileSheet>
+
+      {/* Library picker sheet */}
+      <MobileSheet
+        open={librarySheet}
+        onClose={() => setLibrarySheet(false)}
+        title="Pick a library"
+        height="auto"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {libraries.map((l) => (
+            <MobileRow
+              key={l.slug}
+              title={l.name}
+              subtitle={l.active ? "active" : l.slug}
+              active={library === l.slug}
+              hideChevron
+              onClick={() => {
+                setLibrary(l.slug);
+                setSelected("");
+                setLibrarySheet(false);
               }}
             />
           ))}
