@@ -214,6 +214,39 @@ class TestParseErrors:
         with pytest.raises(ParseError, match="ProductGrid marker"):
             parse_allbooks_html(html)
 
+    def test_missing_marker_raises_soft_block_subclass(self):
+        """v2.20.2 — when the ProductGrid marker is absent, the parser
+        raises the narrower `SoftBlockSuspectedError` subclass so the
+        source layer can trip the IP-level cooldown. A bare
+        `ParseError` (marker present but content malformed) is treated
+        as a one-off parser failure, not a soft-block."""
+        from app.discovery.sources.amazon_widget_parser import (
+            SoftBlockSuspectedError,
+        )
+        html = "<html><body>no widgets here</body></html>"
+        with pytest.raises(SoftBlockSuspectedError):
+            parse_allbooks_html(html)
+        # And SoftBlockSuspectedError IS a ParseError, so existing
+        # `except ParseError` catches still work.
+        assert issubclass(SoftBlockSuspectedError, ParseError)
+
+    def test_malformed_content_is_plain_parse_error_not_soft_block(self):
+        """Marker present but content malformed = real parser break,
+        NOT a soft-block. The bare `ParseError` is raised so the source
+        layer treats it as a one-off and doesn't cooldown."""
+        from app.discovery.sources.amazon_widget_parser import (
+            SoftBlockSuspectedError,
+        )
+        html = '"widgetType":"ProductGrid","content":{garbage}'
+        try:
+            parse_allbooks_html(html)
+        except SoftBlockSuspectedError:
+            raise AssertionError(
+                "marker-present case should not raise SoftBlockSuspectedError"
+            )
+        except ParseError:
+            pass  # expected
+
     def test_content_brace_unbalanced(self):
         html = '"widgetType":"ProductGrid","content":{"foo":"bar"'  # no closing }
         with pytest.raises(ParseError):

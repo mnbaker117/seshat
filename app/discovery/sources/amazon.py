@@ -60,6 +60,7 @@ from app.discovery.sources.amazon_widget_parser import (
     FILTER_TO_BINDING,
     ParseError,
     Product,
+    SoftBlockSuspectedError,
     parse_allbooks_html,
 )
 
@@ -429,6 +430,22 @@ class AmazonSource(BaseSource):
             )
         try:
             return parse_allbooks_html(body)
+        except SoftBlockSuspectedError as exc:
+            # v2.20.2 — 200 OK + non-thin body + no ProductGrid marker
+            # almost always means Amazon served a CAPTCHA / soft-block
+            # page that snuck past the size-based thin-body check at
+            # line 420. The 50KB threshold catches the small bare-page
+            # variant; this catches the full-chrome variant. Trip the
+            # IP-level cooldown so subsequent scans short-circuit
+            # instead of cascading into the same wall.
+            record_amazon_soft_block(
+                f"allbooks GET {url} returned 200 with "
+                f"{len(body)}-byte body but no ProductGrid marker "
+                f"(suspected CAPTCHA / soft-block)"
+            )
+            raise _AllBooksFetchError(
+                f"soft-block suspected: {exc}"
+            ) from exc
         except ParseError as exc:
             raise _AllBooksFetchError(f"parse error: {exc}") from exc
 

@@ -130,6 +130,25 @@ class ParseError(ValueError):
     structure. Caller should log and treat as empty result."""
 
 
+class SoftBlockSuspectedError(ParseError):
+    """A v2.20.2 narrower subclass: the page didn't contain the
+    ProductGrid marker AT ALL, which means we weren't served an
+    author-store page in the first place — most likely a CAPTCHA
+    interstitial or other Akamai soft-block response that came
+    through with a 200 OK + non-trivial body (so the size-based
+    thin-body check in the source layer didn't catch it).
+
+    The source layer (`_fetch_allbooks` in `sources/amazon.py`)
+    upgrades this signal to a soft-block cooldown — same treatment
+    as a 429 or sub-50KB response — so subsequent author scans
+    short-circuit instead of cascading into the same wall.
+
+    A plain `ParseError` (marker present but `content` malformed)
+    is treated as a one-off parser failure, not a soft-block, since
+    it suggests Amazon shipped an HTML schema change rather than
+    blocked us."""
+
+
 def parse_allbooks_html(html: str) -> AllBooksPageData:
     """Parse the SSR HTML of /stores/author/{id}/allbooks.
 
@@ -266,7 +285,14 @@ def _extract_product_grid_content(html: str) -> dict:
     """
     grid_pos = html.find(_PRODUCT_GRID_MARKER)
     if grid_pos < 0:
-        raise ParseError(
+        # v2.20.2 — surface a soft-block-suspected subclass so the
+        # source layer can trip the IP-level cooldown. The marker is
+        # what tells us we're on the author-store page in the first
+        # place; its absence almost always means we were served a
+        # CAPTCHA / soft-block response that snuck past the size-based
+        # thin-body check (Amazon's soft-block pages CAN exceed 50KB
+        # when they bundle the full site chrome).
+        raise SoftBlockSuspectedError(
             "ProductGrid marker not found in allbooks HTML — page may be "
             "a non-author-store, a Captcha shim, or a thin-body soft-block"
         )

@@ -1034,3 +1034,34 @@ class TestSoftBlockRecording:
         result = await source.get_author_books("B001IGFHW6")
         assert result is None
         assert resolver_module.is_amazon_blocked()
+
+    async def test_allbooks_full_chrome_captcha_records_block(self):
+        """v2.20.2 — 200 OK + non-thin body (>=50KB) but no ProductGrid
+        marker is the full-chrome CAPTCHA / soft-block variant that
+        snuck past the size-based thin-body check. The parser raises
+        SoftBlockSuspectedError and the source records the cooldown."""
+        # 60KB of non-marker HTML — passes the 50KB thin-body gate but
+        # has no ProductGrid widget. This is what Mark hit on the
+        # ~15-minutes-after-429 scan attempt.
+        captcha_html = (
+            "<html><head><title>Robot Check</title></head><body>"
+            "<form action='/errors/validateCaptcha'>"
+            + ("<div>" + "x" * 100 + "</div>") * 500
+            + "</form></body></html>"
+        )
+        assert len(captcha_html) >= 50_000  # passes thin-body gate
+        session = MockSession(get_routes={
+            "/stores/author/": MockResponse(200, captcha_html),
+        })
+        source = AmazonSource(burst_delay_s=0.0)
+        source._session = session
+        source._session_init_attempted = True
+
+        # Reset the module-level block from prior tests in the class.
+        resolver_module._blocked_until = 0.0
+
+        result = await source.get_author_books("B001IGFHW6")
+        assert result is None
+        assert resolver_module.is_amazon_blocked(), (
+            "ProductGrid-marker-missing soft-block must trip the IP cooldown"
+        )
